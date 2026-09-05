@@ -1,0 +1,30 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "./src",
+    "outDir": "./dist"
+  },
+  "include": [
+    "src/**/*"
+  ],
+  "exclude": [
+    "src/**/*.test.ts"
+  ],
+  "references": [
+    {
+      "path": "../core"
+    },
+    {
+      "path": "../infra"
+    },
+    {
+      "path": "../adapters"
+    },
+    {
+      "path": "../server"
+    },
+    {
+      "path": "../mcp"
+    }
+  ]
+}

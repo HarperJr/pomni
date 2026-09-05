@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "pomni": {
+      "command": "node",
+      "args": ["packages/cli/bin/pomni.mjs", "mcp"]
+    }
+  }
+}

@@ -1,0 +1,354 @@
+import type { ZodType, ZodTypeDef } from 'zod';
+import type { Capability, CapabilityMap } from '../domain/capability.js';
+import type { Credential } from '../domain/credential.js';
+import type { VcsInfo } from '../domain/repo.js';
+import type { Artifact, PipelineFilter, PipelineRun, PipelineStep } from '../domain/pipeline.js';
+import type { Run, RunFilter, TestResult } from '../domain/run.js';
+
+/**
+ * Ports: the only things the application layer is allowed to depend on.
+ * Implementations live in @pomni/infra and @pomni/adapters and are injected at
+ * composition time (packages/cli/src/container.ts).
+ */
+
+// ---------------------------------------------------------------------------
+// Doc store
+// ---------------------------------------------------------------------------
+
+export interface DocRef<T> {
+  data: T;
+  /** Hash of the file bytes. Derived, never stored inside the document. */
+  rev: string;
+}
+
+export interface WriteOptions {
+  /** Fail with StaleRevisionError unless the file still has this rev. */
+  ifMatch?: string;
+  /** Fail with ConflictError if the file already exists. */
+  mustNotExist?: boolean;
+}
+
+export interface DocStore {
+  root: string;
+  /**
+   * The third type argument is the schema's *input* type, which differs from its output
+   * whenever the schema uses `.default()`. Widening it here lets callers pass a schema
+   * with defaults and still get the parsed (fully populated) type back.
+   */
+  read<T>(relPath: string, schema: ZodType<T, ZodTypeDef, unknown>): Promise<DocRef<T> | null>;
+  /** Returns the new rev. Writes are atomic (temp file + rename). */
+  write<T>(relPath: string, data: T, options?: WriteOptions): Promise<string>;
+  delete(relPath: string): Promise<void>;
+  /** File names (not paths) directly inside relDir. Empty array if it does not exist. */
+  list(relDir: string): Promise<string[]>;
+  exists(relPath: string): Promise<boolean>;
+  removeDir(relDir: string): Promise<void>;
+  ensureDir(relDir: string): Promise<void>;
+  absolute(relPath: string): string;
+}
+
+// ---------------------------------------------------------------------------
+// Filesystem probing (reading the user's machine, outside .pomni)
+// ---------------------------------------------------------------------------
+
+export interface DirEntry {
+  name: string;
+  path: string;
+  isDirectory: boolean;
+  /** Contains a .git directory — worth surfacing in a directory picker. */
+  isGitRepo: boolean;
+}
+
+export interface FsProbe {
+  exists(absPath: string): Promise<boolean>;
+  isDirectory(absPath: string): Promise<boolean>;
+  readText(absPath: string): Promise<string | null>;
+  /** Shallow listing, directories first, hidden entries omitted unless asked. */
+  listDir(absPath: string, options?: { includeHidden?: boolean }): Promise<DirEntry[]>;
+  /** Names of entries directly inside absPath. Cheap existence checks for detectors. */
+  listNames(absPath: string): Promise<string[]>;
+  remove(absPath: string): Promise<void>;
+  /** Filesystem roots: drive letters on Windows, '/' elsewhere. */
+  roots(): Promise<string[]>;
+  home(): string;
+  resolve(input: string): string;
+}
+
+// ---------------------------------------------------------------------------
+// Git
+// ---------------------------------------------------------------------------
+
+export interface GitAuth {
+  username: string;
+  secret: string;
+}
+
+export interface CloneOptions {
+  url: string;
+  dir: string;
+  ref?: string;
+  auth?: GitAuth;
+  depth?: number;
+  onProgress?: (line: string) => void;
+}
+
+export interface GitPort {
+  isAvailable(): Promise<boolean>;
+  isRepo(dir: string): Promise<boolean>;
+  clone(options: CloneOptions): Promise<void>;
+  /** Null when dir is not a git repo. */
+  info(dir: string): Promise<VcsInfo | null>;
+  fetch(dir: string, auth?: GitAuth): Promise<void>;
+  /** Verify credentials against a remote without cloning. */
+  testRemote(url: string, auth?: GitAuth): Promise<void>;
+  /** Files changed in the working copy, as `{ path, change }`. Empty when clean. */
+  changes(dir: string): Promise<Array<{ path: string; change: string }>>;
+}
+
+// ---------------------------------------------------------------------------
+// Forge detection
+// ---------------------------------------------------------------------------
+
+/**
+ * Works out which forge hosts a url when the hostname does not say. Only consulted for
+ * hosts that are not one of the well-known ones, and always allowed to answer 'generic'.
+ */
+export interface ProviderProbe {
+  probe(url: string): Promise<'github' | 'gitlab' | 'bitbucket' | 'generic'>;
+}
+
+// ---------------------------------------------------------------------------
+// Credentials
+// ---------------------------------------------------------------------------
+
+export interface CredentialStore {
+  /** Resolve to a token. Null when the source is configured but empty. */
+  resolve(credential: Credential): Promise<string | null>;
+  /** Only meaningful for `file` secret refs; throws otherwise. */
+  put(credentialId: string, secret: string): Promise<void>;
+  forget(credentialId: string): Promise<void>;
+}
+
+// ---------------------------------------------------------------------------
+// Stack detection
+// ---------------------------------------------------------------------------
+
+export interface DetectionResult {
+  adapter: string;
+  detected: string[];
+  capabilities: CapabilityMap;
+}
+
+export interface StackDetector {
+  name: string;
+  /** Null when this detector does not recognise the directory. */
+  detect(dir: string, fs: FsProbe): Promise<DetectionResult | null>;
+}
+
+export interface StackDetection {
+  detect(dir: string): Promise<DetectionResult | null>;
+}
+
+// ---------------------------------------------------------------------------
+// Process execution
+// ---------------------------------------------------------------------------
+
+export interface ExecRequest {
+  /** Shell command line, exactly as declared on the capability. */
+  cmd: string;
+  cwd: string;
+  env?: Record<string, string>;
+  timeoutMs?: number;
+  /** Called once the child exists, so a caller can record the pid and cancel later. */
+  onStart?: (pid: number) => void;
+  /** stdout and stderr interleaved in arrival order. */
+  onOutput?: (chunk: string) => void;
+  signal?: AbortSignal;
+}
+
+export interface ExecResult {
+  exitCode: number | null;
+  timedOut: boolean;
+  cancelled: boolean;
+  pid: number | null;
+}
+
+export interface Executor {
+  run(request: ExecRequest): Promise<ExecResult>;
+  /** Kill a process tree started by any Pomni process, by pid. */
+  kill(pid: number): Promise<boolean>;
+  /** Whether a command's executable resolves on PATH — used by `repo doctor`. */
+  which(command: string, cwd: string): Promise<string | null>;
+}
+
+// ---------------------------------------------------------------------------
+// Run store
+// ---------------------------------------------------------------------------
+
+export interface RunStore {
+  insert(run: Run): Promise<void>;
+  update(id: string, patch: Partial<Run>): Promise<void>;
+  get(id: string): Promise<Run | null>;
+  list(filter: RunFilter): Promise<Run[]>;
+  /** Most recent run per (repo, capability) — what a gate consults. */
+  latest(projectId: string, capability: string): Promise<Run[]>;
+  putTestResults(runId: string, results: TestResult[]): Promise<void>;
+  testResults(runId: string): Promise<TestResult[]>;
+  close(): void;
+}
+
+export * from './llm.js';
+
+// ---------------------------------------------------------------------------
+// Pipeline store
+// ---------------------------------------------------------------------------
+
+export interface PipelineStore {
+  insertRun(run: PipelineRun): Promise<void>;
+  updateRun(id: string, run: PipelineRun): Promise<void>;
+  getRun(id: string): Promise<PipelineRun | null>;
+  listRuns(filter: PipelineFilter): Promise<PipelineRun[]>;
+  insertStep(step: PipelineStep): Promise<void>;
+  updateStep(id: string, step: PipelineStep): Promise<void>;
+  steps(runId: string): Promise<PipelineStep[]>;
+  putArtifacts(artifacts: Artifact[]): Promise<void>;
+  artifacts(runId: string): Promise<Artifact[]>;
+  close(): void;
+}
+
+// ---------------------------------------------------------------------------
+// Advisory lock
+// ---------------------------------------------------------------------------
+
+/**
+ * Held only for the handful of operations that write more than one file — creating an item
+ * bumps a counter in `project.yaml` as well as writing the item. Single-file writes rely on
+ * `rev` instead and take no lock at all.
+ */
+export interface Lock {
+  withLock<T>(name: string, fn: () => Promise<T>): Promise<T>;
+}
+
+// ---------------------------------------------------------------------------
+// Ambient
+// ---------------------------------------------------------------------------
+
+export interface Clock {
+  now(): Date;
+  iso(): string;
+}
+
+export interface Logger {
+  debug(message: string, meta?: unknown): void;
+  info(message: string, meta?: unknown): void;
+  warn(message: string, meta?: unknown): void;
+  error(message: string, meta?: unknown): void;
+}
+
+export type PomniEvent =
+  | { type: 'project.created'; projectId: string }
+  | { type: 'project.updated'; projectId: string }
+  | { type: 'project.removed'; projectId: string }
+  | { type: 'repo.added'; projectId: string; repoId: string }
+  | { type: 'repo.updated'; projectId: string; repoId: string; status: string }
+  | { type: 'repo.removed'; projectId: string; repoId: string }
+  | { type: 'repo.progress'; projectId: string; repoId: string; line: string }
+  | { type: 'run.started'; projectId: string; repoId: string; runId: string; capability: string }
+  | { type: 'run.output'; projectId: string; runId: string; chunk: string }
+  | { type: 'workflow.changed'; workflowId: string }
+  | { type: 'provider.changed' }
+  | { type: 'pipeline.started'; runId: string; projectId: string; workflowId: string; task: string }
+  | {
+      type: 'pipeline.step.started';
+      runId: string;
+      stepId: string;
+      parentStepId: string | null;
+      agentId: string;
+      agentName: string;
+      role: string;
+      model: string;
+      depth: number;
+      task: string;
+    }
+  | { type: 'pipeline.step.output'; runId: string; stepId: string; chunk: string }
+  | {
+      type: 'pipeline.step.finished';
+      runId: string;
+      stepId: string;
+      agentId: string;
+      status: string;
+      summary: string;
+    }
+  | {
+      type: 'pipeline.flow';
+      runId: string;
+      fromStepId: string;
+      fromAgentId: string;
+      toAgentId: string;
+      task: string;
+    }
+  | { type: 'pipeline.cancelling'; runId: string }
+  | {
+      type: 'pipeline.finished';
+      runId: string;
+      projectId: string;
+      status: string;
+      summary: string;
+    }
+  | { type: 'item.created'; projectId: string; itemId: string }
+  | { type: 'item.changed'; projectId: string; itemId: string }
+  | { type: 'item.transitioned'; projectId: string; itemId: string; from: string; to: string }
+  | { type: 'item.removed'; projectId: string; itemId: string }
+  | {
+      type: 'run.finished';
+      projectId: string;
+      repoId: string;
+      runId: string;
+      capability: string;
+      status: string;
+      summary: string | null;
+    };
+
+export interface EmittedEvent {
+  ts: string;
+  /**
+   * `remote` marks an event replayed from another process via `.pomni/events.ndjson`.
+   * The file sink ignores those, which is what stops the two from looping.
+   */
+  origin: 'local' | 'remote';
+}
+
+export interface EventBus {
+  emit(event: PomniEvent & { ts?: string }): void;
+  /** Replay an event that originated in another process. Never written back to the file. */
+  emitRemote(event: PomniEvent & { ts: string }): void;
+  subscribe(handler: (event: PomniEvent & EmittedEvent) => void): () => void;
+}
+
+/**
+ * Only these reach `.pomni/events.ndjson`. Output chunks are deliberately excluded — the
+ * per-run log file is the output store, and duplicating it would make the stream unusable.
+ */
+export const DURABLE_EVENT_TYPES: ReadonlySet<string> = new Set([
+  'project.created',
+  'project.updated',
+  'project.removed',
+  'repo.added',
+  'repo.updated',
+  'repo.removed',
+  'run.started',
+  'run.finished',
+  'workflow.changed',
+  'provider.changed',
+  'pipeline.started',
+  'pipeline.step.started',
+  'pipeline.step.finished',
+  'pipeline.flow',
+  'pipeline.finished',
+  'item.created',
+  'item.changed',
+  'item.transitioned',
+  'item.removed',
+]);
+
+export type { Capability, CapabilityMap, Run, RunFilter, TestResult };

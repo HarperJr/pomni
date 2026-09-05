@@ -1,0 +1,17 @@
+{
+  "name": "@pomni/infra",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": "./dist/index.js",
+    "./askpass": "./askpass.mjs"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.124.0",
+    "@pomni/core": "*",
+    "yaml": "^2.6.1"
+  }
+}

@@ -1,0 +1,156 @@
+import { access } from 'node:fs/promises';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import fastifyStatic from '@fastify/static';
+import { ValidationError, type PomniContainer } from '@pomni/core';
+import Fastify, { type FastifyInstance } from 'fastify';
+import { registerErrorHandler, sendNotFound } from './errors.js';
+import { credentialRoutes } from './routes/credentials.js';
+import { projectRoutes } from './routes/projects.js';
+import { itemRoutes } from './routes/items.js';
+import { repoRoutes } from './routes/repos.js';
+import { runRoutes } from './routes/runs.js';
+import { discoveryRoutes } from './routes/discovery.js';
+import { pipelineRoutes } from './routes/pipelines.js';
+import { workflowRoutes } from './routes/workflows.js';
+import { systemRoutes } from './routes/system.js';
+
+export interface ServeOptions {
+  host?: string;
+  port?: number;
+  /** Required when host is not loopback. */
+  token?: string;
+  /** Directory holding the built SPA. Defaults to packages/web/dist. */
+  webRoot?: string;
+  logLevel?: 'fatal' | 'error' | 'warn' | 'info' | 'debug' | 'trace' | 'silent';
+}
+
+export interface RunningServer {
+  url: string;
+  address: string;
+  port: number;
+  app: FastifyInstance;
+  close(): Promise<void>;
+}
+
+const LOOPBACK = new Set(['127.0.0.1', '::1', 'localhost']);
+
+export function isLoopback(host: string): boolean {
+  return LOOPBACK.has(host);
+}
+
+export async function createApp(
+  container: PomniContainer,
+  options: ServeOptions = {},
+): Promise<FastifyInstance> {
+  const app = Fastify({ logger: { level: options.logLevel ?? 'warn' } });
+
+  registerErrorHandler(app);
+
+  // Loopback-only by default, so no CSRF surface and no cookie auth. A token is required
+  // the moment the server is reachable from another machine.
+  if (options.token) {
+    app.addHook('onRequest', async (request, reply) => {
+      if (!request.url.startsWith('/api/')) return;
+      const header = request.headers.authorization ?? '';
+      const provided = header.startsWith('Bearer ') ? header.slice(7) : null;
+      if (provided !== options.token) {
+        reply.code(401).type('application/problem+json').send({
+          type: 'about:blank',
+          title: 'unauthorized',
+          status: 401,
+        });
+      }
+    });
+  }
+
+  // The SPA is served from the same origin in production. In dev it runs on the Vite port,
+  // so allow that one explicitly rather than opening CORS generally.
+  app.addHook('onRequest', async (request, reply) => {
+    const origin = request.headers.origin;
+    if (origin && /^http:\/\/(localhost|127\.0\.0\.1):\d+$/.test(origin)) {
+      reply.header('Access-Control-Allow-Origin', origin);
+      reply.header('Access-Control-Allow-Headers', 'content-type, authorization, if-match');
+      reply.header('Access-Control-Allow-Methods', 'GET, POST, PATCH, DELETE, OPTIONS');
+      reply.header('Access-Control-Expose-Headers', 'etag');
+    }
+    if (request.method === 'OPTIONS' && request.url.startsWith('/api/')) {
+      reply.code(204).send();
+    }
+  });
+
+  await systemRoutes(app, container);
+  await projectRoutes(app, container);
+  await repoRoutes(app, container);
+  await credentialRoutes(app, container);
+  await runRoutes(app, container);
+  await itemRoutes(app, container);
+  await workflowRoutes(app, container);
+  await discoveryRoutes(app, container);
+  await pipelineRoutes(app, container);
+
+  const webRoot = options.webRoot ?? defaultWebRoot();
+  const hasWeb = await exists(join(webRoot, 'index.html'));
+  if (hasWeb) {
+    await app.register(fastifyStatic, { root: webRoot });
+  }
+
+  // One handler only — Fastify rejects a second registration for the same prefix.
+  app.setNotFoundHandler((request, reply) => {
+    if (!hasWeb || request.url.startsWith('/api/')) {
+      sendNotFound(request, reply);
+      return;
+    }
+    // SPA fallback: any non-API path renders the app shell and the router takes over.
+    reply.sendFile('index.html');
+  });
+
+  return app;
+}
+
+export async function startServer(
+  container: PomniContainer,
+  options: ServeOptions = {},
+): Promise<RunningServer> {
+  const host = options.host ?? '127.0.0.1';
+  const port = options.port ?? 7777;
+
+  if (!isLoopback(host) && !options.token) {
+    throw new ValidationError(
+      `refusing to listen on ${host} without --token: a non-loopback server must be authenticated`,
+    );
+  }
+
+  const app = await createApp(container, options);
+  await app.listen({ host, port });
+
+  const address = app.addresses()[0];
+  const actualPort = address?.port ?? port;
+  const displayHost = isLoopback(host) ? 'localhost' : host;
+
+  return {
+    app,
+    address: host,
+    port: actualPort,
+    url: `http://${displayHost}:${actualPort}`,
+    close: () => app.close(),
+  };
+}
+
+function defaultWebRoot(): string {
+  // dist/index.js -> packages/server -> packages -> repo root
+  const here = dirname(fileURLToPath(import.meta.url));
+  return resolve(here, '..', '..', 'web', 'dist');
+}
+
+async function exists(path: string): Promise<boolean> {
+  try {
+    await access(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export { registerErrorHandler };
+export type { Problem } from './errors.js';

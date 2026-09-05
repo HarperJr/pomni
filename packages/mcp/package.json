@@ -1,0 +1,20 @@
+{
+  "name": "@pomni/mcp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "pomni-mcp": "./bin/pomni-mcp.mjs"
+  },
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.13.0",
+    "@pomni/core": "*",
+    "zod": "^3.24.1",
+    "@pomni/infra": "*"
+  }
+}

@@ -1,0 +1,40 @@
+{
+  "name": "pomni",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "AI-driven, project-oriented fullstack runtime",
+  "engines": {
+    "node": ">=20.11"
+  },
+  "workspaces": [
+    "packages/core",
+    "packages/infra",
+    "packages/adapters",
+    "packages/cli",
+    "packages/mcp",
+    "packages/server",
+    "packages/web"
+  ],
+  "bin": {
+    "pomni": "packages/cli/bin/pomni.mjs"
+  },
+  "scripts": {
+    "build": "tsc --build",
+    "typecheck": "tsc --build --force && tsc -p packages/web --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "build:web": "npm run build --workspace @pomni/web",
+    "dev:web": "npm run dev --workspace @pomni/web",
+    "pomni": "node packages/cli/bin/pomni.mjs",
+    "serve": "node packages/cli/bin/pomni.mjs serve --open",
+    "clean": "tsc --build --clean",
+    "typecheck:web": "tsc -p packages/web --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}

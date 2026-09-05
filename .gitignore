@@ -1,0 +1,18 @@
+node_modules/
+dist/
+*.tsbuildinfo
+.DS_Store
+Thumbs.db
+
+# Pomni runtime state (see docs/DATA-MODEL.md)
+.pomni/workspace/
+.pomni/runs/
+.pomni/sessions/
+.pomni/events.ndjson
+.pomni/.lock
+.pomni/pomni.db*
+.pomni/credentials.secret.json
+
+# local env
+.env
+.env.local
