@@ -69,7 +69,15 @@ export interface StartRunResult {
 }
 
 /** How many delegate-and-review rounds one orchestrator gets before we stop it. */
-const MAX_ROUNDS = 8;
+/**
+ * How many delegate-and-review rounds one orchestrator gets.
+ *
+ * Lowered from eight after measuring: rounds seven and eight were spent on second and
+ * third review passes that changed nothing, and one such run cost $23 against $0.09 for
+ * the same class of task done in six steps. A tighter budget is also a clearer
+ * instruction — decide, rather than keep looking.
+ */
+const MAX_ROUNDS = 5;
 /**
  * How many times one orchestrator may delegate to the same agent in a run.
  *
@@ -78,7 +86,7 @@ const MAX_ROUNDS = 8;
  * three, and ran for 107 minutes without an answer. A cap converts that from an expensive
  * loop into a plain refusal the orchestrator has to deal with.
  */
-const MAX_PER_AGENT = 3;
+const MAX_PER_AGENT = 2;
 
 /** What a resumed run already knows: answers by delegation, and how often each agent ran. */
 interface Seed {
@@ -87,6 +95,15 @@ interface Seed {
 }
 /** How many agents one round may run at once. */
 const MAX_PARALLEL = 4;
+
+/**
+ * How many agent sessions one run may open in total.
+ *
+ * The round and per-agent caps bound the shape of the tree; this bounds its size. A run
+ * that has opened this many sessions has either done the work or is not going to, and
+ * the seventeen-step run that cost $23 is the case this exists to stop.
+ */
+const MAX_SESSIONS = 12;
 /**
  * How many times one agent may hand a problem up before it has to answer with what it has.
  *
@@ -893,6 +910,15 @@ export class PipelineService {
               const target = findAgent(workflow, delegation.agent);
               if (!target || !roster.some((candidate) => candidate.id === target.id)) {
                 return `### ${delegation.agent}\n\nThere is no such agent in your roster. Delegate only to the ids listed above.`;
+              }
+
+              const opened = [...useCount.values()].reduce((sum, n) => sum + n, 0);
+              if (opened >= MAX_SESSIONS) {
+                return (
+                  `### ${target.name} (\`${target.id}\`) — no` +
+                  `\n\nThis run has already opened ${MAX_SESSIONS} agent sessions, which is all it` +
+                  ' gets. Answer with what you have, and say plainly what is unfinished.'
+                );
               }
 
               if ((useCount.get(target.id) ?? 0) >= MAX_PER_AGENT) {

@@ -341,6 +341,11 @@ You do not do the work. To have something done, reply with **only** a fenced jso
 {"delegate": [{"agent": "agent-id", "task": "what you want done, in full"}]}
 \`\`\`
 
+Match the team to the change before you start. Every agent you add is a whole session that
+reads the code again from nothing: a one-file fix wants one author and one check, not the
+roster. Measured here, the same task cost $0.09 done by six steps and $23 done by seventeen.
+Add an agent when you cannot answer without it, not because it exists.
+
 Several entries run in parallel, so ask for everything that does not depend on something
 else at once. Every agent is already given the run's brief, so write only what *this* agent
 must do and what it needs that the brief does not say. Do not restate the background. It
