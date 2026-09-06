@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import {
+  ACTIVE_STATUSES,
   EstimateSchema,
   ItemStatusSchema,
   ItemTypeSchema,
@@ -38,6 +39,11 @@ const TransitionBody = z.object({
   to: ItemStatusSchema,
   reason: z.string().optional(),
   force: z.boolean().optional(),
+});
+
+const ChecklistBody = z.object({
+  key: z.string().min(1),
+  ticked: z.boolean(),
 });
 
 const ListQuery = z.object({
@@ -135,6 +141,20 @@ export async function itemRoutes(app: FastifyInstance, container: PomniContainer
     }),
   );
 
+  app.post<{ Params: { id: string; itemId: string } }>(
+    '/api/projects/:id/items/:itemId/checklist',
+    async (request) => {
+      const body = ChecklistBody.parse(request.body);
+      const item = await container.backlog.tickChecklist(
+        request.params.id,
+        request.params.itemId,
+        body.key,
+        body.ticked,
+      );
+      return { item };
+    },
+  );
+
   app.delete<{ Params: { id: string; itemId: string } }>(
     '/api/projects/:id/items/:itemId',
     async (request, reply) => {
@@ -157,12 +177,19 @@ export async function itemRoutes(app: FastifyInstance, container: PomniContainer
   app.get<{ Params: { id: string } }>('/api/projects/:id/items-next', async (request) => ({
     item: await container.backlog.next(request.params.id),
   }));
+
+  app.get<{ Params: { id: string } }>('/api/projects/:id/items-flow', async (request) => ({
+    flow: await container.backlog.flow(request.params.id),
+  }));
 }
 
 function parseStatus(value: string | undefined): ItemStatus[] | ItemStatus | undefined {
   if (!value) return undefined;
   if (value === 'active') {
-    return ['backlog', 'specced', 'ready', 'in_progress', 'in_review', 'blocked'];
+    // The built-in vocabulary's active statuses. A project's own flow can name others, but
+    // this alias is a convenience for the common case, not a per-project computation — doing
+    // that would mean fetching the project's flow on every list call.
+    return [...ACTIVE_STATUSES];
   }
   const parsed = ItemStatusSchema.safeParse(value);
   return parsed.success ? parsed.data : undefined;

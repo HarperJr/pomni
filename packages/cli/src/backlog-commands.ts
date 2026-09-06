@@ -1,14 +1,18 @@
 import { spawn } from 'node:child_process';
 import {
   BOARD_COLUMNS,
-  ItemStatusSchema,
+  describeUnmetList,
+  hasRequirements,
   layout,
+  stateLabel,
   type BacklogItem,
   type Estimate,
   type ItemStatus,
   type ItemType,
   type PomniContainer,
   type Priority,
+  type Requirements,
+  type TransitionOffer,
 } from '@pomni/core';
 import type { Command } from 'commander';
 import { style, table } from './format.js';
@@ -132,7 +136,7 @@ export function registerBacklogCommands(
 
       console.log(`${style.bold(item.id)}  ${item.title}`);
       console.log(
-        `${statusText(item.status)}  ${item.priority}  ${item.type}${
+        `${statusText(item.status, item.flowState?.label)}  ${item.priority}  ${item.type}${
           item.estimate ? `  ${item.estimate}` : ''
         }`,
       );
@@ -149,6 +153,17 @@ export function registerBacklogCommands(
       if (item.blockedReason) console.log(style.red(`blocked    ${item.blockedReason}`));
       if (item.acceptance.total > 0) {
         console.log(`acceptance ${item.acceptance.checked}/${item.acceptance.total} checked`);
+      }
+      if (item.offFlow) {
+        console.log(style.yellow(`off-flow   '${item.status}' is not a state in this project's flow`));
+      }
+
+      if (item.allowedTransitions.length > 0) {
+        console.log();
+        console.log(style.bold('moves'));
+        for (const offer of item.allowedTransitions) {
+          console.log(offerLine(offer));
+        }
       }
 
       console.log();
@@ -184,26 +199,67 @@ export function registerBacklogCommands(
 
   backlog
     .command('move <id> <status>')
-    .description(`move an item: ${ItemStatusSchema.options.join(' | ')}`)
+    .description("move an item to a new status — see 'pomni backlog flow' for what this project allows")
     .option('-p, --project <id>', 'project')
     .option('--reason <text>', 'why (recorded in the item log)')
     .option('-f, --force', 'skip the guards; recorded as forced')
     .action(async (id: string, status: string, flags: MoveFlags) => {
       const container = await open();
       const [projectId, itemId] = await resolve(container, id, flags.project, defaultProject);
+      const flow = await container.backlog.flow(projectId);
 
-      const parsed = ItemStatusSchema.safeParse(status);
-      if (!parsed.success) {
-        console.error(style.red(`unknown status '${status}' — one of: ${ItemStatusSchema.options.join(', ')}`));
+      const known = flow.states.map((state) => state.name);
+      if (!known.includes(status)) {
+        console.error(style.red(`unknown status '${status}' — this project's flow has: ${known.join(', ')}`));
         process.exitCode = 1;
         return;
       }
 
-      const moved = await container.backlog.transition(projectId, itemId, parsed.data, {
+      const moved = await container.backlog.transition(projectId, itemId, status, {
         reason: flags.reason,
         force: flags.force,
       });
-      console.log(`${style.green('moved')} ${moved.id} → ${statusText(moved.status)}`);
+      console.log(`${style.green('moved')} ${moved.id} → ${statusText(moved.status, stateLabel(flow, moved.status))}`);
+    });
+
+  backlog
+    .command('flow')
+    .description("show this project's task flow: states, arrows, and what each arrow requires")
+    .option('-p, --project <id>', 'project')
+    .action(async (flags: { project?: string }) => {
+      const container = await open();
+      const projectId = flags.project ?? (await defaultProject());
+      const flow = await container.backlog.flow(projectId);
+
+      console.log(style.bold('states'));
+      console.log(
+        table(
+          flow.states.map((state) => [
+            state.name === flow.initial ? style.green('initial') : '',
+            style.bold(state.name),
+            state.label,
+            state.board ? 'board' : '',
+            state.active ? 'active' : '',
+          ]),
+          ['', 'STATE', 'LABEL', 'COLUMN', 'ACTIVE'],
+        ),
+      );
+
+      console.log();
+      console.log(style.bold('arrows'));
+      if (flow.transitions.length === 0) {
+        console.log(style.dim('none declared'));
+      } else {
+        console.log(
+          table(
+            flow.transitions.map((transition) => [
+              `${transition.from} → ${transition.to}`,
+              describeRequirements(transition.requires),
+            ]),
+            ['ARROW', 'REQUIRES'],
+          ),
+        );
+      }
     });
 
   backlog
@@ -225,7 +281,8 @@ export function registerBacklogCommands(
       const container = await open();
       const [projectId, itemId] = await resolve(container, id, flags.project, defaultProject);
       const item = await container.backlog.unblock(projectId, itemId);
-      console.log(`${style.green('unblocked')} ${item.id} → ${statusText(item.status)}`);
+      const flow = await container.backlog.flow(projectId);
+      console.log(`${style.green('unblocked')} ${item.id} → ${statusText(item.status, stateLabel(flow, item.status))}`);
     });
 
   backlog
@@ -352,8 +409,7 @@ function parseStatusFilter(value: string | undefined): ItemStatus[] | ItemStatus
   if (value === 'active') {
     return ['backlog', 'specced', 'ready', 'in_progress', 'in_review', 'blocked'];
   }
-  const parsed = ItemStatusSchema.safeParse(value);
-  return parsed.success ? parsed.data : undefined;
+  return value;
 }
 
 /**
@@ -379,25 +435,49 @@ async function resolve(
   return [await fallback(), id];
 }
 
-function statusText(status: ItemStatus): string {
-  switch (status) {
-    case 'done':
-      return style.green('done');
-    case 'in_review':
-      return style.cyan('in_review');
-    case 'in_progress':
-      return style.cyan('in_progress');
-    case 'ready':
-      return style.blue('ready');
-    case 'blocked':
-      return style.red('blocked');
-    case 'cancelled':
-      return style.dim('cancelled');
-    case 'specced':
-      return style.blue('specced');
-    default:
-      return style.dim('backlog');
+/** Colours for the built-in vocabulary. A project state outside it prints plainly, uncoloured. */
+const STATUS_COLOR: Record<string, (text: string) => string> = {
+  backlog: style.dim,
+  specced: style.blue,
+  ready: style.blue,
+  in_progress: style.cyan,
+  in_review: style.cyan,
+  done: style.green,
+  blocked: style.red,
+  cancelled: style.dim,
+};
+
+function statusText(status: ItemStatus, label?: string): string {
+  const text = label ?? status;
+  const color = STATUS_COLOR[status];
+  return color ? color(text) : text;
+}
+
+/** English for a declared requirement set, in the voice used everywhere a refusal is shown. */
+function describeRequirements(requires: Requirements): string {
+  if (!hasRequirements(requires)) return '';
+  const parts: string[] = [];
+  if (requires.acceptance) parts.push('acceptance');
+  if (requires.gate) parts.push(`gate \`${requires.gate}\``);
+  if (requires.checklist.length > 0) {
+    parts.push(`checklist: ${requires.checklist.map((entry) => entry.label).join(', ')}`);
   }
+  if (requires.fields.length > 0) parts.push(`fields: ${requires.fields.join(', ')}`);
+  if (requires.sections.length > 0) parts.push(`sections: ${requires.sections.join(', ')}`);
+  if (requires.dependencies) parts.push('dependencies');
+  return parts.join(', ');
+}
+
+/** One line of `pomni backlog show`'s moves list — available, or unavailable with why. */
+function offerLine(offer: TransitionOffer): string {
+  if (offer.ok) return `  ${style.green('→')} ${offer.label}`;
+
+  const reasons = describeUnmetList(offer.unmet);
+  if (reasons.length === 0) return `  ${style.dim('✗')} ${offer.label} ${style.dim('(no such move from here)')}`;
+  return [
+    `  ${style.dim('✗')} ${offer.label}`,
+    ...reasons.map((reason) => `      ${style.dim(reason)}`),
+  ].join('\n');
 }
 
 export function itemLine(item: BacklogItem): string {

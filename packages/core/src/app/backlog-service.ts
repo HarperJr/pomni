@@ -1,27 +1,41 @@
 import { z } from 'zod';
 import { ConflictError, NotFoundError, ValidationError } from '../domain/errors.js';
 import {
+  ANY_REPO,
   BacklogItemSchema,
-  SECTION_ACCEPTANCE,
-  SECTION_PLAN,
-  SECTION_PROBLEM,
+  RESERVED_BLOCKED,
   appendLog,
   assertTransition,
+  checklistEntries,
   compareItems,
   countAcceptance,
+  describeUnmetList,
+  evaluate,
+  findState,
+  isOffFlow,
   newItemBody,
   nextOrder,
   parseSections,
   pickNext,
+  requirementsFor,
+  targetsFrom,
+  transitionOffers,
   type BacklogItem,
   type BacklogItemDetail,
+  type ChecklistEntry,
   type Estimate,
+  type Evidence,
+  type Flow,
+  type GateRunEvidence,
   type ItemFilter,
   type ItemStatus,
   type ItemType,
   type Priority,
+  type UnmetRequirement,
 } from '../domain/item.js';
 import { layout } from '../domain/layout.js';
+import { flowOf, type Project } from '../domain/project.js';
+import type { Repo } from '../domain/repo.js';
 import type { Clock, DocRef, DocStore, EventBus, Lock, RunStore } from '../ports/index.js';
 import type { ProjectService } from './project-service.js';
 
@@ -62,6 +76,12 @@ export interface TransitionOptions {
  * prose that humans and agents both edit. Guards live here rather than in the surfaces, so
  * `/backlog move` from a Claude session and `pomni backlog move` from a terminal cannot
  * disagree about what a legal transition is.
+ *
+ * Which moves exist and what they require is the project's `taskFlow`, evaluated in the
+ * domain. This service's job in that split is to *prove* things, never to decide them: it
+ * reads the run store, the item body and the item's frontmatter, hands the result over as
+ * {@link Evidence}, and does what the evaluator says. Nothing here can assert that a gate
+ * passed — it can only show what the run store reported.
  */
 export class BacklogService {
   constructor(
@@ -88,19 +108,21 @@ export class BacklogService {
       const id = `${project.data.itemPrefix}-${project.data.counters.nextItem}`;
       const existing = await this.list({ projectId });
       const now = this.clock.iso();
+      // Where a new item starts is the flow's business, not a literal 'backlog'.
+      const initial = flowOf(project.data).initial;
 
       const item = BacklogItemSchema.parse({
         id,
         projectId,
         title,
         type: input.type ?? 'feature',
-        status: 'backlog',
+        status: initial,
         priority: input.priority ?? 'P2',
         estimate: input.estimate ?? null,
         repos: input.repos ?? [],
         labels: input.labels ?? [],
         dependsOn: input.dependsOn ?? [],
-        order: nextOrder(existing.filter((other) => other.status === 'backlog')),
+        order: nextOrder(existing.filter((other) => other.status === initial)),
         createdAt: now,
         updatedAt: now,
         body: input.body ?? newItemBody(title),
@@ -169,9 +191,21 @@ export class BacklogService {
   }
 
   /**
-   * Move an item. Guards are per-transition and explained in the error rather than being
-   * silently coerced — a spec with no acceptance criteria is not "ready", and saying so is
-   * more useful than pretending otherwise.
+   * The flow this project runs on: its own `taskFlow`, or the built-in one when it declared
+   * none. The single answer `pomni backlog flow`, the HTTP route and any UI drawing a board
+   * read — nobody re-derives it.
+   */
+  async flow(projectId: string): Promise<Flow> {
+    return flowOf((await this.projects.getRef(projectId)).data);
+  }
+
+  /**
+   * Move an item.
+   *
+   * The one enforcement point: the CLI, HTTP, the web UI and the pipeline's own automatic
+   * moves all arrive here, so none of them can hold a private copy of the rules. The arrow
+   * and its requirements are decided by the project's flow in the domain; everything this
+   * method does first is gather the evidence that decision is made on.
    */
   async transition(
     projectId: string,
@@ -184,22 +218,49 @@ export class BacklogService {
     const from = item.status;
 
     if (from === to) return item;
-    assertTransition(itemId, from, to);
 
-    if (!options.force) await this.checkGuards(item, to);
+    // Resolved per call, never cached across calls: the flow can be edited underneath us.
+    const project = (await this.projects.getRef(projectId)).data;
+    const flow = flowOf(project);
+
+    // Only what this arrow asks about is worth proving. Expanding the rest would read the run
+    // store and the sibling items for questions nobody asked.
+    const requires = requirementsFor(flow, from, to);
+    const evidence = await this.evidence(
+      item,
+      project,
+      requires?.gate ? [requires.gate] : [],
+      requires?.dependencies === true ? await this.dependencyEvidence(item) : null,
+    );
+
+    const check = evaluate({ id: itemId, status: from }, flow, to, evidence);
+    let waived: UnmetRequirement[] = [];
+    if (!check.ok) {
+      // `--force` waives requirements — a human taking responsibility for work they say is
+      // done — but never invents an arrow the flow does not have.
+      if (options.force && check.reason === 'requirements') waived = check.unmet;
+      else assertTransition(itemId, from, to, flow, evidence);
+    }
 
     const now = this.clock.iso();
     const date = now.slice(0, 10);
     const note = options.reason ? `${describe(from, to)} — ${options.reason}` : describe(from, to);
+    // A forced move is only auditable if it records what it went past.
+    const waivedNote =
+      waived.length > 0 ? ` — unmet: ${describeUnmetList(waived).join('; ')}` : '';
 
     const next = BacklogItemSchema.parse({
       ...item,
       status: to,
       // Remember where we came from so unblocking can put it back.
-      statusBefore: to === 'blocked' ? from : null,
-      blockedReason: to === 'blocked' ? (options.reason ?? 'blocked') : null,
+      statusBefore: to === RESERVED_BLOCKED ? from : null,
+      blockedReason: to === RESERVED_BLOCKED ? (options.reason ?? 'blocked') : null,
       updatedAt: now,
-      body: appendLog(item.body, options.force ? `${note} (forced)` : note, date),
+      body: appendLog(
+        item.body,
+        options.force ? `${note} (forced)${waivedNote}` : note,
+        date,
+      ),
     });
 
     await this.docs.write(layout.backlogItem(projectId, itemId), next, { ifMatch: ref.rev });
@@ -207,18 +268,85 @@ export class BacklogService {
     return next;
   }
 
+  /**
+   * Tick or untick one definition-of-done box on an item.
+   *
+   * The key must be one the flow declares on a move out of where the item is standing —
+   * ticking a box that guards nothing reachable is a typo, not a decision. Returns the full
+   * detail so a UI can redraw its move buttons without a second fetch.
+   */
+  async tickChecklist(
+    projectId: string,
+    itemId: string,
+    key: string,
+    ticked: boolean,
+  ): Promise<BacklogItemDetail> {
+    return this.lock.withLock('items', async () => {
+      const ref = await this.getRef(projectId, itemId);
+      const item = ref.data;
+      const flow = flowOf((await this.projects.getRef(projectId)).data);
+      const from = item.status;
+
+      const boxes = new Map<string, ChecklistEntry>();
+      for (const to of targetsFrom(flow, from)) {
+        for (const entry of checklistEntries(flow, from, to)) boxes.set(entry.key, entry);
+      }
+
+      if (!boxes.has(key)) {
+        throw new ValidationError(
+          boxes.size === 0
+            ? `no move out of '${from}' has a checklist, so there is nothing to tick on ${itemId}`
+            : `'${key}' is not a checklist box on any move out of '${from}' — valid keys: ${[
+                ...boxes.keys(),
+              ].join(', ')}`,
+        );
+      }
+
+      const checklist = { ...item.checklist };
+      const now = this.clock.iso();
+      if (ticked) checklist[key] = now;
+      else delete checklist[key];
+
+      // A completed definition of done is a fact about the item, so it belongs in the Log
+      // where the rest of its history is, not only in frontmatter.
+      let body = item.body;
+      for (const to of targetsFrom(flow, from)) {
+        const entries = checklistEntries(flow, from, to);
+        if (entries.length === 0) continue;
+        const wasComplete = entries.every((entry) => entry.key in item.checklist);
+        const isComplete = entries.every((entry) => entry.key in checklist);
+        if (!wasComplete && isComplete) {
+          body = appendLog(
+            body,
+            `checklist for ${from} → ${to} complete: ${entries
+              .map((entry) => entry.label)
+              .join(', ')}`,
+            now.slice(0, 10),
+          );
+        }
+      }
+
+      const next = BacklogItemSchema.parse({ ...item, checklist, body, updatedAt: now });
+      await this.docs.write(layout.backlogItem(projectId, itemId), next, { ifMatch: ref.rev });
+      this.events.emit({ type: 'item.changed', projectId, itemId });
+      return this.detail(next);
+    });
+  }
+
   async block(projectId: string, itemId: string, reason: string): Promise<BacklogItem> {
     if (!reason.trim()) throw new ValidationError('blocking an item needs a reason');
-    return this.transition(projectId, itemId, 'blocked', { reason });
+    return this.transition(projectId, itemId, RESERVED_BLOCKED, { reason });
   }
 
   /** Restore whatever the item was doing before it was blocked. */
   async unblock(projectId: string, itemId: string): Promise<BacklogItem> {
     const { data } = await this.getRef(projectId, itemId);
-    if (data.status !== 'blocked') {
+    if (data.status !== RESERVED_BLOCKED) {
       throw new ValidationError(`${itemId} is not blocked`);
     }
-    return this.transition(projectId, itemId, data.statusBefore ?? 'backlog', {
+    // Nothing to restore means "back to the start", which is the flow's start, not 'backlog'.
+    const fallback = (await this.flow(projectId)).initial;
+    return this.transition(projectId, itemId, data.statusBefore ?? fallback, {
       reason: 'unblocked',
       force: true,
     });
@@ -275,9 +403,23 @@ export class BacklogService {
     const siblings = await this.list({ projectId: item.projectId });
     const byId = new Map(siblings.map((other) => [other.id, other]));
 
+    const project = (await this.projects.getRef(item.projectId)).data;
+    const flow = flowOf(project);
+    const blockedBy = item.dependsOn.filter((id) => byId.get(id)?.status !== 'done');
+    // Every gate on a move out of here, so each button knows whether it would work. An item
+    // standing off-flow has only recovery moves, which require nothing. Dependencies are
+    // resolved unconditionally rather than per arrow: the sibling list is already read.
+    const evidence = await this.evidence(item, project, gatesLeaving(flow, item.status), {
+      total: item.dependsOn.length,
+      unfinished: blockedBy,
+    });
+
     return {
       ...item,
-      blockedBy: item.dependsOn.filter((id) => byId.get(id)?.status !== 'done'),
+      allowedTransitions: transitionOffers(item, flow, evidence),
+      flowState: findState(flow, item.status),
+      offFlow: isOffFlow(flow, item.status),
+      blockedBy,
       blocking: siblings
         .filter((other) => other.dependsOn.includes(item.id))
         .map((other) => other.id),
@@ -286,75 +428,122 @@ export class BacklogService {
     };
   }
 
-  private async checkGuards(item: BacklogItem, to: ItemStatus): Promise<void> {
-    const sections = parseSections(item.body);
+  // -------------------------------------------------------------------------
+  // Evidence
+  //
+  // The service half of the split: read the world, hand the flow a value, do as it says.
+  // -------------------------------------------------------------------------
 
-    if (to === 'specced') {
-      const problem = (sections[SECTION_PROBLEM] ?? '').replace(/_.*?_/gs, '').trim();
-      if (!problem) {
-        throw new ValidationError(
-          `${item.id} has no '${SECTION_PROBLEM}' section yet — describe what is broken before marking it specced`,
-        );
-      }
-      if (countAcceptance(item.body).total === 0) {
-        throw new ValidationError(
-          `${item.id} has no acceptance criteria — add at least one '- [ ] …' under '${SECTION_ACCEPTANCE}'`,
-        );
-      }
-    }
-
-    if (to === 'ready') {
-      const plan = (sections[SECTION_PLAN] ?? '').replace(/_.*?_/gs, '').trim();
-      if (!plan) {
-        throw new ValidationError(
-          `${item.id} has no '${SECTION_PLAN}' section yet — say how it will be built before marking it ready`,
-        );
-      }
-    }
-
-    if (to === 'in_progress') {
-      const detail = await this.detail(item);
-      if (detail.blockedBy.length > 0) {
-        throw new ValidationError(
-          `${item.id} depends on ${detail.blockedBy.join(', ')}, which ${
-            detail.blockedBy.length === 1 ? 'is' : 'are'
-          } not done`,
-        );
+  /**
+   * Everything the evaluator is allowed to know about this item, with only the named gates
+   * expanded — gathering evidence costs run-store reads, so nobody proves a gate nobody asked
+   * about. `dependencies` is the same bargain one level up: resolving it costs a read of every
+   * sibling item, so the caller passes what it has and `null` — refused, not read as a pass —
+   * when the move being judged never asks.
+   */
+  private async evidence(
+    item: BacklogItem,
+    project: Project,
+    gates: string[],
+    dependencies: Evidence['dependencies'] = null,
+  ): Promise<Evidence> {
+    const runs: GateRunEvidence[] = [];
+    if (gates.length > 0) {
+      const repos = (await this.projects.get(project.id)).repos;
+      for (const gate of gates) {
+        runs.push(...(await this.gateEvidence(item, project, gate, repos)));
       }
     }
 
-    if (to === 'in_review') await this.assertGateGreen(item);
+    return {
+      acceptance: countAcceptance(item.body),
+      checklist: item.checklist,
+      // The item itself, so `fields: [estimate, repos, branch]` reads real fields rather than
+      // a hand-maintained projection that would drift the moment a field is added.
+      fields: item as Record<string, unknown>,
+      gates: runs,
+      // Verbatim: what counts as written is `sectionIsWritten`'s to say, and pre-trimming here
+      // would let a fresh item's italic template prompt pass as prose.
+      sections: parseSections(item.body),
+      dependencies,
+    };
+  }
+
+  /** `dependsOn` resolved against its siblings. One list read, so only taken when asked for. */
+  private async dependencyEvidence(
+    item: BacklogItem,
+  ): Promise<{ total: number; unfinished: string[] }> {
+    const byId = new Map(
+      (await this.list({ projectId: item.projectId })).map((other) => [other.id, other]),
+    );
+    return {
+      total: item.dependsOn.length,
+      unfinished: item.dependsOn.filter((id) => byId.get(id)?.status !== 'done'),
+    };
   }
 
   /**
-   * The point of contact between the backlog and runs: an item only reaches review if the
-   * project's gate has actually passed for the repos it touches. "Done because an agent
-   * said so" is exactly what this prevents.
+   * One gate, expanded into what the run store actually reported.
+   *
+   * There is no stored gate: a gate is a list of capabilities fanned out over the repos in
+   * scope. An expected pair with no run gets `runId: null` so the domain can say "has not run"
+   * rather than "failed" — the difference matters to whoever reads the refusal.
    */
-  private async assertGateGreen(item: BacklogItem): Promise<void> {
-    const project = (await this.projects.getRef(item.projectId)).data;
-    if (!project.policy.requireGreenGate) return;
+  private async gateEvidence(
+    item: BacklogItem,
+    project: Project,
+    gate: string,
+    repos: Repo[],
+  ): Promise<GateRunEvidence[]> {
+    // The project has said it does not hold itself to its gates. The evaluator has to be
+    // shown something — absence of evidence reads as "nobody ran it" — so it is shown the
+    // decision, once, rather than the gate being expanded and quietly ignored.
+    if (!project.policy.requireGreenGate) {
+      return [
+        { gate, repo: ANY_REPO, capability: ANY_REPO, passed: true, runId: null, finishedAt: null },
+      ];
+    }
 
-    const failures: string[] = [];
-    for (const capability of project.gates.default) {
-      const latest = await this.runs.latest(item.projectId, capability);
-      const relevant = latest.filter(
-        (run) => item.repos.length === 0 || item.repos.includes(run.repoId),
+    const capabilities = project.gates[gate] ?? [];
+    const scoped =
+      item.repos.length > 0 ? repos.filter((repo) => item.repos.includes(repo.id)) : repos;
+
+    const evidence: GateRunEvidence[] = [];
+    for (const capability of capabilities) {
+      // A repo that does not declare the capability is skipped, not failed — an api repo with
+      // no `e2e` must not block a gate the web repo satisfies.
+      const declaring = scoped.filter((repo) => repo.capabilities[capability] !== undefined);
+      if (declaring.length === 0) continue;
+
+      const latest = new Map(
+        (await this.runs.latest(project.id, capability)).map((run) => [run.repoId, run]),
       );
-
-      for (const run of relevant) {
-        if (run.status !== 'passed') {
-          failures.push(`${run.repoId} ${capability}: ${run.summary ?? run.status}`);
-        }
+      for (const repo of declaring) {
+        const run = latest.get(repo.id);
+        evidence.push({
+          gate,
+          repo: repo.id,
+          capability,
+          passed: run?.status === 'passed',
+          runId: run?.id ?? null,
+          finishedAt: run?.endedAt ?? null,
+        });
       }
     }
 
-    if (failures.length > 0) {
-      throw new ValidationError(
-        `${item.id} cannot go to review — the gate is not green:\n  ${failures.join('\n  ')}\n` +
-          "Run 'pomni verify' first, or pass --force to record that you moved it anyway.",
-      );
+    if (evidence.length === 0) {
+      // Nothing in scope to run it on is not the same as it having passed.
+      evidence.push({
+        gate,
+        repo: ANY_REPO,
+        capability: capabilities.join(', ') || gate,
+        passed: false,
+        runId: null,
+        finishedAt: null,
+      });
     }
+
+    return evidence;
   }
 
   private async assertReposExist(projectId: string, repoIds: string[]): Promise<void> {
@@ -419,9 +608,19 @@ function matches(item: BacklogItem, filter: ItemFilter): boolean {
   return true;
 }
 
+/** Every gate named on an arrow out of this state — the evidence a detail read needs. */
+function gatesLeaving(flow: Flow, from: string): string[] {
+  const gates = new Set<string>();
+  for (const to of targetsFrom(flow, from)) {
+    const gate = requirementsFor(flow, from, to)?.gate;
+    if (gate) gates.add(gate);
+  }
+  return [...gates];
+}
+
 function describe(from: ItemStatus, to: ItemStatus): string {
-  if (to === 'blocked') return 'blocked';
-  if (from === 'blocked') return `unblocked to ${to}`;
+  if (to === RESERVED_BLOCKED) return 'blocked';
+  if (from === RESERVED_BLOCKED) return `unblocked to ${to}`;
   if (from === 'done' && to === 'in_progress') return 'reopened';
   return `${from} → ${to}`;
 }

@@ -1,5 +1,17 @@
 import { z } from 'zod';
 import { ValidationError } from './errors.js';
+import {
+  DEFAULT_FLOW,
+  EMPTY_EVIDENCE,
+  activeStates,
+  boardColumns,
+  describeUnmetList,
+  evaluate,
+  targetsFrom,
+} from './flow.js';
+import type { Evidence, Flow, FlowState, TransitionOffer, UnmetRequirement } from './flow.js';
+
+export * from './flow.js';
 
 /**
  * A unit of work on a project. Stored as Markdown with YAML frontmatter so a human can read
@@ -7,7 +19,11 @@ import { ValidationError } from './errors.js';
  * around as an opaque string, which is what makes the round-trip lossless.
  */
 
-export const ItemStatusSchema = z.enum([
+/**
+ * The statuses the built-in flow uses. Still the vocabulary of every project that has not
+ * declared its own flow, and still what a UI should have labels for.
+ */
+export const CORE_STATUSES = [
   'backlog',
   'specced',
   'ready',
@@ -16,8 +32,21 @@ export const ItemStatusSchema = z.enum([
   'done',
   'blocked',
   'cancelled',
-]);
-export type ItemStatus = z.infer<typeof ItemStatusSchema>;
+] as const;
+export type CoreItemStatus = (typeof CORE_STATUSES)[number];
+
+/**
+ * A status is whatever its project's flow calls a state — so this is a string, not an enum.
+ * `CoreItemStatus | (string & {})` keeps autocomplete for the built-in eight while accepting
+ * a project's own names.
+ *
+ * Deliberately permissive on read: a status the current flow does not declare must still
+ * parse, because the alternative is that editing a flow makes the items standing in the
+ * dropped state unreadable. Validation moved to the flow, where it can say something useful.
+ */
+export type ItemStatus = CoreItemStatus | (string & {});
+
+export const ItemStatusSchema = z.string().min(1);
 
 export const ItemTypeSchema = z.enum(['feature', 'bug', 'chore', 'spike', 'refactor', 'docs']);
 export type ItemType = z.infer<typeof ItemTypeSchema>;
@@ -47,6 +76,16 @@ export const BacklogItemSchema = z.object({
    */
   order: z.number().default(0),
   branch: z.string().nullable().default(null),
+  /**
+   * Definition-of-done boxes a human has ticked, as `checklist key -> ISO timestamp`.
+   * Presence is the tick; unticking deletes the key. Keys come from the project flow's
+   * `checklist` requirements, so a key left behind by an edited flow is inert, not an error.
+   *
+   * Kept in frontmatter rather than as body checkboxes on purpose: a human rewrites the body
+   * freely and a tick is a claim with a time on it, not prose. The item's Log still records
+   * the moment a checklist was completed, so the paper trail stays in the Markdown.
+   */
+  checklist: z.record(z.string(), z.string()).default({}),
   /** Set when status is `blocked`; restored on unblock. */
   blockedReason: z.string().nullable().default(null),
   statusBefore: ItemStatusSchema.nullable().default(null),
@@ -63,6 +102,19 @@ export type BacklogItem = z.infer<typeof BacklogItemSchema>;
  * places to keep in sync and one of them will be wrong.
  */
 export interface BacklogItemDetail extends BacklogItem {
+  /**
+   * Every move a UI should draw, each with whether it will work and, when it will not, the
+   * unmet requirements behind it — so a button can be disabled with the reason beside it.
+   * Was `ItemStatus[]`; a caller that wants the old shape reads `.map((offer) => offer.to)`.
+   */
+  allowedTransitions: TransitionOffer[];
+  /** The item's state as its project's flow describes it, or null when it is off-flow. */
+  flowState: FlowState | null;
+  /**
+   * True when the stored status is not a state in the project's flow. The item is readable
+   * and listed; the only moves offered are the flow's recovery states.
+   */
+  offFlow: boolean;
   /** Dependencies that are not yet done. Non-empty means this item cannot start. */
   blockedBy: string[];
   /** Items that depend on this one. */
@@ -86,55 +138,97 @@ export interface ItemFilter {
 // Lifecycle
 // ---------------------------------------------------------------------------
 
-/** Statuses that count as live work for board and "next item" purposes. */
-export const ACTIVE_STATUSES: ItemStatus[] = [
-  'backlog',
-  'specced',
-  'ready',
-  'in_progress',
-  'in_review',
-  'blocked',
-];
+/**
+ * The lifecycle now lives in `flow.ts` and is per-project. Everything below takes a `Flow`
+ * and defaults to `DEFAULT_FLOW`, so a caller that has not been taught about flows yet keeps
+ * the behaviour it had — but a caller holding a project must pass that project's flow.
+ */
 
-export const BOARD_COLUMNS: ItemStatus[] = [
-  'backlog',
-  'specced',
-  'ready',
-  'in_progress',
-  'in_review',
-  'done',
-];
+/** Statuses that count as live work for board and "next item" purposes, in the built-in flow. */
+export const ACTIVE_STATUSES: ItemStatus[] = activeStates(DEFAULT_FLOW);
 
-const TRANSITIONS: Record<ItemStatus, ItemStatus[]> = {
-  backlog: ['specced', 'ready', 'blocked', 'cancelled'],
-  specced: ['ready', 'backlog', 'blocked', 'cancelled'],
-  ready: ['in_progress', 'specced', 'backlog', 'blocked', 'cancelled'],
-  in_progress: ['in_review', 'ready', 'blocked', 'cancelled'],
-  in_review: ['done', 'in_progress', 'blocked', 'cancelled'],
-  // Reopening is a real workflow, not an error.
-  done: ['in_progress'],
-  // Unblocking restores the previous status, so any active one is reachable.
-  blocked: ['backlog', 'specced', 'ready', 'in_progress', 'in_review', 'cancelled'],
-  cancelled: ['backlog'],
-};
+export const BOARD_COLUMNS: ItemStatus[] = boardColumns(DEFAULT_FLOW);
 
-export function canTransition(from: ItemStatus, to: ItemStatus): boolean {
-  return TRANSITIONS[from].includes(to);
+export function activeStatuses(flow: Flow = DEFAULT_FLOW): ItemStatus[] {
+  return activeStates(flow);
 }
 
+export function boardColumnsOf(flow: Flow = DEFAULT_FLOW): ItemStatus[] {
+  return boardColumns(flow);
+}
+
+/** Where an item can legally go from here, requirements aside. */
+export function allowedFrom(status: ItemStatus, flow: Flow = DEFAULT_FLOW): ItemStatus[] {
+  return targetsFrom(flow, status);
+}
+
+/** Whether the arrow exists. Says nothing about whether its requirements are satisfied. */
+export function canTransition(
+  from: ItemStatus,
+  to: ItemStatus,
+  flow: Flow = DEFAULT_FLOW,
+): boolean {
+  if (from === to) return true;
+  return targetsFrom(flow, from).includes(to);
+}
+
+/** The graph refuses the move: there is no such arrow, or no such state. */
 export class InvalidTransitionError extends ValidationError {
-  constructor(id: string, from: ItemStatus, to: ItemStatus) {
+  constructor(id: string, from: ItemStatus, to: ItemStatus, allowed: ItemStatus[] = []) {
     super(
       `${id} cannot move from '${from}' to '${to}' — allowed from here: ${
-        TRANSITIONS[from].join(', ') || 'nothing'
+        allowed.join(', ') || 'nothing'
       }`,
     );
   }
 }
 
-export function assertTransition(id: string, from: ItemStatus, to: ItemStatus): void {
-  if (from === to) return;
-  if (!canTransition(from, to)) throw new InvalidTransitionError(id, from, to);
+/**
+ * The arrow exists but the work behind it does not. Carries the machine-readable shortfall in
+ * `details` so a surface can render counts and repo names rather than re-parse a sentence.
+ *
+ * The message is a headline and then one line per unmet requirement, indented. `headline` is
+ * the arrow's own `message` when the flow gave it one — which is how a default project still
+ * reads "cannot go to review — the gate is not green" — and the generic
+ * "cannot move from 'x' to 'y' yet" when it did not.
+ */
+export class RequirementsNotMetError extends ValidationError {
+  readonly unmet: UnmetRequirement[];
+  /** The leading sentence, without the item id. Surfaces that write their own may ignore it. */
+  readonly headline: string;
+
+  constructor(
+    id: string,
+    from: ItemStatus,
+    to: ItemStatus,
+    unmet: UnmetRequirement[],
+    message?: string,
+  ) {
+    const headline = message ?? `cannot move from '${from}' to '${to}' yet`;
+    const lines = describeUnmetList(unmet);
+    super(`${id} ${headline}:\n  ${lines.join('\n  ')}`, { id, from, to, unmet, headline });
+    this.unmet = unmet;
+    this.headline = headline;
+  }
+}
+
+/**
+ * Guard one move. `evidence` defaults to nothing, which fails every requirement — omitting it
+ * on an arrow that has requirements refuses the move rather than waving it through.
+ */
+export function assertTransition(
+  id: string,
+  from: ItemStatus,
+  to: ItemStatus,
+  flow: Flow = DEFAULT_FLOW,
+  evidence: Evidence = EMPTY_EVIDENCE,
+): void {
+  const check = evaluate({ id, status: from }, flow, to, evidence);
+  if (check.ok) return;
+  if (check.reason === 'requirements') {
+    throw new RequirementsNotMetError(id, from, to, check.unmet, check.message);
+  }
+  throw new InvalidTransitionError(id, from, to, check.allowed);
 }
 
 // ---------------------------------------------------------------------------
