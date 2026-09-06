@@ -1122,7 +1122,14 @@ export class PipelineService {
             `Agents you have used so far: ${ledger || 'none'}. Do not ask one of them the same`,
             'question again — build on what it already told you.',
             '',
-            'Delegate again if you still need something new, or answer in prose.',
+            // Four runs in a row did the work and then spent their last round on another
+            // review instead of writing it up, and each was recorded as a failure that
+            // had in fact succeeded. An orchestrator cannot count its own rounds; tell
+            // it when the budget is nearly gone.
+            round >= MAX_ROUNDS - 2
+              ? 'This is your last round. Do not delegate again — write your final' +
+                ' answer now, including what is unfinished, and end with the verdict block.'
+              : 'Delegate again if you still need something new, or answer in prose.',
           ].join('\n'),
         });
 
