@@ -349,21 +349,20 @@ export function nextOrder(existing: BacklogItem[]): number {
 
 const PRIORITY_RANK: Record<Priority, number> = { P0: 0, P1: 1, P2: 2, P3: 3 };
 
-/** Board order: explicit rank first, then priority, then age. */
+/**
+ * The one backlog order: priority first, then explicit rank within a priority, then id.
+ * `order` comes from `nextOrder` and is unique per item, so putting it first made priority
+ * unreachable — hence priority leads and `order` decides ties inside a priority.
+ */
 export function compareItems(a: BacklogItem, b: BacklogItem): number {
-  if (a.order !== b.order) return a.order - b.order;
   const priority = PRIORITY_RANK[a.priority] - PRIORITY_RANK[b.priority];
   if (priority !== 0) return priority;
+  if (a.order !== b.order) return a.order - b.order;
   return a.id.localeCompare(b.id, undefined, { numeric: true });
 }
 
-/** The item `pomni feature next` should pick up. */
+/** The item `pomni feature next` should pick up. Same ordering as the board, by construction. */
 export function pickNext(items: BacklogItem[]): BacklogItem | null {
-  const ready = items
-    .filter((item) => item.status === 'ready')
-    .sort((a, b) => {
-      const priority = PRIORITY_RANK[a.priority] - PRIORITY_RANK[b.priority];
-      return priority !== 0 ? priority : a.order - b.order;
-    });
+  const ready = items.filter((item) => item.status === 'ready').sort(compareItems);
   return ready[0] ?? null;
 }

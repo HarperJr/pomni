@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { mergeCapabilities } from './capability.js';
 import { ValidationError } from './errors.js';
 import { assertSlug, deriveItemPrefix, repoIdFromSource, slugify, uniqueId } from './ids.js';
+import { BacklogItemSchema, compareItems, pickNext } from './item.js';
+import type { BacklogItem } from './item.js';
 import {
   assertCredentialUsable,
   detectProvider,
@@ -118,6 +120,42 @@ describe('capabilities', () => {
     expect(merged.test?.cmd).toBe('pnpm test --custom');
     expect(merged.build?.cmd).toBe('new build');
     expect(merged.lint?.cmd).toBe('pnpm lint');
+  });
+});
+
+describe('backlog ordering', () => {
+  // Through the real schema, so a required field appearing here breaks the test rather
+  // than letting a hand-cast literal pretend to be an item.
+  const item = (over: Partial<BacklogItem>): BacklogItem =>
+    BacklogItemSchema.parse({
+      id: 'POMN-1',
+      projectId: 'pomni',
+      title: 'an item',
+      status: 'ready',
+      priority: 'P2',
+      order: 10,
+      createdAt: '2026-09-06T00:00:00.000Z',
+      updatedAt: '2026-09-06T00:00:00.000Z',
+      ...over,
+    });
+
+  it('puts an urgent item filed last above a trivial one filed first', () => {
+    const trivialAndOld = item({ id: 'POMN-1', priority: 'P3', order: 10 });
+    const urgentAndNew = item({ id: 'POMN-2', priority: 'P0', order: 20 });
+
+    expect([trivialAndOld, urgentAndNew].sort(compareItems).map((one) => one.id)).toEqual([
+      'POMN-2',
+      'POMN-1',
+    ]);
+    // And the list agrees with what the next-item pick says, because it is the same sort.
+    expect(pickNext([trivialAndOld, urgentAndNew])?.id).toBe('POMN-2');
+  });
+
+  it('keeps hand-ranking inside one priority', () => {
+    const ranked = item({ id: 'POMN-1', priority: 'P1', order: 10 });
+    const below = item({ id: 'POMN-2', priority: 'P1', order: 20 });
+
+    expect([below, ranked].sort(compareItems).map((one) => one.id)).toEqual(['POMN-1', 'POMN-2']);
   });
 });
 
