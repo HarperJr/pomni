@@ -27,9 +27,14 @@ Start it with `pomni serve`. It is not required for anything else to work.
 | Run a project's gate, and the doctor report | — |
 | Stream live run logs; cancel a run | — |
 | Browse past AI sessions, transcripts, touched files (read-only) | — |
+| Chat with a model and let it act on Pomni, guarded by confirm-before-write (§4 Chats) | Let a chat write anything outside the typed action catalogue |
 
-The line is deliberate: the server is the surface you use when you know what you want. Anything
-that requires judgement stays in a Claude session or the CLI.
+The line is mostly deliberate: the server is the surface you use when you know what you want, and
+that judgement-free path (grooming, running gates, reading history) needs no model credentials.
+Chat is the one exception — it is where the server does invoke AI — but it never gains a second
+implementation of a rule: every action it proposes calls the same application service the CLI
+would, so a chat-confirmed `backlog.move` is indistinguishable in the log from one typed at a
+terminal.
 
 The seam for later is already correct — `SessionService` is in the container the server builds,
 so exposing `POST /api/sessions` when headless mode lands (M4) is a route file, not a redesign.
@@ -179,6 +184,37 @@ POST   /api/dev                          { project } -> starts dev, waits for re
 DELETE /api/dev/:project                 stop
 ```
 
+### Chats
+
+```
+GET    /api/chats?query=&providerId=&limit=      newest first
+POST   /api/chats                                { providerId, model, title? } -> 201
+GET    /api/chats/:id                             chat + transcript + pending actions
+DELETE /api/chats/:id                             -> 204
+PATCH  /api/chats/:id/model                       { providerId, model }; affects only the next
+                                                   turn, recorded as a `system` message
+POST   /api/chats/:id/messages                    { text } -> 201, the assistant's reply
+POST   /api/chats/:id/messages/:messageId/actions/:actionId/confirm
+POST   /api/chats/:id/messages/:messageId/actions/:actionId/reject
+```
+
+A chat is pinned to a provider + model chosen at creation from the enabled providers and the
+models each defines. The assistant asks for actions by ending its reply with a fenced
+` ```json {"actions": [...]} ``` ` block — there is no native tool-calling in this repo, so this
+is the same prompted-JSON convention pipelines already use for delegation. Reads (`project.list`,
+`backlog.show`, `run.show`, …) execute immediately; writes (`backlog.create`, `backlog.move`,
+`task.start`, `workflow.attach`, `tool.attach`, `question.answer`) come back as a `proposed`
+action on the message and only run once confirmed. Every message records the provider and model
+that produced it and the actions it took, so a chat is auditable afterwards; token counts are
+recorded per chat the way runs already show them, and `costUsd` stays `null` — rendered as
+unknown, not `$0.000` — when the provider does not report one.
+
+The LLM port does not stream token-by-token, so a reply arrives as one chunk over the existing
+`/api/events` stream rather than its own channel.
+
+Chat is a web-only surface — there is no `pomni chat` CLI verb and none is planned; unlike the
+rest of this API, it has no terminal equivalent to fall back on.
+
 ### Sessions (read-only) *(M3)*
 
 ```
@@ -192,12 +228,17 @@ GET    /api/sessions/:id/transcript      paginated
 ```
 GET    /api/events?scope=                SSE: run.started, run.output, run.finished,
                                               item.changed, item.transitioned,
-                                              project.changed, session.started, session.finished
+                                              project.changed, session.started, session.finished,
+                                              chat.changed, chat.removed, chat.message.chunk,
+                                              chat.action.started, chat.action.finished,
+                                              chat.turn.finished
 ```
 
 One SSE connection per browser tab, multiplexed by scope. The server tails
 `.pomni/events.ndjson` so events originating in the CLI or a Claude session arrive identically to
-its own.
+its own. `chat.*` events are the exception: a chat only ever runs in the process the browser is
+talking to, so they are published on the in-process bus only and never written to
+`events.ndjson` — there is no cross-process chat to replay.
 
 ### Meta
 
@@ -217,6 +258,7 @@ Shipped:
                            sync / remove per repo
 /credentials               credential list, add, test, remove
 /p/:projectId/items/:itemId  item detail: spec, dependencies, legal transitions
+/chat, /chat/:chatId       chat list (newest first) and the active conversation
 ```
 
 Planned:

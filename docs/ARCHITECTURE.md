@@ -201,7 +201,7 @@ Pomni edits real repositories and executes real shell commands. Non-negotiables:
 | --- | --- | --- |
 | A new stack (Rust, Elixir, Deno) | a `StackAdapter` | core, CLI, commands |
 | GitHub Issues / Linear sync | an `IssueTracker` port adapter | backlog domain |
-| AI actions in the web UI | route files over `SessionService` | application, domain |
+| A new chat action (read or guarded write) | an entry in the `chat-actions.ts` catalogue calling an existing service | domain, the LLM prompt itself |
 | Any other client (mobile, TUI, script) | HTTP calls to the existing API | server, core |
 | Remote/CI execution | an `Executor` adapter (ssh, container) | RunService |
 | A different model provider | an `AgentRunner` adapter | SessionService |
@@ -221,7 +221,8 @@ Pomni edits real repositories and executes real shell commands. Non-negotiables:
 | 7 | Inline vs spawn execution modes share one context pack | Interactive and headless behave identically; no duplicated prompt logic | Two runner implementations |
 | 8 | Management server is a peer process, not a daemon | Nothing to babysit; state survives it; CLI, session and server stay symmetric | Background `dev` processes die with the server |
 | 9 | Optimistic concurrency (`If-Match` on a content hash) plus fs watching | Agents and humans edit the same spec files concurrently *by design*; conflicts surface instead of clobbering | Every write path carries a rev |
-| 10 | Web UI manages and executes, but never invokes AI | Separates the fast deterministic path from the judgement path; the server needs no model credentials | Two entry points for starting work |
+| 10 | Web UI manages and executes deterministically by default | Keeps a model out of the path for grooming, running gates and reading history | Two entry points for starting work |
+| 16 | Chat is the one place the web UI invokes AI, and it does so through the same application services as everything else | No second implementation of a rule: a `backlog.move` proposed in chat runs `BacklogService.move`, guards and all | The LLM port has no native tool-calling, so actions are asked for as a fenced JSON block and parsed, the same convention pipelines already use for delegation |
 | 11 | Fastify API + separate React SPA, not a fullstack framework | The API is the contract; any future client reuses it, and the UI can be replaced without touching it | Two packages instead of one |
 | 12 | Project contains many repos, rather than project = one codebase | A fullstack project *is* several repos; gates and backlog belong to the product, commands belong to each codebase | Two levels of identity to resolve |
 | 13 | `RepoSource` union with both `local` and `git`, git primary | Clone-only cannot add a greenfield repo with no remote; local-only makes PRs, isolation and remote execution a rewrite | One resolver to maintain |

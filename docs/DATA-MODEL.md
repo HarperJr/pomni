@@ -40,6 +40,7 @@ one repo) or `remote` (execution on another host) later is a new arm plus a reso
 | Secret file | credential tokens, when stored by Pomni at all | JSON, mode 0600 | ignored |
 | Workspace | cloned working copies | git checkouts | ignored |
 | Run store | runs and test results | SQLite (`node:sqlite`, WAL) | ignored |
+| Chat store | chats and their messages | SQLite, same `pomni.db` file, own migrations | ignored |
 | Run logs | one combined output file per run | plain text | ignored |
 | Event stream | live cross-process notifications | append-only NDJSON | ignored |
 
@@ -317,6 +318,47 @@ CREATE INDEX idx_sessions_item        ON sessions(item_id);
 
 Migrations live in `packages/infra/src/sqlite/migrations/NNN-name.sql`, applied on open,
 with `user_version` tracking the applied revision.
+
+`SqliteChatStore` (`packages/infra/src/chat-store.ts`) shares this same `pomni.db` file but
+tracks its own migrations (inline in that file, not under `sqlite/migrations/`) against a
+`chat_schema` version table rather than `user_version`, so the run store and the chat store
+can each evolve their schema without racing over one counter:
+
+```sql
+CREATE TABLE chats (
+  id           TEXT PRIMARY KEY,       -- ULID
+  title        TEXT NOT NULL,          -- derived from the first user message
+  providerId   TEXT NOT NULL,
+  model        TEXT NOT NULL,
+  createdAt    TEXT NOT NULL,
+  updatedAt    TEXT NOT NULL,          -- bumped on every message; chat lists sort by this
+  inputTokens  INTEGER NOT NULL DEFAULT 0,
+  outputTokens INTEGER NOT NULL DEFAULT 0,
+  costUsd      REAL                    -- null when the provider reports none, never 0
+);
+CREATE INDEX idx_chats_updated ON chats(updatedAt DESC);
+
+CREATE TABLE chat_messages (
+  id           TEXT PRIMARY KEY,       -- ULID
+  chatId       TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+  role         TEXT NOT NULL,          -- user | assistant | system
+  text         TEXT NOT NULL,
+  providerId   TEXT,
+  model        TEXT,
+  actions      TEXT NOT NULL DEFAULT '[]',  -- JSON array of ProposedAction
+  createdAt    TEXT NOT NULL,
+  inputTokens  INTEGER NOT NULL DEFAULT 0,
+  outputTokens INTEGER NOT NULL DEFAULT 0,
+  costUsd      REAL
+);
+CREATE INDEX idx_chat_messages_chat ON chat_messages(chatId, createdAt);
+```
+
+A proposed action lives on the message that produced it, not in its own table — it has no
+meaning apart from the turn that proposed it. `providerId`/`model` are recorded per message,
+not only on the chat, because the chat's pinned model can change mid-conversation (recorded
+as a `system` message) and a transcript should not claim the current model wrote every
+earlier turn.
 
 ## 10. Backlog item
 

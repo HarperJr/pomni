@@ -142,7 +142,10 @@ transcript and a failing run explaining why.
 **Goal:** Pomni acts when you are not looking, and shows you what happened.
 
 - AI actions in the web UI: `POST /api/sessions` over the existing `SessionService`, live
-  session streaming, approve/reject a proposed diff
+  session streaming, approve/reject a proposed diff — the conversational half of this
+  (`POST /api/chats`, a typed action catalogue, confirm/reject per action) landed ahead of
+  schedule as Chat; see `SERVER.md` §4 Chats. What is still open here is a session that writes
+  code, not a conversation
 - Notifications (desktop / webhook) on gate failures and landed items
 - Scheduled work: nightly grooming, dependency-update items, scheduled `feature next`
 - Remote `Executor` adapter (container or SSH) for heavy builds

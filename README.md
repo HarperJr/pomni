@@ -82,5 +82,9 @@ detection for Node/Python/Go/Rust/Make, credentials, running a repo's own comman
 run history, gates, doctor, **a Markdown-file backlog with guarded transitions**, an MCP
 server with slash commands and a session hook, the HTTP API and the web UI. 97 tests.
 
-**Next:** the kanban board and live file watching (M2), then the AI feature loop (M3).
+**In progress:** Chat — a web-only tab where you talk to Pomni and it proposes actions
+(backlog moves, starting a task, attaching a workflow or tool) that run only once you confirm
+them, through the same application services as the CLI.
+
+**Next:** the kanban board and live file watching (M2), then the rest of the AI feature loop (M3).
 See [docs/ROADMAP.md](docs/ROADMAP.md).
