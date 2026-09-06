@@ -1,4 +1,5 @@
 import { readFile, writeFile } from 'node:fs/promises';
+import { basename, resolve } from 'node:path';
 import {
   AgentRoleSchema,
   StruggleSchema,
@@ -191,6 +192,11 @@ export function registerWorkflowCommands(
     .option('-m, --struggle <level>', StruggleSchema.options.join(' | '))
     .option('-o, --outputs <text>', 'what it produces')
     .option('--delegates-to <ids>', 'comma-separated agent ids (orchestrator only)')
+    .option('--tools <ids>', 'comma-separated tool ids this agent may use; empty string clears')
+    .option('--files', 'let it read and write files')
+    .option('--no-files', 'stop it touching files')
+    .option('--run', 'let it run commands')
+    .option('--no-run', 'stop it running commands')
     .action(
       async (
         workflowId: string,
@@ -204,9 +210,35 @@ export function registerWorkflowCommands(
           struggle?: string;
           outputs?: string;
           delegatesTo?: string;
+          tools?: string;
+          files?: boolean;
+          run?: boolean;
         },
       ) => {
         const container = await open();
+
+        // A tool is named by id; which kind it is comes from the registry rather than from
+        // the person typing, who should not have to remember whether Figma is MCP or a CLI.
+        let granted: { mcp: string[]; cli: string[] } | undefined;
+        let needsRun = false;
+
+        if (flags.tools !== undefined) {
+          const ids = split(flags.tools) ?? [];
+          const registry = await container.tools.list();
+          granted = { mcp: [], cli: [] };
+
+          for (const id of ids) {
+            const found = registry.find((entry) => entry.id === id);
+            if (!found) {
+              console.error(style.red(`no tool '${id}' — see \`pomni tool list\``));
+              process.exitCode = 1;
+              return;
+            }
+            granted[found.kind].push(id);
+            if (found.kind === 'cli') needsRun = true;
+          }
+        }
+
         const updated = await container.workflows.updateAgent(workflowId, agentId, {
           name: flags.name,
           role: flags.role ? (AgentRoleSchema.parse(flags.role) as AgentRole) : undefined,
@@ -215,8 +247,24 @@ export function registerWorkflowCommands(
           struggle: flags.struggle ? (StruggleSchema.parse(flags.struggle) as Struggle) : undefined,
           outputs: flags.outputs,
           delegatesTo: split(flags.delegatesTo),
+          tools: {
+            ...granted,
+            ...(flags.files === undefined ? {} : { files: flags.files }),
+            // A CLI tool is run through the shell. Granting one without that is granting
+            // nothing, so turn it on and say so rather than leaving a silent no-op.
+            ...(flags.run === undefined ? (needsRun ? { run: true } : {}) : { run: flags.run }),
+          },
         });
+
         console.log(`${style.green('updated')} ${updated.id}`);
+        if (updated.tools.mcp.length > 0 || updated.tools.cli.length > 0) {
+          console.log(
+            style.dim(`  tools: ${[...updated.tools.mcp, ...updated.tools.cli].join(', ')}`),
+          );
+        }
+        if (needsRun && flags.run === undefined) {
+          console.log(style.dim('  enabled `run` — a CLI tool is useless without it'));
+        }
       },
     );
 
@@ -379,6 +427,231 @@ async function assertProvider(container: PomniContainer): Promise<string | null>
     process.exitCode = 1;
     return null;
   }
+}
+
+export function registerTaskCommands(
+  program: Command,
+  open: () => Promise<PomniContainer>,
+  defaultProject: () => Promise<string>,
+): void {
+  const task = program.command('task').description('run a task through an agent workflow');
+
+  task
+    .command('run [text...]')
+    .description('run a task, or a backlog item, through a workflow')
+    .option('-p, --project <id>', 'project')
+    .option('-w, --workflow <id>', 'workflow (default: chosen from the task)')
+    .option('-i, --item <ID>', 'backlog item to run; its spec becomes the task')
+    .option('-r, --repo <id>', 'repo the agents work in')
+    .option(
+      '-f, --file <path>',
+      'attach a file as context; repeat for several',
+      (value: string, all: string[]) => [...all, value],
+      [] as string[],
+    )
+    .action(
+      async (
+        text: string[],
+        flags: {
+          project?: string;
+          workflow?: string;
+          item?: string;
+          repo?: string;
+          file: string[];
+        },
+      ) => {
+        const container = await open();
+        const projectId = flags.project ?? (await defaultProject());
+
+        let description = text.join(' ').trim();
+        if (flags.item) {
+          const item = await container.backlog.get(projectId, flags.item.toUpperCase());
+          description = `${item.title}
+
+${item.body}`;
+        }
+
+        // Read here rather than in the service: the paths are the user's, relative to the
+        // terminal they typed them in, and only this process knows that directory.
+        const context = await Promise.all(
+          flags.file.map(async (path) => ({
+            name: basename(path),
+            content: await readFile(resolve(path), 'utf8'),
+          })),
+        );
+
+        const { run, completion } = await container.pipelines.start({
+          projectId,
+          task: description,
+          workflowId: flags.workflow,
+          itemId: flags.item?.toUpperCase(),
+          repoId: flags.repo,
+          context,
+        });
+
+        console.log(`${style.cyan('run')} ${style.bold(run.id)}  ${run.workflowName}`);
+        if (run.context.length > 0) {
+          console.log(
+            style.dim(`  context:   ${run.context.map((file) => file.name).join(', ')}`),
+          );
+        }
+        console.log(style.dim(`  watch it:  http://localhost:7777/p/${projectId}/console/${run.id}`));
+        console.log();
+
+        // Live progress, so a terminal run is as watchable as the console.
+        container.events.subscribe((event) => {
+          if (event.type === 'pipeline.step.started') {
+            const indent = '  '.repeat(event.depth);
+            console.log(`${indent}${style.cyan('▸')} ${style.bold(event.agentName)} ${style.dim(event.model)}`);
+          }
+          if (event.type === 'pipeline.step.finished') {
+            console.log(
+              `  ${event.status === 'done' ? style.green('✓') : style.red('✗')} ${style.dim(event.summary)}`,
+            );
+          }
+        });
+
+        const finished = await completion;
+        console.log();
+        console.log(
+          finished.status === 'passed'
+            ? style.green(`finished in ${Math.round((finished.durationMs ?? 0) / 1000)}s`)
+            : style.red(`${finished.status}: ${finished.error ?? ''}`),
+        );
+        if (finished.gateStatus !== 'skipped') {
+          console.log(`gate ${finished.gateStatus}: ${finished.gateSummary ?? ''}`);
+        }
+        if (finished.result) {
+          console.log();
+          console.log(finished.result);
+        }
+        if (finished.status !== 'passed') process.exitCode = 1;
+      },
+    );
+
+  task
+    .command('rerun <id>')
+    .description('run a finished run again, telling the agents why the last one ended')
+    .action(async (id: string) => {
+      const container = await open();
+      const { run, completion } = await container.pipelines.rerun(id);
+
+      console.log(`${style.cyan('rerun')} ${style.bold(run.id)}  ${run.workflowName}`);
+      console.log(style.dim(`  retrying ${run.rerunOf}`));
+      console.log(
+        style.dim(`  watch it:  http://localhost:7777/p/${run.projectId}/console/${run.id}`),
+      );
+
+      const finished = await completion;
+      console.log(
+        finished.status === 'passed'
+          ? style.green(`finished ${finished.outcome}`)
+          : style.red(`${finished.status}: ${finished.error ?? ''}`),
+      );
+      if (finished.status !== 'passed') process.exitCode = 1;
+    });
+
+  task
+    .command('questions')
+    .description('what the running pipelines are waiting to be told')
+    .option('-p, --project <id>', 'project')
+    .action(async (flags: { project?: string }) => {
+      const container = await open();
+      const questions = await container.pipelines.openQuestions(flags.project);
+
+      if (questions.length === 0) {
+        console.log(style.dim('nothing is waiting on you'));
+        return;
+      }
+
+      for (const question of questions) {
+        console.log(`${style.cyan(question.id.slice(-8))}  ${style.bold(question.agentName)}`);
+        console.log(`  ${question.question}`);
+        console.log(style.dim(`  answer it:  pomni task answer ${question.id} "…"`));
+        console.log();
+      }
+    });
+
+  task
+    .command('answer <questionId> [text...]')
+    .description('answer a question a run is waiting on')
+    .option(
+      '-f, --file <path>',
+      'attach a file with the answer; repeat for several',
+      (value: string, all: string[]) => [...all, value],
+      [] as string[],
+    )
+    .action(async (questionId: string, text: string[], flags: { file: string[] }) => {
+      const container = await open();
+
+      const files = await Promise.all(
+        flags.file.map(async (path) => ({
+          name: basename(path),
+          content: await readFile(resolve(path), 'utf8'),
+        })),
+      );
+
+      // The id is long; accept the tail the questions list prints.
+      const open_ = await container.pipelines.openQuestions();
+      const match = open_.find(
+        (question) => question.id === questionId || question.id.endsWith(questionId),
+      );
+
+      const answered = await container.pipelines.answer(
+        match?.id ?? questionId,
+        text.join(' '),
+        files,
+      );
+      console.log(`${style.green('answered')} ${answered.id.slice(-8)}`);
+      if (answered.attachments.length > 0) {
+        console.log(
+          style.dim(`  attached: ${answered.attachments.map((file) => file.name).join(', ')}`),
+        );
+      }
+      console.log(style.dim('  the run picks it up within a second'));
+    });
+
+  task
+    .command('cancel <id>')
+    .description('stop a run, or close out one whose process is gone')
+    .action(async (id: string) => {
+      const container = await open();
+      const run = await container.pipelines.cancel(id);
+      console.log(
+        run.status === 'cancelled'
+          ? `${style.green('cancelled')} ${run.id}  ${style.dim(run.error ?? '')}`
+          : `${style.dim('asked to stop')} ${run.id} — in-flight agents will finish`,
+      );
+    });
+
+  task
+    .command('list')
+    .description('recent pipeline runs')
+    .option('-p, --project <id>', 'project')
+    .action(async (flags: { project?: string }) => {
+      const container = await open();
+      const runs = await container.pipelines.list({
+        projectId: flags.project ?? (await defaultProject()),
+      });
+
+      if (runs.length === 0) {
+        console.log(style.dim('nothing has run yet'));
+        return;
+      }
+
+      console.log(
+        table(
+          runs.map((run) => [
+            style.dim(run.id.slice(-8)),
+            run.status === 'passed' ? style.green(run.status) : style.red(run.status),
+            run.workflowName,
+            run.itemId ?? '',
+            truncate(run.task, 46),
+          ]),
+          ['ID', 'STATUS', 'WORKFLOW', 'ITEM', 'TASK'],
+        ),
+      );
+    });
 }
 
 export function registerProviderCommands(

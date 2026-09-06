@@ -51,7 +51,14 @@ const AgentBody = z.object({
   struggle: StruggleSchema.optional(),
   outputs: z.string().optional(),
   delegatesTo: z.array(z.string()).optional(),
-  tools: z.object({ files: z.boolean().optional(), run: z.boolean().optional() }).optional(),
+  tools: z
+    .object({
+      files: z.boolean().optional(),
+      run: z.boolean().optional(),
+      mcp: z.array(z.string()).optional(),
+      cli: z.array(z.string()).optional(),
+    })
+    .optional(),
 });
 
 const UpdateAgentBody = AgentBody.partial();

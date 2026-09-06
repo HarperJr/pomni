@@ -110,6 +110,10 @@ export class ProjectService {
       ...ref.data,
       ...(patch.name !== undefined ? { name: patch.name.trim() } : {}),
       ...(patch.description !== undefined ? { description: patch.description } : {}),
+      // Assigned whole, never merged: a graph merged per-key by index is a graph nobody
+      // wrote. `null` is a value here — it clears the project back to the built-in flow —
+      // so presence of the key, not truthiness, decides.
+      ...(patch.taskFlow !== undefined ? { taskFlow: patch.taskFlow } : {}),
       gates: { ...ref.data.gates, ...(patch.gates ?? {}) },
       policy: { ...ref.data.policy, ...(patch.policy ?? {}) },
       updatedAt: this.clock.iso(),
@@ -156,6 +160,18 @@ export class ProjectService {
     await this.docs.write(layout.project(id), next, { ifMatch: ref.rev });
     this.events.emit({ type: 'project.updated', projectId: id });
     return next.workflows;
+  }
+
+  async setTools(id: string, tools: string[]): Promise<string[]> {
+    const ref = await this.getRef(id);
+    const next = ProjectSchema.parse({
+      ...ref.data,
+      tools: [...new Set(tools)],
+      updatedAt: this.clock.iso(),
+    });
+    await this.docs.write(layout.project(id), next, { ifMatch: ref.rev });
+    this.events.emit({ type: 'project.updated', projectId: id });
+    return next.tools;
   }
 
   /** Advance the item counter without allocating. Used after the item file is written. */

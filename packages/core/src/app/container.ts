@@ -9,11 +9,13 @@ import type {
 } from '../ports/index.js';
 import type { CredentialService } from './credential-service.js';
 import type { BacklogService } from './backlog-service.js';
+import type { ChatService } from './chat-service.js';
 import type { DoctorService } from './doctor-service.js';
 import type { RunService } from './run-service.js';
 import type { DiscoveryService } from './discovery-service.js';
 import type { PipelineService } from './pipeline-service.js';
 import type { ProviderService } from './provider-service.js';
+import type { ToolService } from './tool-service.js';
 import type { WorkflowService } from './workflow-service.js';
 import type { ProjectService } from './project-service.js';
 import type { RepoService } from './repo-service.js';
@@ -37,7 +39,9 @@ export interface PomniContainer {
   workflows: WorkflowService;
   discovery: DiscoveryService;
   providers: ProviderService;
+  tools: ToolService;
   pipelines: PipelineService;
+  chat: ChatService;
   runs: RunService;
   doctor: DoctorService;
   detection: StackDetection;

@@ -40,7 +40,7 @@ export interface CreateAgentInput {
   struggle?: Struggle;
   outputs?: string;
   delegatesTo?: string[];
-  tools?: { files?: boolean; run?: boolean };
+  tools?: { files?: boolean; run?: boolean; mcp?: string[]; cli?: string[] };
 }
 
 export type UpdateAgentInput = Partial<CreateAgentInput>;
@@ -48,6 +48,11 @@ export type UpdateAgentInput = Partial<CreateAgentInput>;
 export interface WorkflowDetail extends Workflow {
   problems: WorkflowProblem[];
   runnable: boolean;
+  /**
+   * The projects this workflow is attached to. A workflow's Out points at another workflow,
+   * and that workflow's project is where the handed-off work lands — usually a different one.
+   */
+  projects: string[];
 }
 
 /**
@@ -101,16 +106,19 @@ export class WorkflowService {
     const files = await this.docs.list(layout.workflowsDir);
     const workflows: WorkflowDetail[] = [];
 
+    const attached = await this.attachments();
+
     for (const file of files) {
       if (!file.endsWith('.yaml')) continue;
       const ref = await this.read(file.replace(/\.yaml$/, ''));
-      if (ref) workflows.push(this.detail(ref.data));
+      if (ref) workflows.push(this.detail(ref.data, attached.get(ref.data.id) ?? []));
     }
     return workflows.sort((a, b) => a.name.localeCompare(b.name));
   }
 
   async get(id: string): Promise<WorkflowDetail> {
-    return this.detail((await this.getRef(id)).data);
+    const { data } = await this.getRef(id);
+    return this.detail(data, (await this.attachments()).get(id) ?? []);
   }
 
   async getRef(id: string): Promise<DocRef<Workflow>> {
@@ -439,9 +447,22 @@ export class WorkflowService {
 
   // -------------------------------------------------------------------------
 
-  private detail(workflow: Workflow): WorkflowDetail {
+  private detail(workflow: Workflow, projects: string[]): WorkflowDetail {
     const problems = validateWorkflow(workflow);
-    return { ...workflow, problems, runnable: problems.length === 0 };
+    return { ...workflow, problems, runnable: problems.length === 0, projects };
+  }
+
+  /** Which projects reference which workflow. One pass, rather than one read per workflow. */
+  private async attachments(): Promise<Map<string, string[]>> {
+    const map = new Map<string, string[]>();
+
+    for (const projectId of await this.projects.listIds()) {
+      const project = await this.projects.getRef(projectId);
+      for (const workflowId of project.data.workflows) {
+        map.set(workflowId, [...(map.get(workflowId) ?? []), projectId]);
+      }
+    }
+    return map;
   }
 
   /** Throws with the reason when the workflow cannot run. Used before starting a task. */

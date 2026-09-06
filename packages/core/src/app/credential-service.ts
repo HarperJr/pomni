@@ -244,6 +244,15 @@ export class CredentialService {
     }
   }
 
+  /**
+   * The secret itself, for a caller that has to hand it to something else — an MCP server's
+   * environment, say. Everything user-facing goes through `describe`, which returns a hint
+   * and never the token.
+   */
+  async secretFor(id: string): Promise<string | null> {
+    return this.safeResolve(await this.get(id));
+  }
+
   private async safeResolve(credential: Credential): Promise<string | null> {
     try {
       return await this.store.resolve(credential);

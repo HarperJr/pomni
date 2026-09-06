@@ -1,6 +1,12 @@
 import { spawn } from 'node:child_process';
 import { join, relative } from 'node:path';
-import { PomniError, describeSource, type AddRepoSourceInput, type RepoRole } from '@pomni/core';
+import {
+  PomniError,
+  RequirementsNotMetError,
+  describeSource,
+  type AddRepoSourceInput,
+  type RepoRole,
+} from '@pomni/core';
 import { FileEventSource } from '@pomni/infra';
 import { startServer } from '@pomni/server';
 import { Command } from 'commander';
@@ -8,9 +14,11 @@ import { createContainer, openContainer, rootForInit } from './container.js';
 import { describeCapabilities, repoRow, statusLabel, style, table } from './format.js';
 import { registerBacklogCommands } from './backlog-commands.js';
 import { registerRunCommands } from './run-commands.js';
+import { registerToolCommands } from './tool-commands.js';
 import {
   registerDiscoveryCommands,
   registerProviderCommands,
+  registerTaskCommands,
   registerWorkflowCommands,
 } from './workflow-commands.js';
 
@@ -609,6 +617,8 @@ export async function main(argv: string[]): Promise<void> {
   registerWorkflowCommands(program, open, defaultProject);
   registerDiscoveryCommands(program, open, defaultProject);
   registerProviderCommands(program, open);
+  registerTaskCommands(program, open, defaultProject);
+  registerToolCommands(program, open, defaultProject);
 
   await program.parseAsync(argv);
 }
@@ -665,6 +675,15 @@ function openBrowser(url: string): void {
 }
 
 export function reportError(error: unknown): void {
+  if (error instanceof RequirementsNotMetError) {
+    console.error(style.red(error.message));
+    const advice = error.unmet.some((unmet) => unmet.kind === 'gate')
+      ? "run 'pomni verify' first, or pass --force to record that you moved it anyway"
+      : 'pass --force to record that you moved it anyway';
+    console.error(style.dim(advice));
+    process.exitCode = 1;
+    return;
+  }
   if (error instanceof PomniError) {
     console.error(style.red(error.message));
     if (error.code === 'not_initialized') {

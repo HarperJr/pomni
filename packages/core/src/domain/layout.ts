@@ -28,6 +28,9 @@ export const layout = {
   /** Pipelines. Outside `projects/` so one workflow can be attached to several. */
   providers: 'providers.yaml',
 
+  /** Tools agents may use: MCP servers and command-line programs. */
+  tools: 'tools.yaml',
+
   workflowsDir: 'workflows',
   workflow: (workflowId: string) => `workflows/${workflowId}.yaml`,
 

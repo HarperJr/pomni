@@ -2,6 +2,7 @@ import { join, resolve } from 'node:path';
 import { DetectorRegistry } from '@pomni/adapters';
 import {
   BacklogService,
+  ChatService,
   CredentialService,
   DiscoveryService,
   DoctorService,
@@ -11,6 +12,7 @@ import {
   ProviderService,
   RepoService,
   RunService,
+  ToolService,
   WorkflowService,
   WorkspaceService,
   layout,
@@ -30,6 +32,7 @@ import {
   InMemoryEventBus,
   NodeFsProbe,
   ProcessExecutor,
+  SqliteChatStore,
   SqlitePipelineStore,
   SqliteRunStore,
   SystemClock,
@@ -98,6 +101,7 @@ export function createContainer(root: string, logLevel: LogLevel = 'warn'): Pomn
   const backlog = new BacklogService(docs, projects, runStore, lock, clock, events);
   const providerService = new ProviderService(docs, new DefaultLlmFactory(), clock, events);
   const workflows = new WorkflowService(docs, projects, providerService, clock, events);
+  const tools = new ToolService(docs, projects, credentials, executor, clock, events, logger);
   const discovery = new DiscoveryService(repos, workflows, fs);
   const pipelineStore = new SqlitePipelineStore(docs.absolute(layout.database));
   const pipelines = new PipelineService(
@@ -107,9 +111,25 @@ export function createContainer(root: string, logLevel: LogLevel = 'warn'): Pomn
     workflows,
     repos,
     providerService,
+    tools,
     backlog,
     runs,
     git,
+    clock,
+    events,
+    logger,
+  );
+  const chatStore = new SqliteChatStore(docs.absolute(layout.database));
+  const chat = new ChatService(
+    chatStore,
+    providerService,
+    projects,
+    repos,
+    backlog,
+    workflows,
+    tools,
+    runs,
+    pipelines,
     clock,
     events,
     logger,
@@ -125,7 +145,9 @@ export function createContainer(root: string, logLevel: LogLevel = 'warn'): Pomn
     workflows,
     discovery,
     providers: providerService,
+    tools,
     pipelines,
+    chat,
     runs,
     doctor,
     detection,
