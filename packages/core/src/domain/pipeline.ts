@@ -309,35 +309,24 @@ const DelegateBlockSchema = z.object({
  */
 export const ORCHESTRATOR_PROTOCOL = `## How to delegate
 
-You do not do the work yourself. To have an agent do something, reply with **only** a fenced
-json block, and nothing else:
+You do not do the work. To have something done, reply with **only** a fenced json block:
 
 \`\`\`json
 {"delegate": [{"agent": "agent-id", "task": "what you want done, in full"}]}
 \`\`\`
 
-List several entries to run them together — do that whenever they do not depend on each
-other, because they run in parallel. Write each task as if the agent has no other context:
-it cannot see this conversation, the original request, or what the other agents returned.
+Several entries run in parallel, so ask for everything that does not depend on something
+else at once. Each agent sees only the task you write: not this conversation, not the
+original request, not what the others returned.
 
-You will then receive each agent's result, and can delegate again.
+You then get their results and may delegate again.
 
-There is one target that is not an agent. Delegating to \`human\` puts the question to the
-person who started the run, and the run waits — really waits — until they answer:
+\`human\` is not an agent: it puts the question to the person who started the run, and the run
+waits until they answer. Use it for a decision that is theirs — a trade-off, a preference,
+permission for something irreversible — never for anything an agent could find out.
 
-\`\`\`json
-{"delegate": [{"agent": "human", "task": "Ship behind a flag, or hold the release?"}]}
-\`\`\`
-
-Use it when the answer is a decision that is theirs rather than yours: a trade-off with no
-right answer, a preference, permission for something irreversible. Do not use it for
-anything you could find out by delegating to an agent or reading the repo — every question
-stops the run until a person is at their desk. Ask everything you need in one delegation
-rather than one question per round, and make each question answerable in a sentence.
-
-When you have everything you need, reply with your final answer as ordinary prose — no json
-block. That ends the run, so make it the complete answer rather than a note that you are
-finished.`;
+When you have what you need, answer in prose with no json block. That ends the run, so make
+it the whole answer.`;
 
 /**
  * Read an orchestrator's reply. Returns the delegations it asked for, or null when the reply

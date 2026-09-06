@@ -181,18 +181,37 @@ export function toolBriefing(grants: ToolGrant[]): string | null {
   for (const { tool } of grants) {
     const how =
       tool.kind === 'mcp'
-        ? `Its tools are available to you directly, named \`mcp__${tool.id}__*\`.`
-        : `Run it with the Bash tool as \`${tool.bin}\`.`;
+        ? 'Its tools are yours, named `mcp__' + tool.id + '__*`.'
+        : 'Run it with Bash as `' + tool.bin + '`.';
 
-    lines.push(`### ${tool.name}`, '');
+    lines.push('### ' + tool.name, '');
     if (tool.description.trim()) lines.push(tool.description.trim(), '');
     lines.push(how, '');
-    if (tool.usage.trim()) lines.push(tool.usage.trim(), '');
+    // Bounded on purpose: this text is re-sent on every turn of every agent holding the
+    // tool. A page of usage costs more than it teaches; the tool's own --help is one call
+    // away and is always current.
+    if (tool.usage.trim()) lines.push(clip(tool.usage.trim(), MAX_USAGE_BYTES), '');
   }
 
-  lines.push(
-    'These are yours to use when they help. Nothing obliges you to use one, but do not',
-    'claim you cannot do something these tools can do.',
-  );
-  return lines.join('\n');
+  return lines.join('\n').trimEnd();
+}
+
+/** How much usage text one tool may add to a prompt. */
+export const MAX_USAGE_BYTES = 900;
+
+function clip(text: string, bytes: number): string {
+  if (Buffer.byteLength(text, 'utf8') <= bytes) return text;
+
+  // Cut on a line boundary: half a sentence reads as a mistake rather than a limit.
+  const lines = text.split('\n');
+  const kept: string[] = [];
+  let size = 0;
+
+  for (const line of lines) {
+    size += Buffer.byteLength(line, 'utf8') + 1;
+    if (size > bytes) break;
+    kept.push(line);
+  }
+
+  return kept.join('\n') + '\n\n(Usage trimmed. Run the tool with --help for the rest.)';
 }
