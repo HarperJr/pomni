@@ -1,5 +1,11 @@
 import { useEffect, type ReactNode } from 'react';
-import type { RepoStatus } from './api';
+import type { PipelineRun, RepoStatus } from './api';
+
+/**
+ * Shared by the Projects grid and the Tracker cards, so the two screens make one request for
+ * "what is running anywhere" instead of each polling their own.
+ */
+export const RUNNING_PIPELINES_KEY = ['pipelines', 'running'] as const;
 
 export function Dialog({
   title,
@@ -69,6 +75,24 @@ export function Alert({
 }) {
   if (!children) return null;
   return <div className={`alert alert-${kind}`}>{children}</div>;
+}
+
+/**
+ * A pulsing dot plus a count, shown on a project card or a tracker task card when a pipeline
+ * is running for it. Always mounted — even with no runs — so its reserved height keeps the
+ * grid from reflowing as runs start and finish.
+ */
+export function RunningBadge({ runs }: { runs: PipelineRun[] }) {
+  if (runs.length === 0) return <div className="running-badge" />;
+
+  const only = runs.length === 1 ? runs[0] : undefined;
+
+  return (
+    <div className="running-badge running-badge-active">
+      <span className="dot spin" />
+      {runs.length} running{only ? ` · ${only.workflowName}` : ''}
+    </div>
+  );
 }
 
 export function errorMessage(error: unknown): string {

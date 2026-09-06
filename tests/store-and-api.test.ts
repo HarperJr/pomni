@@ -186,4 +186,100 @@ describe('http api', () => {
 
     await app.close();
   });
+
+  describe('runs across every project', () => {
+    /** A project with a runnable one-agent workflow attached, so `pipelines.start` succeeds. */
+    async function seedProject(name: string): Promise<string> {
+      const project = await harness.projects.create({ name });
+      await harness.workflows.attach(project.id, 'solo');
+      return project.id;
+    }
+
+    beforeEach(async () => {
+      await harness.workflows.create({ name: 'Solo' });
+      await harness.workflows.addAgent('solo', {
+        name: 'Lead',
+        role: 'orchestrator',
+        spec: 'Owns the question.',
+        prompt: 'You lead.',
+      });
+      // An orchestrator with nobody to delegate to is not runnable.
+      await harness.workflows.addAgent('solo', {
+        name: 'Analyst',
+        spec: 'Answers questions.',
+        prompt: 'You analyse.',
+      });
+    });
+
+    it('lists runs belonging to more than one project', async () => {
+      await seedProject('Acme');
+      await seedProject('Globex');
+      harness.llm.replies = ['Done with acme.', 'Done with globex.'];
+
+      await (await harness.pipelines.start({ projectId: 'acme', task: 'Ship it' })).completion;
+      await (await harness.pipelines.start({ projectId: 'globex', task: 'Ship it too' })).completion;
+
+      const app = await createApp(harness, { webRoot: join(harness.dir, 'no-web') });
+      const listed = await app.inject({ method: 'GET', url: '/api/pipelines' });
+
+      expect(listed.statusCode).toBe(200);
+      const projectIds = listed.json().runs.map((run: { projectId: string }) => run.projectId);
+      // The point of the endpoint: without a `project` param it answers for all of them.
+      expect(new Set(projectIds)).toEqual(new Set(['acme', 'globex']));
+
+      await app.close();
+    });
+
+    it('returns only the run still in flight when asked for running ones', async () => {
+      await seedProject('Acme');
+      await seedProject('Globex');
+
+      // A finished run to be excluded.
+      harness.llm.replies = ['Done with acme.'];
+      const finished = await (
+        await harness.pipelines.start({ projectId: 'acme', task: 'Ship it' })
+      ).completion;
+      expect(finished.status).toBe('passed');
+
+      // A second run held mid-answer, so there is a genuinely running row to find.
+      let release = (): void => {};
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      harness.llm.gate = () => held;
+      const inFlight = await harness.pipelines.start({ projectId: 'globex', task: 'Keep going' });
+
+      const app = await createApp(harness, { webRoot: join(harness.dir, 'no-web') });
+      try {
+        const listed = await app.inject({ method: 'GET', url: '/api/pipelines?status=running' });
+
+        expect(listed.statusCode).toBe(200);
+        const runs = listed.json().runs as Array<{ id: string; status: string; projectId: string }>;
+        expect(runs.map((run) => run.id)).toEqual([inFlight.run.id]);
+        expect(runs[0]?.projectId).toBe('globex');
+        expect(runs.some((run) => run.id === finished.id)).toBe(false);
+      } finally {
+        // A failed assertion must fail the test, not wedge the suite: the held run has to be let
+        // go and settled before cleanup removes the directory its sqlite handle is still on.
+        // `allSettled` so a rejection here cannot replace the assertion error that got us here.
+        release();
+        await Promise.allSettled([inFlight.completion]);
+        await app.close();
+      }
+      // Settled above, so this only re-reads the outcome — it surfaces a run that ended badly.
+      await inFlight.completion;
+    });
+
+    it('rejects a status it does not recognise instead of answering with nothing', async () => {
+      const app = await createApp(harness, { webRoot: join(harness.dir, 'no-web') });
+
+      const response = await app.inject({ method: 'GET', url: '/api/pipelines?status=pending' });
+
+      expect(response.statusCode).toBe(422);
+      expect(response.headers['content-type']).toContain('application/problem+json');
+      expect(response.json().code).toBe('validation');
+
+      await app.close();
+    });
+  });
 });

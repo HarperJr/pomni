@@ -292,6 +292,25 @@ a {
   50% { opacity: 0.25; }
 }
 
+/* Reserves its line whether or not a run is in flight, so a badge appearing or disappearing
+   never shifts the cards around it. */
+.running-badge {
+  height: 17px;
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.running-badge-active {
+  display: flex;
+  align-items: center;
+  color: var(--warn);
+}
+
+.running-badge-active .dot {
+  background: var(--warn);
+}
+
 /* -- controls ----------------------------------------------------------- */
 
 button {

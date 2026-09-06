@@ -15,8 +15,41 @@ export interface Problem {
   unmet?: unknown;
 }
 
+/**
+ * A `ZodError`, detected structurally rather than with `instanceof`. `@pomni/server` has no
+ * declared dependency on zod — every route that parses with it (`pipelines.ts` among others)
+ * reaches it transitively through `@pomni/core`. An `instanceof ZodError` check here would need
+ * its own `import { ZodError } from 'zod'`, and npm's hoisting gives no guarantee that resolves
+ * to the same module instance a route's `z.parse` threw from; a mismatch would make the check
+ * silently always fail. Matching on `name` and `issues` needs no zod import at all, so there is
+ * no instance to mismatch.
+ */
+function isZodError(error: unknown): error is { issues: Array<{ path: Array<string | number>; message: string }> } {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    (error as { name?: unknown }).name === 'ZodError' &&
+    Array.isArray((error as { issues?: unknown }).issues)
+  );
+}
+
 export function registerErrorHandler(app: FastifyInstance): void {
   app.setErrorHandler((rawError: unknown, request, reply) => {
+    if (isZodError(rawError)) {
+      const first = rawError.issues[0];
+      const field = first?.path?.length ? first.path.join('.') : '(body)';
+      const problem: Problem = {
+        type: 'https://pomni.dev/errors/validation',
+        title: 'validation failed',
+        status: 422,
+        code: 'validation',
+        detail: first ? `${field}: ${first.message}` : 'validation failed',
+        errors: rawError.issues,
+      };
+      reply.code(422).type('application/problem+json').send(problem);
+      return;
+    }
+
     const error = rawError as Error & { statusCode?: number };
     if (error instanceof PomniError) {
       const problem: Problem = {

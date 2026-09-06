@@ -1186,6 +1186,9 @@ export const api = {
       body: JSON.stringify({ answer, files }),
     }),
 
+  listRunningPipelines: () =>
+    request<{ runs: PipelineRun[] }>('/api/pipelines?status=running'),
+
   rerunPipeline: (runId: string) =>
     request<{ run: PipelineRun }>(`/api/pipelines/${encodeURIComponent(runId)}/rerun`, {
       method: 'POST',

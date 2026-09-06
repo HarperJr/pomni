@@ -2,6 +2,14 @@ import { z } from 'zod';
 import type { PomniContainer } from '@pomni/core';
 import type { FastifyInstance } from 'fastify';
 
+const ListQuery = z.object({
+  status: z.enum(['running', 'passed', 'failed', 'cancelled']).optional(),
+  project: z.string().optional(),
+  workflow: z.string().optional(),
+  item: z.string().optional(),
+  limit: z.coerce.number().optional(),
+});
+
 const StartBody = z.object({
   task: z.string().min(1),
   workflowId: z.string().optional(),
@@ -33,6 +41,25 @@ export async function pipelineRoutes(
     completion.catch((error: unknown) => container.logger.error('pipeline failed', error));
     reply.code(202);
     return { run };
+  });
+
+  /**
+   * Cross-project view: the per-project GET above can't answer "what is running anywhere",
+   * which is exactly what the Projects and Tracker screens need to show live indicators.
+   */
+  app.get<{
+    Querystring: { status?: string; project?: string; workflow?: string; item?: string; limit?: string };
+  }>('/api/pipelines', async (request) => {
+    const query = ListQuery.parse(request.query);
+    return {
+      runs: await container.pipelines.list({
+        status: query.status,
+        projectId: query.project,
+        workflowId: query.workflow,
+        itemId: query.item,
+        limit: query.limit,
+      }),
+    };
   });
 
   app.get<{ Params: { id: string }; Querystring: { limit?: string; workflow?: string } }>(

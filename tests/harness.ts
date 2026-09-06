@@ -406,6 +406,13 @@ export class FakeLlm implements LlmPort {
    */
   failCompleteWhen: RegExp | null = null;
 
+  /**
+   * Awaited before every answer. A test that needs to see a run while it is still `running`
+   * holds this open, does its asserting, then releases it. Unset by default, so every other
+   * test stays synchronous.
+   */
+  gate?: () => Promise<void>;
+
   async complete(request: LlmRequest): Promise<LlmResult> {
     if (this.failCompleteWhen?.test(request.system ?? '')) {
       this.calls.push({ ...request, messages: [...request.messages] });
@@ -415,6 +422,7 @@ export class FakeLlm implements LlmPort {
     // A copy: callers keep appending to the same conversation, and a recording that changes
     // after the fact cannot show what this call was actually given.
     this.calls.push({ ...request, messages: [...request.messages] });
+    if (this.gate) await this.gate();
     return {
       text: this.replies.shift() ?? this.reply,
       stopReason: 'end_turn',

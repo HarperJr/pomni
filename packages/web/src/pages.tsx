@@ -3,7 +3,14 @@ import { useState, type ReactNode } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { AddRepoDialog } from './AddRepoDialog';
 import { api, REPO_ROLES, type Credential, type Repo, type RepoRole } from './api';
-import { Alert, Dialog, StatusBadge, errorMessage } from './components';
+import {
+  Alert,
+  Dialog,
+  RUNNING_PIPELINES_KEY,
+  RunningBadge,
+  StatusBadge,
+  errorMessage,
+} from './components';
 import { ItemList } from './items';
 import { DoctorPanel, RunControls, RunList, VerifyButton } from './runs';
 import { PipelinePanel } from './console';
@@ -19,6 +26,12 @@ export function ProjectsPage() {
   const projects = useQuery({
     queryKey: ['projects'],
     queryFn: () => api.listProjects().then((result) => result.projects),
+  });
+
+  const running = useQuery({
+    queryKey: RUNNING_PIPELINES_KEY,
+    queryFn: () => api.listRunningPipelines().then((result) => result.runs),
+    refetchInterval: false,
   });
 
   return (
@@ -43,20 +56,28 @@ export function ProjectsPage() {
       )}
 
       <div className="grid">
-        {(projects.data ?? []).map((project) => (
-          <Link key={project.id} className="project-card" to={`/p/${project.id}`}>
-            <h3>{project.name}</h3>
-            <div className="dim mono">{project.id}</div>
-            <div style={{ marginTop: 12 }} className="tags">
-              {project.repos.length === 0 && <span className="dim">no repos</span>}
-              {project.repos.map((repo) => (
-                <span key={repo.id} className="tag">
-                  {repo.id}
-                </span>
-              ))}
-            </div>
-          </Link>
-        ))}
+        {(projects.data ?? []).map((project) => {
+          const projectRuns = (running.data ?? []).filter((run) => run.projectId === project.id);
+          return (
+            <Link
+              key={project.id}
+              className="project-card"
+              to={projectRuns.length > 0 ? `/p/${project.id}?block=runs` : `/p/${project.id}`}
+            >
+              <h3>{project.name}</h3>
+              <div className="dim mono">{project.id}</div>
+              <div style={{ marginTop: 12 }} className="tags">
+                {project.repos.length === 0 && <span className="dim">no repos</span>}
+                {project.repos.map((repo) => (
+                  <span key={repo.id} className="tag">
+                    {repo.id}
+                  </span>
+                ))}
+              </div>
+              <RunningBadge runs={projectRuns} />
+            </Link>
+          );
+        })}
       </div>
 
       {creating && <NewProjectDialog onClose={() => setCreating(false)} />}

@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { useQueries, useQuery } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
 import { api } from './api';
-import { Alert, errorMessage } from './components';
+import { Alert, RUNNING_PIPELINES_KEY, RunningBadge, errorMessage } from './components';
 import { ItemStatusBadge } from './items';
 
 /**
@@ -62,6 +62,12 @@ export function TrackerPage() {
     enabled: selected !== null,
     staleTime: 60_000,
     refetchOnWindowFocus: false,
+  });
+
+  const running = useQuery({
+    queryKey: RUNNING_PIPELINES_KEY,
+    queryFn: () => api.listRunningPipelines().then((result) => result.runs),
+    refetchInterval: false,
   });
 
   const waveByItem = new Map<string, number>();
@@ -138,35 +144,44 @@ export function TrackerPage() {
             </div>
           ) : (
             <div className="grid">
-              {itemsData.map((item) => (
-                <Link
-                  key={item.id}
-                  className="project-card"
-                  to={`/p/${item.projectId}/items/${item.id}`}
-                >
-                  <h3>{item.title}</h3>
-                  <div className="dim mono">{item.id}</div>
-                  <div className="tags" style={{ marginTop: 8 }}>
-                    <ItemStatusBadge status={item.status} />
-                    <span className="tag">{item.priority}</span>
-                    <span className="tag">{item.type}</span>
-                    {item.repos.map((repo) => (
-                      <span key={repo} className="tag">{repo}</span>
-                    ))}
-                    {waveByItem.has(item.id) && (
-                      <span className="tag">wave {waveByItem.get(item.id)}</span>
-                    )}
-                    {waitingOnByItem.has(item.id) && (
-                      <span
-                        className="tag warn"
-                        title={`waiting on ${waitingOnByItem.get(item.id)!.join(', ')}`}
-                      >
-                        waiting
-                      </span>
-                    )}
-                  </div>
-                </Link>
-              ))}
+              {itemsData.map((item) => {
+                const itemRuns = (running.data ?? []).filter((run) => run.itemId === item.id);
+                const [itemRun] = itemRuns;
+                return (
+                  <Link
+                    key={item.id}
+                    className="project-card"
+                    to={
+                      itemRun
+                        ? `/p/${item.projectId}/console/${itemRun.id}`
+                        : `/p/${item.projectId}/items/${item.id}`
+                    }
+                  >
+                    <h3>{item.title}</h3>
+                    <div className="dim mono">{item.id}</div>
+                    <div className="tags" style={{ marginTop: 8 }}>
+                      <ItemStatusBadge status={item.status} />
+                      <span className="tag">{item.priority}</span>
+                      <span className="tag">{item.type}</span>
+                      {item.repos.map((repo) => (
+                        <span key={repo} className="tag">{repo}</span>
+                      ))}
+                      {waveByItem.has(item.id) && (
+                        <span className="tag">wave {waveByItem.get(item.id)}</span>
+                      )}
+                      {waitingOnByItem.has(item.id) && (
+                        <span
+                          className="tag warn"
+                          title={`waiting on ${waitingOnByItem.get(item.id)!.join(', ')}`}
+                        >
+                          waiting
+                        </span>
+                      )}
+                    </div>
+                    <RunningBadge runs={itemRuns} />
+                  </Link>
+                );
+              })}
             </div>
           )}
         </div>

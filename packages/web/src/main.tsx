@@ -3,6 +3,7 @@ import { useEffect, useState, type ReactNode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { BrowserRouter, Link, Navigate, Route, Routes, useLocation } from 'react-router-dom';
 import { CredentialsPage, ProjectPage, ProjectsPage } from './pages';
+import { RUNNING_PIPELINES_KEY } from './components';
 import { ItemPage } from './items';
 import { RunPage } from './runs';
 import { ConsolePage } from './console';
@@ -116,6 +117,16 @@ function useServerEvents() {
     ]) {
       source.addEventListener(type, refreshWaves as EventListener);
     }
+
+    // The running-pipelines badge (Projects grid, Tracker cards) needs refreshing on exactly
+    // the two events that flip a run in or out of "running" — not the full list above, which
+    // also fires on chat-adjacent project/tool changes that never change who is running.
+    const refreshRunning = () => {
+      void client.invalidateQueries({ queryKey: RUNNING_PIPELINES_KEY });
+    };
+
+    source.addEventListener('pipeline.started', refreshRunning as EventListener);
+    source.addEventListener('pipeline.finished', refreshRunning as EventListener);
 
     return () => source.close();
   }, [client]);
