@@ -9,6 +9,7 @@ import {
   normalizeGitUrl,
   describeSource,
 } from './source.js';
+import { isUlid, ulid } from './ulid.js';
 
 describe('ids', () => {
   it('slugifies names into directory-safe ids', () => {
@@ -117,5 +118,43 @@ describe('capabilities', () => {
     expect(merged.test?.cmd).toBe('pnpm test --custom');
     expect(merged.build?.cmd).toBe('new build');
     expect(merged.lint?.cmd).toBe('pnpm lint');
+  });
+});
+
+describe('ulid', () => {
+  it('sorts in creation order when every id shares one timestamp', () => {
+    // What a FixedClock does to every id in a test, and what `pipeline-service` does to the
+    // six ids it mints in a row.
+    const ids = Array.from({ length: 500 }, () => ulid(1_700_000_000_000));
+    const sorted = [...ids].sort();
+    expect(ids).toEqual(sorted);
+    expect(new Set(ids).size).toBe(ids.length);
+    for (const id of ids) expect(isUlid(id)).toBe(true);
+  });
+
+  it('carries across base32 characters rather than only stepping the last one', () => {
+    const first = ulid(1_700_000_000_001);
+    let last = first;
+    for (let i = 0; i < 40; i += 1) {
+      const next = ulid(1_700_000_000_001);
+      expect(next > last).toBe(true);
+      last = next;
+    }
+    expect(last.slice(0, 10)).toBe(first.slice(0, 10));
+  });
+
+  it('keeps increasing when the clock goes backwards instead of throwing', () => {
+    const ahead = ulid(1_700_000_050_000);
+    const behind = ulid(1_600_000_000_000);
+    expect(behind > ahead).toBe(true);
+    // The timestamp is held at the highest one seen, so the id stays sortable.
+    expect(behind.slice(0, 10)).toBe(ahead.slice(0, 10));
+  });
+
+  it('draws fresh randomness once the timestamp actually advances', () => {
+    const before = ulid(1_700_000_060_000);
+    const after = ulid(1_700_000_060_001);
+    expect(after > before).toBe(true);
+    expect(after.slice(0, 10)).not.toBe(before.slice(0, 10));
   });
 });

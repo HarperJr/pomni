@@ -49,10 +49,10 @@ export class SqlitePipelineStore implements PipelineStore {
   async insertRun(run: PipelineRun): Promise<void> {
     this.statement(
       `INSERT INTO pipeline_runs (id, project_id, workflow_id, workflow_name, provider_id,
-                                  item_id, rerun_of, task, context, status, result, error,
-                                  gate_status, gate_summary, item_status, started_at,
-                                  ended_at, duration_ms, cost_usd)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                                  item_id, rerun_of, task, context, status, pid, result, error,
+                                  gate_status, gate_summary, item_status, outcome, unmet,
+                                  started_at, ended_at, duration_ms, cost_usd)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       run.id,
       run.projectId,
@@ -64,11 +64,14 @@ export class SqlitePipelineStore implements PipelineStore {
       run.task,
       JSON.stringify(run.context),
       run.status,
+      run.pid,
       run.result,
       run.error,
       run.gateStatus,
       run.gateSummary,
       run.itemStatus,
+      run.outcome,
+      JSON.stringify(run.unmet),
       run.startedAt,
       run.endedAt,
       run.durationMs,
@@ -79,12 +82,13 @@ export class SqlitePipelineStore implements PipelineStore {
   async updateRun(id: string, run: PipelineRun): Promise<void> {
     this.statement(
       `UPDATE pipeline_runs
-         SET status = ?, result = ?, error = ?, gate_status = ?, gate_summary = ?,
+         SET status = ?, pid = ?, result = ?, error = ?, gate_status = ?, gate_summary = ?,
              item_status = ?, outcome = ?, unmet = ?, ended_at = ?, duration_ms = ?,
              cost_usd = ?
        WHERE id = ?`,
     ).run(
       run.status,
+      run.pid,
       run.result,
       run.error,
       run.gateStatus,
@@ -323,6 +327,7 @@ interface RunRow {
   task: string;
   context: string | null;
   status: string;
+  pid: number | null;
   result: string | null;
   error: string | null;
   gate_status: string;
@@ -372,6 +377,7 @@ function toRun(row: RunRow): PipelineRun {
     task: row.task,
     context: toContext(row.context),
     status: row.status as PipelineRun['status'],
+    pid: row.pid,
     result: row.result,
     error: row.error,
     gateStatus: (row.gate_status ?? 'skipped') as PipelineRun['gateStatus'],
@@ -559,6 +565,8 @@ const MIGRATIONS: string[] = [
   `ALTER TABLE pipeline_questions ADD COLUMN attachments TEXT NOT NULL DEFAULT '[]';`,
 
   `ALTER TABLE pipeline_steps ADD COLUMN actions TEXT NOT NULL DEFAULT '[]';`,
+
+  `ALTER TABLE pipeline_runs ADD COLUMN pid INTEGER;`,
 ];
 
 function migrate(db: SqliteDatabase): void {

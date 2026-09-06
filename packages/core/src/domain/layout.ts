@@ -50,6 +50,19 @@ export const layout = {
   workspaceDir: 'workspace',
   workspaceProject: (projectId: string) => `workspace/${projectId}`,
   workspaceRepo: (projectId: string, repoId: string) => `workspace/${projectId}/${repoId}`,
+
+  /**
+   * Per-run worktrees. Gitignored, and a sibling of `workspace/` rather than a directory
+   * inside it: `workspace/<projectId>/<repoId>` is the repo slot, so a `worktrees` entry there
+   * would collide with a repo whose id slugs to `worktrees`, and a reserved word is a rule
+   * someone has to remember. A linked repo's worktree lives here too, never beside the user's
+   * own checkout.
+   */
+  worktreesDir: 'worktrees',
+  worktreeProject: (projectId: string) => `worktrees/${projectId}`,
+  worktreeRepo: (projectId: string, repoId: string) => `worktrees/${projectId}/${repoId}`,
+  worktree: (projectId: string, repoId: string, runId: string) =>
+    `worktrees/${projectId}/${repoId}/${runId}`,
 } as const;
 
 export const POMNI_DIR = '.pomni';

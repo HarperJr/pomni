@@ -1,4 +1,4 @@
-import type { RepoStatus, ResolvedRepo } from '@pomni/core';
+import type { RepoStatus, ResolvedRepo, Worktree } from '@pomni/core';
 
 const useColor = process.stdout.isTTY && !process.env.NO_COLOR;
 
@@ -53,7 +53,7 @@ export function table(rows: string[][], header?: string[]): string {
   return lines.join('\n');
 }
 
-export function repoRow(repo: ResolvedRepo): string[] {
+export function repoRow(repo: ResolvedRepo, worktrees: Worktree[] = []): string[] {
   const stack = repo.stack?.detected.slice(0, 3).join(', ') ?? style.dim('—');
   const source =
     repo.source.kind === 'local'
@@ -69,7 +69,26 @@ export function repoRow(repo: ResolvedRepo): string[] {
     stack,
     repo.source.kind === 'local' ? style.dim('local') : style.dim('git'),
     source,
+    worktreeSummary(repo, worktrees),
   ];
+}
+
+/** What `pomni repo list` shows for "who is using this repo right now". */
+function worktreeSummary(repo: ResolvedRepo, worktrees: Worktree[]): string {
+  if (worktrees.length > 0) {
+    const runs = worktrees.map((wt) => wt.runId).join(', ');
+    return `${worktrees.length} (${runs})`;
+  }
+  switch (repo.worktrees) {
+    case 'never':
+      return style.dim('never');
+    case 'always':
+      return style.dim('always');
+    case 'auto':
+      return repo.source.kind === 'local'
+        ? style.dim('shared — opt in: --worktrees always')
+        : '';
+  }
 }
 
 export function describeCapabilities(capabilities: Record<string, { cmd: string }>): string {

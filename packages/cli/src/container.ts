@@ -15,6 +15,7 @@ import {
   ToolService,
   WorkflowService,
   WorkspaceService,
+  WorktreeService,
   layout,
   type PomniContainer,
 } from '@pomni/core';
@@ -35,6 +36,7 @@ import {
   SqliteChatStore,
   SqlitePipelineStore,
   SqliteRunStore,
+  SqliteWorktreeStore,
   SystemClock,
   findWorkspaceRoot,
   type LogLevel,
@@ -97,13 +99,29 @@ export function createContainer(root: string, logLevel: LogLevel = 'warn'): Pomn
     events,
     logger,
   );
-  const doctor = new DoctorService(projects, repos, executor, git);
+
+  // Shares pomni.db with the pipeline store, so it is constructed here rather than beside
+  // the other worktree wiring below.
+  const pipelineStore = new SqlitePipelineStore(docs.absolute(layout.database));
+  const worktreeStore = new SqliteWorktreeStore(docs.absolute(layout.database));
+  const worktrees = new WorktreeService(
+    docs,
+    worktreeStore,
+    pipelineStore,
+    git,
+    fs,
+    executor,
+    clock,
+    events,
+    logger,
+  );
+
+  const doctor = new DoctorService(projects, repos, executor, git, worktrees);
   const backlog = new BacklogService(docs, projects, runStore, lock, clock, events);
   const providerService = new ProviderService(docs, new DefaultLlmFactory(), clock, events);
   const workflows = new WorkflowService(docs, projects, providerService, clock, events);
   const tools = new ToolService(docs, projects, credentials, executor, clock, events, logger);
   const discovery = new DiscoveryService(repos, workflows, fs);
-  const pipelineStore = new SqlitePipelineStore(docs.absolute(layout.database));
   const pipelines = new PipelineService(
     docs,
     pipelineStore,
@@ -118,6 +136,7 @@ export function createContainer(root: string, logLevel: LogLevel = 'warn'): Pomn
     clock,
     events,
     logger,
+    worktrees,
   );
   const chatStore = new SqliteChatStore(docs.absolute(layout.database));
   const chat = new ChatService(
@@ -150,6 +169,7 @@ export function createContainer(root: string, logLevel: LogLevel = 'warn'): Pomn
     chat,
     runs,
     doctor,
+    worktrees,
     detection,
     executor,
     runStore,

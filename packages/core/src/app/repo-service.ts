@@ -3,7 +3,13 @@ import { mergeCapabilities } from '../domain/capability.js';
 import { ConflictError, NotFoundError, PomniError, ValidationError } from '../domain/errors.js';
 import { assertSlug, repoIdFromSource, uniqueId } from '../domain/ids.js';
 import { layout } from '../domain/layout.js';
-import { RepoSchema, type Repo, type RepoRole, type ResolvedRepo } from '../domain/repo.js';
+import {
+  RepoSchema,
+  type Repo,
+  type RepoRole,
+  type ResolvedRepo,
+  type WorktreePolicy,
+} from '../domain/repo.js';
 import {
   assertCredentialUsable,
   detectProvider,
@@ -64,6 +70,8 @@ export interface UpdateRepoInput {
   provider?: GitSource['provider'];
   /** Required to change the url of a repo that already has a working copy. */
   reclone?: boolean;
+  /** Whether a pipeline run gets its own worktree of this repo. */
+  worktrees?: WorktreePolicy;
 }
 
 /**
@@ -233,6 +241,7 @@ export class RepoService {
       ...current,
       ...(patch.name !== undefined ? { name: patch.name.trim() } : {}),
       ...(patch.role !== undefined ? { role: patch.role } : {}),
+      ...(patch.worktrees !== undefined ? { worktrees: patch.worktrees } : {}),
       source,
       // A source edit invalidates whatever the last attempt concluded; the next sync decides.
       ...(urlChanged ? { status: 'cloning', stack: null, vcs: null, lastError: null } : {}),

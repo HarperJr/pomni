@@ -16,6 +16,7 @@ export * from './domain/source.js';
 export * from './domain/ulid.js';
 export * from './domain/tool.js';
 export * from './domain/workflow.js';
+export * from './domain/worktree.js';
 
 // Items and chats each have a state machine, and both call its guards `assertTransition` and
 // `canTransition`. The barrel keeps the item ones — what these names meant before chats
@@ -40,3 +41,4 @@ export * from './app/provider-service.js';
 export * from './app/tool-service.js';
 export * from './app/workflow-service.js';
 export * from './app/workspace-service.js';
+export * from './app/worktree-service.js';

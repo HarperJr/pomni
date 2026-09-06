@@ -164,7 +164,9 @@ with the transcript one click away.
 - Cross-project items and a dependency graph across registered projects
 - Monorepo support: sub-projects with inherited capabilities
 - Stack adapters as loadable plugins; adapter authoring guide
-- Multi-agent execution: parallel items with worktree isolation and conflict detection
+- Multi-agent execution: parallel items, now that per-run worktree isolation and
+  conflict detection on non-isolatable repos have shipped (see ARCHITECTURE.md §8,
+  DATA-MODEL.md §9) — what is still open is deciding which ready items to run at once
 - Policy profiles per project (autonomy levels from suggest-only to auto-land)
 
 **Done when:** Pomni coordinates work across several repositories without any of them knowing

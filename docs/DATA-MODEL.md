@@ -29,8 +29,13 @@ type RepoSource =
 `WorkspaceService.workingDir(repo)` is the **only** code that branches on `kind`. A local
 repo resolves to the path the user linked; a git repo resolves to its slot in the managed
 workspace. Everything downstream — detection, capabilities, runs, gates, sessions — receives
-a `workingDir` and never asks where it came from, so adding `worktree` (parallel agents on
-one repo) or `remote` (execution on another host) later is a new arm plus a resolver.
+a `workingDir` and never asks where it came from, so adding `remote` (execution on another
+host) later is a new arm plus a resolver.
+
+Per-run isolation did **not** take this path. A `Worktree` (§9) is a record of its own, not a
+third arm of `RepoSource` — a source arm would mean one `Repo` per live worktree, so three
+concurrent runs on one repo would make the project report four repos. See §9 for what a
+worktree is and where it lives.
 
 ## 2. Stores
 
@@ -39,8 +44,10 @@ one repo) or `remote` (execution on another host) later is a new arm plus a reso
 | Doc store | config, projects, repos, credential metadata, backlog items | YAML / Markdown+frontmatter | tracked |
 | Secret file | credential tokens, when stored by Pomni at all | JSON, mode 0600 | ignored |
 | Workspace | cloned working copies | git checkouts | ignored |
+| Worktrees | one run's private checkout per repo | git worktrees | ignored |
 | Run store | runs and test results | SQLite (`node:sqlite`, WAL) | ignored |
 | Chat store | chats and their messages | SQLite, same `pomni.db` file, own migrations | ignored |
+| Worktree records | bookkeeping for live/kept worktrees | SQLite, same `pomni.db` file, own migrations | ignored |
 | Run logs | one combined output file per run | plain text | ignored |
 | Event stream | live cross-process notifications | append-only NDJSON | ignored |
 
@@ -66,6 +73,10 @@ and you want to query it, it is a row.**
 │   └── acme-saas/
 │       ├── web/
 │       └── api/
+├── worktrees/                        # gitignored — one checkout per repo per run
+│   └── acme-saas/
+│       └── web/
+│           └── 01M1RM25VY.../        # named by runId, branch pomni/run/<runId>
 ├── runs/                             # gitignored
 │   └── 01M1RM25VY.../output.log      # one directory per run, named by ULID
 ├── sessions/                         # gitignored (M3)
@@ -117,6 +128,7 @@ source:
   credential: github-personal      # a NAME, never a token
   provider: github
 status: ready               # linked | cloning | ready | error | missing
+worktrees: auto             # auto | always | never — see below
 stack:
   adapter: node
   detected: [next@15, pnpm, typescript@5, vitest]
@@ -142,6 +154,20 @@ updatedAt: 2026-09-05T10:45:18.220Z
 
 `workingDir` is **not** stored. It is derived from the source on every read, because a
 persisted absolute path rots the moment the workspace moves.
+
+### Worktree policy
+
+`worktrees` decides whether a pipeline run gets its own checkout of this repo (§9 Worktrees)
+or shares the repo's own directory with every other run:
+
+| Value | Effect |
+| --- | --- |
+| `auto` (default) | A cloned repo gets a worktree per run. A linked repo (`source.kind: local`) does not — it is the user's own tree, and linking it was not consent to write into its `.git/`. |
+| `always` | Take a worktree even for a linked repo. `git worktree add` still never checks out, moves or cleans the user's tree; it does add one bookkeeping entry under their `.git/worktrees/`, and `always` is the consent for that. |
+| `never` | Runs share this repo's directory. Two runs sharing it is a conflict, not a quiet degradation. |
+
+A `repos/*.yaml` written before this field existed has no `worktrees:` key and resolves to
+`auto` — no migration, no rewrite.
 
 ### Capability origin
 
@@ -359,6 +385,43 @@ meaning apart from the turn that proposed it. `providerId`/`model` are recorded 
 not only on the chat, because the chat's pinned model can change mid-conversation (recorded
 as a `system` message) and a transcript should not claim the current model wrote every
 earlier turn.
+
+`SqliteWorktreeStore` (`packages/infra/src/worktree-store.ts`) shares the same `pomni.db` file
+too, versioned against its own `worktree_schema` counter for the same reason the chat store
+keeps `chat_schema` separate from `user_version`. A worktree record is not a YAML doc under
+`.pomni/projects/`, even though that directory is where every other repo-adjacent fact lives:
+this record holds an absolute path and a pid, both true on exactly one machine, and that
+directory is tracked in git.
+
+```sql
+CREATE TABLE worktrees (
+  id           TEXT PRIMARY KEY,       -- ULID
+  project_id   TEXT NOT NULL,
+  repo_id      TEXT NOT NULL,
+  run_id       TEXT NOT NULL,
+  path         TEXT NOT NULL UNIQUE,   -- the database refuses two runs in one directory
+  branch       TEXT NOT NULL,          -- pomni/run/<runId>
+  base_branch  TEXT,
+  base_commit  TEXT,
+  owner_pid    INTEGER,
+  status       TEXT NOT NULL,          -- active | kept
+  kept_reason  TEXT,
+  created_at   TEXT NOT NULL,
+  ended_at     TEXT
+);
+```
+
+There is deliberately no `released` status: a cleanly removed worktree has its row deleted in
+the same step, so a record exists if and only if a directory exists. A `kept` row survives
+because `git worktree remove` refuses on uncommitted changes and is never forced — losing an
+agent's work to tidiness would be worse than leaving the directory behind.
+
+Orphan detection (`pomni doctor`, `pomni worktree prune`) cannot trust a run's own `status`
+alone: a process that dies without calling `cancel()` leaves its row at `running` forever. It
+is why `pipeline_runs` gained a `pid` column (nullable — rows written before it existed read
+`NULL`) — a live pid is the second opinion that tells a dead run's leftovers apart from one
+still working, with a 60-second grace window for a worktree created before its pid was
+recorded.
 
 ## 10. Backlog item
 

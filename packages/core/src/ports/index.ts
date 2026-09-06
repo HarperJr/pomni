@@ -11,6 +11,7 @@ import type {
   Question,
 } from '../domain/pipeline.js';
 import type { Run, RunFilter, TestResult } from '../domain/run.js';
+import type { Worktree, WorktreeFilter } from '../domain/worktree.js';
 
 /**
  * Ports: the only things the application layer is allowed to depend on.
@@ -99,6 +100,16 @@ export interface CloneOptions {
   onProgress?: (line: string) => void;
 }
 
+export interface WorktreeRef {
+  /** Absolute path git reports. */
+  path: string;
+  /** Null when the worktree is on a detached HEAD. */
+  branch: string | null;
+  head: string | null;
+  /** git's own flag: the directory is gone but the admin entry survives. */
+  prunable: boolean;
+}
+
 export interface GitPort {
   isAvailable(): Promise<boolean>;
   isRepo(dir: string): Promise<boolean>;
@@ -110,6 +121,22 @@ export interface GitPort {
   testRemote(url: string, auth?: GitAuth): Promise<void>;
   /** Files changed in the working copy, as `{ path, change }`. Empty when clean. */
   changes(dir: string): Promise<Array<{ path: string; change: string }>>;
+  /** True when this git can do worktrees at all (2.5+). Implementations may cache per process. */
+  supportsWorktrees(): Promise<boolean>;
+  /** `git -C repoDir worktree add -b <branch> <path> <baseRef>`. Throws GitError. */
+  addWorktree(
+    repoDir: string,
+    options: { path: string; branch: string; baseRef: string },
+  ): Promise<{ head: string }>;
+  /**
+   * `git -C repoDir worktree remove <path>`, then delete `options.deleteBranch` if given.
+   * Never uses --force: git refusing on a dirty tree is the mechanism by which uncommitted
+   * work is kept, not an obstacle to route around. Throws GitError.
+   */
+  removeWorktree(repoDir: string, path: string, options?: { deleteBranch?: string }): Promise<void>;
+  listWorktrees(repoDir: string): Promise<WorktreeRef[]>;
+  /** `git -C repoDir worktree prune` — clears admin entries for directories already gone. */
+  pruneWorktrees(repoDir: string): Promise<void>;
 }
 
 // ---------------------------------------------------------------------------
@@ -186,6 +213,8 @@ export interface Executor {
   kill(pid: number): Promise<boolean>;
   /** Whether a command's executable resolves on PATH — used by `repo doctor`. */
   which(command: string, cwd: string): Promise<string | null>;
+  /** Whether a pid is a live process. `process.kill(pid, 0)` semantics. */
+  isAlive(pid: number): Promise<boolean>;
 }
 
 // ---------------------------------------------------------------------------
@@ -224,6 +253,26 @@ export interface PipelineStore {
   updateQuestion(id: string, question: Question): Promise<void>;
   getQuestion(id: string): Promise<Question | null>;
   questions(runId: string): Promise<Question[]>;
+  close(): void;
+}
+
+// ---------------------------------------------------------------------------
+// Worktree store
+// ---------------------------------------------------------------------------
+
+/**
+ * The per-run worktrees that exist right now. A row exists if and only if a directory
+ * exists — a cleanly removed worktree is deleted here in the same step, which is why there
+ * is no `released` status to query for.
+ */
+export interface WorktreeStore {
+  insert(worktree: Worktree): Promise<void>;
+  update(id: string, worktree: Worktree): Promise<void>;
+  get(id: string): Promise<Worktree | null>;
+  /** The one a run holds for a repo, or null. */
+  forRun(runId: string, repoId: string): Promise<Worktree | null>;
+  list(filter: WorktreeFilter): Promise<Worktree[]>;
+  delete(id: string): Promise<void>;
   close(): void;
 }
 
@@ -380,7 +429,17 @@ export type PomniEvent =
       status: string;
       error: string | null;
     }
-  | { type: 'chat.turn.finished'; chatId: string; messageId: string };
+  | { type: 'chat.turn.finished'; chatId: string; messageId: string }
+  | { type: 'worktree.taken'; projectId: string; repoId: string; runId: string; path: string }
+  | {
+      type: 'worktree.released';
+      projectId: string;
+      repoId: string;
+      runId: string;
+      path: string;
+      kept: boolean;
+      reason: string | null;
+    };
 
 export interface EmittedEvent {
   ts: string;
@@ -426,6 +485,8 @@ export const DURABLE_EVENT_TYPES: ReadonlySet<string> = new Set([
   'item.changed',
   'item.transitioned',
   'item.removed',
+  'worktree.taken',
+  'worktree.released',
 ]);
 
 export type { Capability, CapabilityMap, Run, RunFilter, TestResult };

@@ -87,6 +87,17 @@ export class ProcessExecutor implements Executor {
     }
   }
 
+  /** `process.kill(pid, 0)` semantics: EPERM means the process exists but isn't ours. */
+  async isAlive(pid: number): Promise<boolean> {
+    if (!Number.isFinite(pid) || pid <= 0) return false;
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code === 'EPERM';
+    }
+  }
+
   async which(command: string, cwd: string): Promise<string | null> {
     // Shell builtins and control words have no executable to find.
     if (SHELL_BUILTINS.has(command)) return command;

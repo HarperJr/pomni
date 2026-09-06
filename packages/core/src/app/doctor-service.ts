@@ -1,8 +1,10 @@
 import type { ResolvedRepo } from '../domain/repo.js';
 import { WELL_KNOWN_CAPABILITIES } from '../domain/capability.js';
+import type { WorktreeState } from '../domain/worktree.js';
 import type { Executor, GitPort } from '../ports/index.js';
 import type { ProjectService } from './project-service.js';
 import type { RepoService } from './repo-service.js';
+import type { WorktreeService } from './worktree-service.js';
 
 export type CheckStatus = 'ok' | 'warn' | 'fail';
 
@@ -19,10 +21,27 @@ export interface RepoReport {
   checks: Check[];
 }
 
+/**
+ * One per-run checkout that still exists. Orphans cost disk, not correctness, so they warn
+ * rather than fail — but they must be *visible*, because a pipeline process dying is not a
+ * hypothetical and nothing else ever mentions the directory it left behind.
+ */
+export interface WorktreeCheck {
+  id: string;
+  repoId: string;
+  runId: string;
+  path: string;
+  branch: string;
+  state: WorktreeState;
+  status: CheckStatus;
+  detail: string;
+}
+
 export interface DoctorReport {
   projectId: string;
   status: CheckStatus;
   repos: RepoReport[];
+  worktrees: WorktreeCheck[];
 }
 
 /**
@@ -38,6 +57,7 @@ export class DoctorService {
     private readonly repos: RepoService,
     private readonly executor: Executor,
     private readonly git: GitPort,
+    private readonly worktrees: WorktreeService,
   ) {}
 
   async check(projectId: string, repoId?: string): Promise<DoctorReport> {
@@ -46,7 +66,32 @@ export class DoctorService {
     const targets = repoId ? all.filter((repo) => repo.id === repoId) : all;
 
     const repos = await Promise.all(targets.map((repo) => this.checkRepo(repo)));
-    return { projectId, status: worst(repos.map((repo) => repo.status)), repos };
+    const worktrees = await this.checkWorktrees(projectId, repoId);
+
+    return {
+      projectId,
+      status: worst([
+        ...repos.map((repo) => repo.status),
+        ...worktrees.map((worktree) => worktree.status),
+      ]),
+      repos,
+      worktrees,
+    };
+  }
+
+  private async checkWorktrees(projectId: string, repoId?: string): Promise<WorktreeCheck[]> {
+    const inspected = await this.worktrees.inspect({ projectId, ...(repoId ? { repoId } : {}) });
+
+    return inspected.map(({ worktree, state, detail }) => ({
+      id: worktree.id,
+      repoId: worktree.repoId,
+      runId: worktree.runId,
+      path: worktree.path,
+      branch: worktree.branch,
+      state,
+      status: state === 'live' || state === 'kept' ? ('ok' as const) : ('warn' as const),
+      detail,
+    }));
   }
 
   private async checkRepo(repo: ResolvedRepo): Promise<RepoReport> {

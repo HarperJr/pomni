@@ -146,6 +146,8 @@ describe('a run whose process died', () => {
       outcome: 'unknown' as const,
       unmet: [],
       status: 'running' as const,
+      // The pid of the session that died. It is still written down; nothing is behind it.
+      pid: 999_999,
       result: null,
       error: null,
       gateStatus: 'skipped' as const,

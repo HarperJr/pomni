@@ -6,6 +6,7 @@ Thumbs.db
 
 # Pomni runtime state (see docs/DATA-MODEL.md)
 .pomni/workspace/
+.pomni/worktrees/
 .pomni/runs/
 .pomni/sessions/
 .pomni/events.ndjson

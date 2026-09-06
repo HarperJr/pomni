@@ -84,6 +84,7 @@ export interface Repo {
   status: RepoStatus;
   stack: Stack | null;
   capabilities: Record<string, Capability>;
+  worktrees: 'auto' | 'always' | 'never';
   vcs: VcsInfo | null;
   lastError: string | null;
   lastSyncedAt: string | null;
@@ -431,6 +432,7 @@ export interface PipelineRun {
   /** Files attached when the run was started; every agent was given them. */
   context: ContextFile[];
   status: PipelineStatus;
+  pid: number | null;
   result: string | null;
   error: string | null;
   gateStatus: 'skipped' | 'passed' | 'failed';
@@ -611,6 +613,35 @@ export interface TestResult {
 
 export type CheckStatus = 'ok' | 'warn' | 'fail';
 
+export interface Worktree {
+  id: string;
+  projectId: string;
+  repoId: string;
+  runId: string;
+  path: string;
+  branch: string;
+  baseBranch: string | null;
+  baseCommit: string | null;
+  ownerPid: number | null;
+  status: 'active' | 'kept';
+  keptReason: string | null;
+  createdAt: string;
+  endedAt: string | null;
+}
+
+export type WorktreeState = 'live' | 'kept' | 'orphaned' | 'missing';
+
+export interface WorktreeCheck {
+  id: string;
+  repoId: string;
+  runId: string;
+  path: string;
+  branch: string;
+  state: WorktreeState;
+  status: CheckStatus;
+  detail: string;
+}
+
 export interface DoctorReport {
   projectId: string;
   status: CheckStatus;
@@ -620,6 +651,7 @@ export interface DoctorReport {
     status: CheckStatus;
     checks: Array<{ name: string; status: CheckStatus; detail: string }>;
   }>;
+  worktrees: WorktreeCheck[];
 }
 
 export interface DirEntry {
@@ -1084,6 +1116,11 @@ export const api = {
 
   doctor: (projectId: string) =>
     request<{ report: DoctorReport }>(`/api/projects/${encodeURIComponent(projectId)}/doctor`),
+
+  listWorktrees: (projectId: string) =>
+    request<{ worktrees: Array<{ worktree: Worktree; state: WorktreeState; detail: string }> }>(
+      `/api/projects/${encodeURIComponent(projectId)}/worktrees`,
+    ),
 
   browse: (path?: string) =>
     request<BrowseResult>(`/api/fs/browse${path ? `?path=${encodeURIComponent(path)}` : ''}`),

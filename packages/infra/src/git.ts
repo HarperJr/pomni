@@ -1,5 +1,14 @@
 import { spawn } from 'node:child_process';
-import { GitError, type CloneOptions, type GitAuth, type GitPort, type VcsInfo } from '@pomni/core';
+import { mkdir } from 'node:fs/promises';
+import { dirname } from 'node:path';
+import {
+  GitError,
+  type CloneOptions,
+  type GitAuth,
+  type GitPort,
+  type VcsInfo,
+  type WorktreeRef,
+} from '@pomni/core';
 import { ensureAskpass } from './askpass.js';
 
 interface RunResult {
@@ -110,6 +119,86 @@ export class GitCli implements GitPort {
     }
   }
 
+  private worktreesSupported: boolean | null = null;
+
+  /**
+   * True for git 2.5 or newer. Cached for the process lifetime — a failure to run git or to
+   * parse its version is treated as "no", the same as any other reason worktrees are refused.
+   */
+  async supportsWorktrees(): Promise<boolean> {
+    if (this.worktreesSupported !== null) return this.worktreesSupported;
+
+    try {
+      const result = await this.run(['--version'], {});
+      if (result.code !== 0) {
+        this.worktreesSupported = false;
+        return false;
+      }
+      const match = /git version (\d+)\.(\d+)/.exec(result.stdout);
+      if (!match) {
+        this.worktreesSupported = false;
+        return false;
+      }
+      const major = Number(match[1]);
+      const minor = Number(match[2]);
+      this.worktreesSupported = major > 2 || (major === 2 && minor >= 5);
+      return this.worktreesSupported;
+    } catch {
+      this.worktreesSupported = false;
+      return false;
+    }
+  }
+
+  async addWorktree(
+    repoDir: string,
+    options: { path: string; branch: string; baseRef: string },
+  ): Promise<{ head: string }> {
+    await mkdir(dirname(options.path), { recursive: true });
+
+    const result = await this.run(
+      ['-C', repoDir, 'worktree', 'add', '-b', options.branch, options.path, options.baseRef],
+      {},
+    );
+    if (result.code !== 0) {
+      throw new GitError(`git worktree add failed: ${firstUsefulLine(result.stderr)}`);
+    }
+
+    const head = await this.text(['-C', options.path, 'rev-parse', 'HEAD']);
+    return { head: head ?? '' };
+  }
+
+  async removeWorktree(
+    repoDir: string,
+    path: string,
+    options?: { deleteBranch?: string },
+  ): Promise<void> {
+    const result = await this.run(['-C', repoDir, 'worktree', 'remove', path], {});
+    if (result.code !== 0) {
+      throw new GitError(`git worktree remove failed: ${firstUsefulLine(result.stderr)}`);
+    }
+
+    if (!options?.deleteBranch) return;
+
+    // `-d`, not `-D`: if the branch is unmerged, that means the run committed work that lives
+    // nowhere else. Leaving it in place is the point, not a failure to report.
+    await this.run(['-C', repoDir, 'branch', '-d', options.deleteBranch], {});
+  }
+
+  async listWorktrees(repoDir: string): Promise<WorktreeRef[]> {
+    const result = await this.run(['-C', repoDir, 'worktree', 'list', '--porcelain'], {});
+    if (result.code !== 0) {
+      throw new GitError(`git worktree list failed: ${firstUsefulLine(result.stderr)}`);
+    }
+    return parseWorktreePorcelain(result.stdout);
+  }
+
+  async pruneWorktrees(repoDir: string): Promise<void> {
+    const result = await this.run(['-C', repoDir, 'worktree', 'prune'], {});
+    if (result.code !== 0) {
+      throw new GitError(`git worktree prune failed: ${firstUsefulLine(result.stderr)}`);
+    }
+  }
+
   // -------------------------------------------------------------------------
 
   private async text(args: string[]): Promise<string | null> {
@@ -209,6 +298,53 @@ function describeChange(code: string): string {
   if (code.includes('A')) return 'added';
   if (code.includes('R')) return 'renamed';
   return 'modified';
+}
+
+/**
+ * `git worktree list --porcelain` output: blank-line-separated stanzas, one per worktree
+ * (the main one included — the caller decides whether to filter it out).
+ */
+function parseWorktreePorcelain(output: string): WorktreeRef[] {
+  const refs: WorktreeRef[] = [];
+  let current: { path: string | null; branch: string | null; head: string | null; prunable: boolean } | null =
+    null;
+
+  const flush = () => {
+    if (current?.path) {
+      refs.push({
+        path: current.path,
+        branch: current.branch,
+        head: current.head,
+        prunable: current.prunable,
+      });
+    }
+    current = null;
+  };
+
+  for (const line of output.split(/\r?\n/)) {
+    if (line.trim().length === 0) {
+      flush();
+      continue;
+    }
+    if (line.startsWith('worktree ')) {
+      flush();
+      current = { path: line.slice('worktree '.length).trim(), branch: null, head: null, prunable: false };
+      continue;
+    }
+    if (!current) continue;
+    if (line.startsWith('HEAD ')) {
+      current.head = line.slice('HEAD '.length).trim();
+    } else if (line.startsWith('branch ')) {
+      current.branch = line.slice('branch '.length).trim().replace(/^refs\/heads\//, '');
+    } else if (line === 'detached') {
+      current.branch = null;
+    } else if (line === 'prunable' || line.startsWith('prunable ')) {
+      current.prunable = true;
+    }
+  }
+  flush();
+
+  return refs;
 }
 
 function firstUsefulLine(stderr: string): string {

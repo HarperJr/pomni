@@ -87,6 +87,12 @@ export const PipelineRunSchema = z.object({
   rerunOf: z.string().nullable().default(null),
   task: z.string(),
   status: PipelineStatusSchema,
+  /**
+   * OS pid of the process running the pipeline while it runs, null once it has ended. Mirrors
+   * `Run.pid`. It is the second opinion on whether a run claiming `running` really is — a
+   * process that dies without calling `cancel()` leaves the row saying `running` forever.
+   */
+  pid: z.number().int().positive().nullable().default(null),
   result: z.string().nullable(),
   error: z.string().nullable(),
   /** Outcome of the project's gate, run after the pipeline finished. */

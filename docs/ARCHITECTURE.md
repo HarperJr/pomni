@@ -24,6 +24,7 @@ memory*; the projects own the code. Three things make it more than a script coll
 ┌── Application (use-cases) ────┴─────────────────────────────────────┐
 │  ProjectService  RepoService  CredentialService  WorkspaceService   │
 │  BacklogService  RunService  DoctorService  ContextPackBuilder      │
+│  WorktreeService                                                    │
 └───────────────────────────────┬─────────────────────────────────────┘
 ┌── Domain ─────────────────────┴─────────────────────────────────────┐
 │  Project · Repo · RepoSource · Capability · Credential · Gate       │
@@ -32,10 +33,12 @@ memory*; the projects own the code. Three things make it more than a script coll
 ┌── Ports (interfaces only) ────┴─────────────────────────────────────┐
 │  DocStore  FsProbe  GitPort  CredentialStore  StackDetection        │
 │  RunStore  Executor  Lock  AgentRunner  EventBus  Clock  Logger     │
+│  WorktreeStore                                                      │
 └───────────────────────────────┬─────────────────────────────────────┘
 ┌── Adapters (infrastructure) ──┴─────────────────────────────────────┐
 │  FileDocStore  NodeFsProbe  GitCli  DefaultCredentialStore          │
 │  DetectorRegistry  SqliteRunStore  ProcessExecutor  FileLock        │
+│  SqliteWorktreeStore                                                │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -87,8 +90,12 @@ capabilities live here rather than on Project.
 ### RepoSource
 Where a repo's code comes from — `local` (link a checkout in place) or `git` (clone into the
 managed workspace with token auth). `WorkspaceService.workingDir()` is the only code that
-branches on it; every consumer downstream sees a resolved working directory. Adding
-`worktree` or `remote` later is a new arm plus a resolver, not a change to any consumer.
+branches on it; every consumer downstream sees a resolved working directory. Adding `remote`
+later is a new arm plus a resolver, not a change to any consumer.
+
+Per-run isolation (a `Worktree`, one per repo per pipeline run) is deliberately **not** a
+third arm here — see DATA-MODEL.md §1 for why a source arm would have made the gate fan out
+over phantom repos.
 
 ### Capability
 A named, runnable operation on a **repo**: `install`, `build`, `test`, `lint`, `typecheck`,
@@ -189,6 +196,12 @@ Pomni edits real repositories and executes real shell commands. Non-negotiables:
   `run` and gates. Ad-hoc commands require an explicit flag and are recorded as such.
 - **Git guard.** Sessions refuse to start on a dirty tree unless `--allow-dirty`. Work happens
   on a branch derived from the item id. Nothing is pushed without `--push`.
+- **Worktree ownership.** Every path a worktree delete path touches is checked by
+  `assertPomniOwned(path, worktreesRoot)` first, which refuses anything outside
+  `.pomni/worktrees/`. Removal always goes through `git worktree remove`, never a filesystem
+  delete, and never with `--force` — a worktree with uncommitted changes is marked `kept`
+  instead. This is CLAUDE.md rule 4 ("a linked repo is the user's own working tree") enforced
+  in code, not only remembered by the author.
 - **No auto-commit by default.** `policy.autoCommit: false` is the shipped default.
 - **Budgets.** Per-session turn/cost ceilings and per-run timeouts; exceeding one fails the
   session cleanly with the transcript intact.
@@ -228,3 +241,4 @@ Pomni edits real repositories and executes real shell commands. Non-negotiables:
 | 13 | `RepoSource` union with both `local` and `git`, git primary | Clone-only cannot add a greenfield repo with no remote; local-only makes PRs, isolation and remote execution a rewrite | One resolver to maintain |
 | 14 | Credentials referenced by name; token resolved at use time via `GIT_ASKPASS` | `.pomni/` stays committable, `.git/config` stays clean, and the token never reaches a process argument list | A `CredentialStore` port with three adapters |
 | 15 | No registry index file; the project list is a directory scan | Nothing to drift, and creating a project needs no lock | A scan per list call (hundreds of small files, not thousands) |
+| 17 | Per-run isolation is a `Worktree` record in SQLite, not a `RepoSource` arm | A source arm would mean one `Repo` per live worktree — concurrent runs would make a one-repo project report several, and the gate would fan out over phantoms | A second store to reconcile with the doc-store repo list |

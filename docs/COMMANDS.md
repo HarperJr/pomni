@@ -5,7 +5,7 @@ different surface. The CLI is authoritative for naming.
 
 | Surface | Form | Status |
 | --- | --- | --- |
-| CLI | `pomni <noun> <verb> [args]` | shipped for project / repo / cred / run / backlog / serve |
+| CLI | `pomni <noun> <verb> [args]` | shipped for project / repo / cred / run / worktree / backlog / serve |
 | HTTP | `GET/POST/PATCH/DELETE /api/…` — see [SERVER.md](SERVER.md) | shipped |
 | Web UI | `pomni serve` | shipped for projects, repos, credentials, runs, backlog |
 | Slash command | `/project`, `/backlog`, `/run` inside a Claude session | shipped |
@@ -48,11 +48,13 @@ folder already on this machine.
 | ` ` `[--ref <ref>]` | ✓ | Branch or tag to check out (git only). |
 | ` ` `[-c, --credential <id>]` | ✓ | Credential to authenticate with. Omitted, Pomni matches one by host. |
 | ` ` `[--id <id>] [-n <name>] [-r <role>]` | ✓ | Explicit id, display name, role (`web api mobile desktop lib infra docs other`). |
-| `pomni repo list [-p <project>]` (`ls`) | ✓ | Repos with role, status, stack, source. All projects when `-p` is omitted. |
+| `pomni repo list [-p <project>]` (`ls`) | ✓ | Repos with role, status, stack, source, and which runs currently hold a worktree on it. All projects when `-p` is omitted. |
 | `pomni repo show <project/repo>` | ✓ | Full detail: source, working directory, stack, git branch and dirtiness, capabilities. |
 | `pomni repo sync <project/repo>` | ✓ | Fetch (if a clone) and re-detect stack and capabilities. Manual capability overrides survive. |
+| `pomni repo edit <project/repo> [-n] [-r] [--url] [--ref] [-c] [--provider] [--reclone]` | ✓ | Change a repo's name, role, or — for a clone — its url, branch or credential. |
+| ` ` `[--worktrees <auto\|always\|never>]` | ✓ | Whether a pipeline run gets its own checkout of this repo. `auto` (default) isolates a clone but shares a linked repo; `always` isolates a linked repo too; `never` shares this repo's directory across every run. |
 | `pomni repo remove <project/repo> [--purge]` (`rm`) | ✓ | Remove from the project. `--purge` deletes the cloned copy; a linked folder is never touched. |
-| `pomni repo doctor [-p] [-r]` | ✓ | Check each repo and resolve every declared capability's executable on PATH. |
+| `pomni repo doctor [-p] [-r]` | ✓ | Check each repo and resolve every declared capability's executable on PATH, plus a worktrees section: an `orphaned` entry names `pomni worktree remove <id> --force` as the fix. |
 
 ```bash
 pomni repo add https://github.com/acme/storefront.git -p acme-saas -r web
@@ -96,6 +98,22 @@ project that declares it — a repo without a `lint` script is skipped, not fail
 Exit code is 1 when any run fails, so `pomni verify` drops straight into a shell script or CI.
 
 `-p` is optional when the workspace holds exactly one project, or after `pomni project use`.
+
+## Worktrees
+
+A pipeline run that isolates a repo (see `worktrees` policy under Repos) works in its own
+checkout at `.pomni/worktrees/<project>/<repo>/<runId>`, on branch `pomni/run/<runId>`.
+
+| Command | | Does |
+| --- | --- | --- |
+| `pomni worktree list [-p] [-r]` (`ls`) | ✓ | Live worktrees, one per pipeline run: id, repo, run, branch, state, path. |
+| `pomni worktree prune [-p]` | ✓ | Remove orphaned worktrees (owning run no longer alive). A `kept` worktree — uncommitted changes — is reported and left alone. |
+| `pomni worktree remove <id> [--force]` | ✓ | Remove one worktree by id. Refuses a live or kept worktree unless `--force`. |
+
+`git worktree remove` is never called with `--force` internally: a worktree with uncommitted
+changes is marked `kept` instead of being removed, so an agent's unfinished work is never lost
+to cleanup. There is no HTTP route for pruning or removing — those delete directories and stay
+a deliberate CLI act.
 
 ## Backlog
 

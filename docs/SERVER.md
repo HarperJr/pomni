@@ -120,7 +120,12 @@ GET    /api/projects/:id/repos/:repoId   one repo
 PATCH  /api/projects/:id/repos/:repoId   If-Match; name, role
 POST   /api/projects/:id/repos/:repoId/sync    fetch + re-detect
 DELETE /api/projects/:id/repos/:repoId   ?purge=true  (deletes the clone only)
+GET    /api/projects/:id/worktrees       who is using a repo right now: live (and recently
+                                          kept) per-run worktrees, with derived state
 ```
+
+There are deliberately no mutation routes here — pruning or removing a worktree deletes a
+directory, and that stays a CLI act (`pomni worktree prune|remove`).
 
 ### Credentials
 
@@ -169,6 +174,8 @@ GET    /api/runs/:id/log                 SSE: replays the log from the start, th
                                          until the run finishes, ending with a `done` event
 POST   /api/projects/:id/verify          { gate?: 'default' | 'land' } -> 202
 GET    /api/projects/:id/doctor          per-repo checks, including capability resolution
+                                          and a worktrees section (`orphaned` when the owning
+                                          run is no longer alive)
 ```
 
 A run takes minutes, so `POST` returns 202 and the work continues detached. The browser

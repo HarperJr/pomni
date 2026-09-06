@@ -20,6 +20,7 @@ import type { WorkflowService } from './workflow-service.js';
 import type { ProjectService } from './project-service.js';
 import type { RepoService } from './repo-service.js';
 import type { WorkspaceService } from './workspace-service.js';
+import type { WorktreeService } from './worktree-service.js';
 
 /**
  * Everything a surface needs, assembled once at composition time.
@@ -43,6 +44,7 @@ export interface PomniContainer {
   pipelines: PipelineService;
   chat: ChatService;
   runs: RunService;
+  worktrees: WorktreeService;
   doctor: DoctorService;
   detection: StackDetection;
   executor: Executor;

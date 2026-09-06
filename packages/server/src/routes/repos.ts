@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { RepoRoleSchema, type PomniContainer } from '@pomni/core';
+import { RepoRoleSchema, WorktreePolicySchema, type PomniContainer } from '@pomni/core';
 import type { FastifyInstance } from 'fastify';
 import { normalizeEtag } from './projects.js';
 
@@ -27,11 +27,17 @@ const UpdateRepoBody = z.object({
   credential: z.string().nullable().optional(),
   provider: z.enum(['github', 'gitlab', 'bitbucket', 'generic']).optional(),
   reclone: z.boolean().optional(),
+  worktrees: WorktreePolicySchema.optional(),
 });
 
 export async function repoRoutes(app: FastifyInstance, container: PomniContainer): Promise<void> {
   app.get<{ Params: { id: string } }>('/api/projects/:id/repos', async (request) => ({
     repos: await container.repos.listResolved(request.params.id),
+  }));
+
+  /** Who is using a repo right now: the live (and recently kept) worktrees for this project. */
+  app.get<{ Params: { id: string } }>('/api/projects/:id/worktrees', async (request) => ({
+    worktrees: await container.worktrees.inspect({ projectId: request.params.id }),
   }));
 
   /**

@@ -6,6 +6,7 @@ import {
   describeSource,
   type AddRepoSourceInput,
   type RepoRole,
+  type WorktreePolicy,
 } from '@pomni/core';
 import { FileEventSource } from '@pomni/infra';
 import { startServer } from '@pomni/server';
@@ -15,6 +16,7 @@ import { describeCapabilities, repoRow, statusLabel, style, table } from './form
 import { registerBacklogCommands } from './backlog-commands.js';
 import { registerRunCommands } from './run-commands.js';
 import { registerToolCommands } from './tool-commands.js';
+import { registerWorktreeCommands } from './worktree-commands.js';
 import {
   registerDiscoveryCommands,
   registerProviderCommands,
@@ -26,6 +28,8 @@ interface GlobalOptions {
   root?: string;
   verbose?: boolean;
 }
+
+const WORKTREE_POLICIES: WorktreePolicy[] = ['auto', 'always', 'never'];
 
 export async function main(argv: string[]): Promise<void> {
   const program = new Command();
@@ -146,7 +150,15 @@ export async function main(argv: string[]): Promise<void> {
         console.log(style.dim("no repos yet — add one with 'pomni repo add <path-or-url> -p " + id + "'"));
         return;
       }
-      console.log(table(repos.map(repoRow), ['REPO', 'ROLE', 'STATUS', 'STACK', 'KIND', 'SOURCE']));
+      const worktrees = await container.worktrees.list({ projectId: id });
+      const byRepo = new Map<string, typeof worktrees>();
+      for (const wt of worktrees) byRepo.set(wt.repoId, [...(byRepo.get(wt.repoId) ?? []), wt]);
+      console.log(
+        table(
+          repos.map((repo) => repoRow(repo, byRepo.get(repo.id) ?? [])),
+          ['REPO', 'ROLE', 'STATUS', 'STACK', 'KIND', 'SOURCE', 'WORKTREES'],
+        ),
+      );
     });
 
   project
@@ -259,7 +271,17 @@ export async function main(argv: string[]): Promise<void> {
         const repos = await container.repos.listResolved(projectId);
         if (repos.length === 0) continue;
         if (projectIds.length > 1) console.log(style.bold(projectId));
-        console.log(table(repos.map(repoRow), ['REPO', 'ROLE', 'STATUS', 'STACK', 'KIND', 'SOURCE']));
+
+        const worktrees = await container.worktrees.list({ projectId });
+        const byRepo = new Map<string, typeof worktrees>();
+        for (const wt of worktrees) byRepo.set(wt.repoId, [...(byRepo.get(wt.repoId) ?? []), wt]);
+
+        console.log(
+          table(
+            repos.map((repo) => repoRow(repo, byRepo.get(repo.id) ?? [])),
+            ['REPO', 'ROLE', 'STATUS', 'STACK', 'KIND', 'SOURCE', 'WORKTREES'],
+          ),
+        );
         if (projectIds.length > 1) console.log();
         printed = true;
       }
@@ -312,6 +334,10 @@ export async function main(argv: string[]): Promise<void> {
     .option('-c, --credential <id>', 'credential to authenticate with; pass "" to detach')
     .option('--provider <name>', 'github | gitlab | bitbucket | generic')
     .option('--reclone', 'delete the existing working copy and clone the new url')
+    .option(
+      '--worktrees <policy>',
+      'auto | always | never — auto gives a clone its own worktree per run and leaves a linked repo shared; always takes a worktree even for a linked repo; never shares this repo\'s directory across every run',
+    )
     .action(
       async (
         target: string,
@@ -323,10 +349,18 @@ export async function main(argv: string[]): Promise<void> {
           credential?: string;
           provider?: string;
           reclone?: boolean;
+          worktrees?: string;
         },
       ) => {
         const container = await open();
         const [projectId, repoId] = splitRef(target);
+
+        if (options.worktrees !== undefined && !WORKTREE_POLICIES.includes(options.worktrees as WorktreePolicy)) {
+          throw new PomniError(
+            'validation',
+            `--worktrees must be one of ${WORKTREE_POLICIES.join(', ')}, got '${options.worktrees}'`,
+          );
+        }
 
         const updated = await container.repos.update(projectId, repoId, {
           name: options.name,
@@ -341,6 +375,7 @@ export async function main(argv: string[]): Promise<void> {
                 : options.credential,
           provider: options.provider as 'github' | 'gitlab' | 'bitbucket' | 'generic' | undefined,
           reclone: options.reclone,
+          worktrees: options.worktrees as WorktreePolicy | undefined,
         });
 
         console.log(`${style.green('updated')} ${projectId}/${updated.id}  ${statusLabel(updated.status)}`);
@@ -369,6 +404,17 @@ export async function main(argv: string[]): Promise<void> {
         console.log(`${mark(repoReport.status)} ${style.bold(repoReport.repoId)} ${style.dim(repoReport.name)}`);
         for (const check of repoReport.checks) {
           console.log(`   ${mark(check.status)} ${check.name.padEnd(14)} ${style.dim(check.detail)}`);
+        }
+        console.log();
+      }
+
+      if (report.worktrees.length > 0) {
+        console.log(style.bold('worktrees'));
+        for (const wt of report.worktrees) {
+          console.log(
+            `   ${mark(wt.status)} ${wt.repoId.padEnd(14)} run ${wt.runId}  ${wt.state}  ${style.dim(wt.path)}`,
+          );
+          console.log(`      ${style.dim(wt.detail)}`);
         }
         console.log();
       }
@@ -619,6 +665,7 @@ export async function main(argv: string[]): Promise<void> {
   registerProviderCommands(program, open);
   registerTaskCommands(program, open, defaultProject);
   registerToolCommands(program, open, defaultProject);
+  registerWorktreeCommands(program, open, defaultProject);
 
   await program.parseAsync(argv);
 }

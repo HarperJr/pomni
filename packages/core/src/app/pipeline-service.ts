@@ -3,7 +3,7 @@ import {
   isOrchestrator,
   type Agent,
 } from '../domain/agent.js';
-import { NotFoundError, ValidationError } from '../domain/errors.js';
+import { ConflictError, NotFoundError, ValidationError } from '../domain/errors.js';
 import { layout } from '../domain/layout.js';
 import {
   contextBytes,
@@ -27,6 +27,7 @@ import {
 import { toolBriefing } from '../domain/tool.js';
 import { ulid } from '../domain/ulid.js';
 import { chooseWorkflow, entryAgent, findAgent, rosterFor, type Workflow } from '../domain/workflow.js';
+import { worktreeEligibility, type WorktreeProbe } from '../domain/worktree.js';
 import type { Artifact } from '../domain/pipeline.js';
 import type { ResolvedRepo } from '../domain/repo.js';
 import type {
@@ -45,6 +46,7 @@ import type { ProviderService } from './provider-service.js';
 import type { ToolService } from './tool-service.js';
 import type { RepoService } from './repo-service.js';
 import type { WorkflowService } from './workflow-service.js';
+import type { WorktreeService } from './worktree-service.js';
 
 export interface StartRunInput {
   projectId: string;
@@ -109,6 +111,8 @@ export class PipelineService {
    * two versions of the truth. Merged in when each agent's task is built.
    */
   private readonly handedOver = new Map<string, ContextFile[]>();
+  /** The tail of each project's claim queue. See `claim`. */
+  private readonly claims = new Map<string, Promise<void>>();
 
   constructor(
     private readonly docs: DocStore,
@@ -124,6 +128,7 @@ export class PipelineService {
     private readonly clock: Clock,
     private readonly events: EventBus,
     private readonly logger: Logger,
+    private readonly worktrees: WorktreeService,
   ) {}
 
   async start(input: StartRunInput): Promise<StartRunResult> {
@@ -153,34 +158,68 @@ export class PipelineService {
     this.workflows.assertRunnable(chosen);
 
     const provider = await this.providers.resolve(input.providerId);
-    const workspace = await this.workspace(input.projectId, input.repoId);
 
-    const run: PipelineRun = {
-      id: ulid(this.clock.now().getTime()),
-      projectId: input.projectId,
-      workflowId: chosen.id,
-      workflowName: chosen.name,
-      providerId: provider.id,
-      itemId: input.itemId ?? null,
-      rerunOf: input.rerunOf ?? null,
-      task,
-      context,
-      status: 'running',
-      result: null,
-      error: null,
-      gateStatus: 'skipped',
-      gateSummary: null,
-      itemStatus: null,
-      outcome: 'unknown',
-      unmet: [],
-      startedAt: this.clock.iso(),
-      endedAt: null,
-      durationMs: null,
-      costUsd: null,
-    };
+    // The run id comes first now, because the worktree's branch is named after it, and the
+    // worktrees come before the workspace, because the directories the agents are given are
+    // this run's copies rather than the repos themselves.
+    const runId = ulid(this.clock.now().getTime());
+    const pid = process.pid;
 
-    await this.docs.ensureDir(layout.pipelineDir(run.id));
-    await this.store.insertRun(run);
+    const usable = (await this.repos.listResolved(input.projectId)).filter(
+      (repo) => repo.workingDirExists,
+    );
+    if (input.repoId && !usable.some((repo) => repo.id === input.repoId)) {
+      throw new ValidationError(`repo '${input.repoId}' has no working copy`);
+    }
+
+    // A run pinned to one repo is only *worked* in that one. Cutting a worktree of every other
+    // repo in the project costs a checkout and an install each, and puts the run at the mercy
+    // of a conflict over a repo it was never going to touch. The rest stay readable below —
+    // narrowing where the work happens is not the same as narrowing what may be read.
+    const isolated = input.repoId ? usable.filter((repo) => repo.id === input.repoId) : usable;
+
+    // Claiming is one step, not four. `assertNotInUse` answers out of the running runs in the
+    // store and this run's row is written three awaits later, so on its own it is a look that
+    // decides nothing: two overlapping `start()` calls both found the shared repo free and
+    // both walked into it.
+    const { run, taken, workspace } = await this.claim(input.projectId, async () => {
+      await this.assertNotInUse(input.projectId, isolated);
+      const taken = await this.worktrees.take(input.projectId, runId, isolated, { pid });
+      const workspace = this.workspace(usable, taken.dirs, input.repoId);
+
+      const claimed: PipelineRun = {
+        id: runId,
+        projectId: input.projectId,
+        workflowId: chosen.id,
+        workflowName: chosen.name,
+        providerId: provider.id,
+        itemId: input.itemId ?? null,
+        rerunOf: input.rerunOf ?? null,
+        task,
+        context,
+        status: 'running',
+        pid,
+        result: null,
+        error: null,
+        gateStatus: 'skipped',
+        gateSummary: null,
+        itemStatus: null,
+        outcome: 'unknown',
+        // A repo that could not be isolated is something this run was asked for and did not
+        // get, so it belongs with everything else it did not deliver. `gateSummary` is the
+        // gate's own words and a worktree note in it would read as a gate result.
+        unmet: taken.fallbacks.map((fallback) => fallback.reason),
+        startedAt: this.clock.iso(),
+        endedAt: null,
+        durationMs: null,
+        costUsd: null,
+      };
+
+      await this.docs.ensureDir(layout.pipelineDir(claimed.id));
+      // The row is what the next `start()` reads, so it goes down before this one lets go.
+      await this.store.insertRun(claimed);
+      return { run: claimed, taken, workspace };
+    });
 
     this.events.emit({
       type: 'pipeline.started',
@@ -199,8 +238,10 @@ export class PipelineService {
       }
     }
 
+    for (const fallback of taken.fallbacks) this.logger.warn(fallback.reason);
+
     this.owned.add(run.id);
-    return { run, completion: this.execute(run, chosen, workspace) };
+    return { run, completion: this.execute(run, chosen, workspace, taken.dirs, isolated) };
   }
 
   async get(id: string): Promise<PipelineRunDetail> {
@@ -302,16 +343,40 @@ export class PipelineService {
     // signal, and the row outlives the work it described. Close it out here instead —
     // this process can prove it is not the one executing it.
     if (!this.owned.has(id)) {
+      // `owned` is a set in this process's memory, so "not owned here" is not "owned by
+      // nobody" — the CLI's set is empty for every run the server is executing. The pid on
+      // the row is the only evidence that crosses processes, and `worktreeState` already
+      // decides this way.
+      const alive = run.pid !== null && (await this.runs.isProcessAlive(run.pid));
+
       const closed: PipelineRun = {
         ...run,
         status: 'cancelled',
+        pid: null,
         error: 'the process running this pipeline is gone; the run was closed out',
         endedAt: this.clock.iso(),
         durationMs: Date.parse(this.clock.iso()) - Date.parse(run.startedAt),
       };
       await this.store.updateRun(id, closed);
-      this.finish(closed);
-      return closed;
+
+      if (alive) {
+        // Its agents are mid-turn in another process and cannot see the flag we would set
+        // here. Removing their directory out from under them is worse than leaving it:
+        // that process's own finally gives it back, and `pomni doctor` catches it if not.
+        this.logger.warn(
+          `run ${id} is still executing in process ${run.pid}; it was marked cancelled but its ` +
+            'worktrees were left to that process',
+        );
+        this.finish(closed);
+        return closed;
+      }
+
+      // Nothing is behind the pid, so this path never reaches `execute`'s finally and is the
+      // only chance to give the dead run's worktrees back. Left to doctor they would sit there
+      // until someone ran it. A dirty one is still kept, not deleted.
+      const released = await this.releaseWorktrees(closed);
+      this.finish(released);
+      return released;
     }
 
     this.cancelled.add(id);
@@ -325,12 +390,20 @@ export class PipelineService {
     run: PipelineRun,
     workflow: Workflow,
     workspace: { cwd: string | undefined; dirs: string[]; repos: ResolvedRepo[] },
+    /** Where this run's copy of each repo is, by repo id. What the gate must run against. */
+    dirOverrides: Record<string, string>,
+    /** The repos worktrees were asked for, with their own directories still on them. */
+    isolated: ResolvedRepo[],
   ): Promise<PipelineRun> {
     const { cwd } = workspace;
     const started = Date.now();
     let cost = 0;
+    /** Assigned by whichever arm ends the run; the finally releases against it. */
+    let settled: PipelineRun | undefined;
 
     try {
+      run = await this.installDependencies(run, isolated, dirOverrides);
+
       const entry = entryAgent(workflow);
       const result = await this.runAgent({
         run,
@@ -359,8 +432,11 @@ export class PipelineService {
             ? 'failed'
             : 'passed',
         error: verdict.outcome === 'blocked' ? verdict.unmet.join('; ') || 'blocked' : null,
+        pid: null,
         outcome: verdict.outcome,
-        unmet: verdict.unmet,
+        // The agents' unmet list, after whatever the run already could not give itself —
+        // a repo it had to share is as much a shortfall as a job it did not finish.
+        unmet: [...run.unmet, ...verdict.unmet],
         result: result.answer,
         endedAt: this.clock.iso(),
         durationMs: Date.now() - started,
@@ -372,7 +448,7 @@ export class PipelineService {
       // The gate is what turns "the agents finished" into "the change works". Without it a
       // pipeline can only report its own opinion of itself.
       if (finished.status === 'passed') {
-        finished = await this.runGate(finished);
+        finished = await this.runGate(finished, dirOverrides);
         if (finished.itemId) {
           // Review means "someone should look at finished work". Both halves have to hold:
           // the gate proves the repo still builds, the verdict says the work was actually
@@ -394,8 +470,7 @@ export class PipelineService {
       }
 
       await this.store.updateRun(run.id, finished);
-      this.finish(finished);
-      return finished;
+      settled = finished;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.logger.debug(`pipeline ${run.id} failed`, message);
@@ -403,6 +478,7 @@ export class PipelineService {
       const failed: PipelineRun = {
         ...run,
         status: this.cancelled.has(run.id) ? 'cancelled' : 'failed',
+        pid: null,
         error: message,
         endedAt: this.clock.iso(),
         durationMs: Date.now() - started,
@@ -414,13 +490,21 @@ export class PipelineService {
       }
 
       await this.store.updateRun(run.id, failed);
-      this.finish(failed);
-      return failed;
+      settled = failed;
     } finally {
       this.cancelled.delete(run.id);
       this.owned.delete(run.id);
       this.handedOver.delete(run.id);
+      // The one seam both the finished and the failed path reach. A run that ends badly is
+      // exactly the one whose worktree is likely to be worth keeping.
+      settled = await this.releaseWorktrees(settled ?? run);
     }
+
+    // `settled` is set by both arms; the fallback only matters if the store write itself
+    // threw, in which case that error is already on its way out.
+    const done = settled ?? run;
+    this.finish(done);
+    return done;
   }
 
   /**
@@ -790,15 +874,82 @@ export class PipelineService {
   }
 
   /**
+   * Install each worktree's dependencies before anybody works in it.
+   *
+   * `git worktree add` checks out tracked files and nothing else, and `node_modules`, `dist`
+   * and `.venv` are all gitignored — so a fresh worktree has no test runner, no compiler and,
+   * in a workspace repo, no links between its packages. Without this the gate could not pass
+   * at all: `npm test` would exit non-zero for want of an install and the item would be moved
+   * to `blocked` on evidence about a missing directory rather than about this run's code.
+   *
+   * A repo that fell back is already sitting in its own installed tree, and installing over it
+   * would be a write into somebody else's working copy that the run never asked for.
+   */
+  private async installDependencies(
+    run: PipelineRun,
+    repos: ResolvedRepo[],
+    dirOverrides: Record<string, string>,
+  ): Promise<PipelineRun> {
+    const notes: string[] = [];
+
+    for (const repo of repos) {
+      const dir = dirOverrides[repo.id];
+      if (!dir || dir === repo.workingDir) continue;
+
+      // Plenty of repos need none — a Go module, a repo of prose. Silence is the right answer.
+      const install = repo.capabilities.install;
+      if (!install || install.background) continue;
+
+      try {
+        const installed = await this.runs.run(run.projectId, 'install', {
+          repoId: repo.id,
+          dirOverrides,
+        });
+        for (const entry of installed) {
+          if (entry.status === 'passed') continue;
+          notes.push(
+            `'${repo.name}': install (${entry.cmd}) ${entry.status} in this run's worktree` +
+              `${entry.summary ? ` — ${entry.summary}` : ''}. The worktree has only the tracked` +
+              ' files, so the gate is likely to fail for want of dependencies rather than for' +
+              ' anything the agents did.',
+          );
+        }
+      } catch (error) {
+        // A failed install is a fact about this run, not a reason to abandon it: the agents may
+        // still do useful work, and a run that stops here says less than one that carries on.
+        notes.push(
+          `'${repo.name}': its install could not be run in this run's worktree (${
+            error instanceof Error ? error.message : String(error)
+          }) — the gate is likely to fail for want of dependencies.`,
+        );
+      }
+    }
+
+    if (notes.length === 0) return run;
+    for (const note of notes) this.logger.warn(note);
+
+    // Recorded before the first agent turn, so a run watched live says why its gate is about
+    // to go red instead of leaving it to be discovered as a mysterious failure at the end.
+    const updated: PipelineRun = { ...run, unmet: [...run.unmet, ...notes] };
+    await this.store.updateRun(run.id, updated);
+    return updated;
+  }
+
+  /**
    * Run the project's gate against whatever the agents changed.
    *
    * Deliberately after the pipeline rather than inside it: an orchestrator asked to verify
    * its own work grades itself, and the run store already knows how to answer the question
    * properly.
    */
-  private async runGate(run: PipelineRun): Promise<PipelineRun> {
+  private async runGate(
+    run: PipelineRun,
+    dirOverrides: Record<string, string>,
+  ): Promise<PipelineRun> {
     try {
-      const report = await this.runs.gate(run.projectId, 'default', {});
+      // Against this run's own copies. A gate run in the shared repo directory while another
+      // run is changing it grades whatever happened to be on disk, not this run's code.
+      const report = await this.runs.gate(run.projectId, 'default', { dirOverrides });
 
       const failures = report.results
         .filter((result) => result.status === 'failed')
@@ -1091,12 +1242,18 @@ export class PipelineService {
    * made the rest of the project invisible: agents reported being unable to see the mobile
    * app at all, and were right.
    */
-  private async workspace(
-    projectId: string,
+  private workspace(
+    repos: ResolvedRepo[],
+    /** This run's directory per repo — its worktree, or the repo itself where it fell back. */
+    dirOverrides: Record<string, string>,
     repoId?: string,
-  ): Promise<{ cwd: string | undefined; dirs: string[]; repos: ResolvedRepo[] }> {
-    const repos = await this.repos.listResolved(projectId);
-    const usable = repos.filter((repo) => repo.workingDirExists);
+  ): { cwd: string | undefined; dirs: string[]; repos: ResolvedRepo[] } {
+    // Substituted here rather than at every use: an agent that is told about a directory it
+    // is not working in will read the wrong file and be right to be confused.
+    const usable = repos.map((repo) => ({
+      ...repo,
+      workingDir: dirOverrides[repo.id] ?? repo.workingDir,
+    }));
     if (usable.length === 0) return { cwd: undefined, dirs: [], repos: [] };
 
     if (repoId) {
@@ -1118,6 +1275,141 @@ export class PipelineService {
       dirs: usable.map((repo) => repo.workingDir),
       repos: usable,
     };
+  }
+
+  /**
+   * One start at a time per project, for as long as it takes to claim what it needs.
+   *
+   * Check-then-act is only a check if nothing can act in between, and there are two awaits
+   * between the two halves. Queueing them makes the second `start()` read the store after the
+   * first has written its row, so it sees the run it is about to collide with. The loser is
+   * refused before it takes anything: nothing is inserted, no worktree is cut, and the
+   * `ConflictError` is the same one a start against an established run has always got.
+   *
+   * The queue is a promise chain on this object, so the guarantee stops at this process. A
+   * `pomni` CLI and a `pomni serve` starting a run on the same shared repo at the same instant
+   * can still both get through — closing that needs a claim the store itself arbitrates, not a
+   * variable in memory.
+   */
+  private async claim<T>(projectId: string, take: () => Promise<T>): Promise<T> {
+    const queued = (this.claims.get(projectId) ?? Promise.resolve()).then(take);
+    // The tail is the settled form: a refused start must not reject the ones queued behind it.
+    this.claims.set(
+      projectId,
+      queued.then(
+        () => undefined,
+        () => undefined,
+      ),
+    );
+    return queued;
+  }
+
+  /**
+   * Refuse to start when a repo this run would have to share is already being worked in.
+   *
+   * There is no scheduler: "one run at a time" used to be a side effect of every run landing
+   * in the same directory. A repo that gets its own worktree can never conflict — that is the
+   * whole point — so this only ever fires for the ones that cannot have one.
+   */
+  private async assertNotInUse(projectId: string, repos: ResolvedRepo[]): Promise<void> {
+    const supported = await this.git.supportsWorktrees().catch(() => false);
+
+    const shared: Array<{ repo: ResolvedRepo; reason: string }> = [];
+    for (const repo of repos) {
+      const eligibility = worktreeEligibility(repo, await this.probe(repo, supported));
+      if (!eligibility.eligible) shared.push({ repo, reason: eligibility.reason });
+    }
+    if (shared.length === 0) return;
+
+    for (const other of await this.store.listRuns({ projectId, status: 'running' })) {
+      // `running` on its own is not evidence: a session killed mid-run leaves the row there
+      // for ever, and trusting it would block this repo until somebody noticed. A row with no
+      // pid is still treated as in use — the escape hatch in the message is the way out.
+      if (other.pid !== null && !(await this.runs.isProcessAlive(other.pid))) continue;
+
+      const held = new Set(
+        (await this.worktrees.list({ runId: other.id })).map((worktree) => worktree.repoId),
+      );
+
+      for (const { repo, reason } of shared) {
+        if (held.has(repo.id)) continue;
+        throw new ConflictError(
+          `run ${other.id} is already working in '${repo.name}' and ${reason}. Wait for it, or ` +
+            `close it out with 'pomni run cancel ${other.id}' if its process is gone.`,
+        );
+      }
+    }
+  }
+
+  /**
+   * What `worktreeEligibility` needs to know. Repeated from `WorktreeService.take` on purpose:
+   * the answer is wanted here *before* anything is created, and a handful of git reads at run
+   * start is cheaper than a worktree taken and then given back.
+   */
+  private async probe(repo: ResolvedRepo, gitSupportsWorktrees: boolean): Promise<WorktreeProbe> {
+    if (!repo.workingDirExists) {
+      return {
+        workingDirExists: false,
+        isGitRepo: false,
+        gitSupportsWorktrees,
+        currentBranch: null,
+        head: null,
+      };
+    }
+
+    const isGitRepo = await this.git.isRepo(repo.workingDir).catch(() => false);
+    const info = isGitRepo ? await this.git.info(repo.workingDir).catch(() => null) : null;
+    return {
+      workingDirExists: true,
+      isGitRepo,
+      gitSupportsWorktrees,
+      currentBranch: info?.currentBranch ?? null,
+      head: info?.head ?? null,
+    };
+  }
+
+  /**
+   * Give this run's worktrees back and say what survived.
+   *
+   * A kept worktree is written onto the run itself, not only logged: the person reading
+   * `pomni run show` is the one who has to go and look at the uncommitted work, and a line in
+   * a log file they never open is the same as not telling them.
+   *
+   * `unmet` is its one home. It used to go into `result` as well, so `pomni run show` printed
+   * every note twice; `result` is the agents' own answer, and a directory git would not remove
+   * is not something they said. `unmet` already carries the fallback reasons from the same
+   * feature, so everything this run could not give you about its directories reads as one list.
+   */
+  private async releaseWorktrees(run: PipelineRun): Promise<PipelineRun> {
+    let kept: Array<{ repoId: string; path: string; reason: string | null }> = [];
+
+    try {
+      kept = (await this.worktrees.release(run.id)).filter((entry) => entry.kept);
+    } catch (error) {
+      // Never worth failing a finished run over.
+      this.logger.warn(`could not release worktrees for ${run.id}`, error);
+    }
+
+    const notes = kept.map(
+      (entry) =>
+        `The worktree for '${entry.repoId}' was kept at ${entry.path} — ${
+          entry.reason ?? 'it could not be removed'
+        }.`,
+    );
+
+    const stored = (await this.store.getRun(run.id)) ?? run;
+    const updated: PipelineRun = {
+      ...stored,
+      pid: null,
+      unmet: [...stored.unmet, ...notes],
+    };
+
+    try {
+      await this.store.updateRun(run.id, updated);
+    } catch (error) {
+      this.logger.warn(`could not record the worktree outcome for ${run.id}`, error);
+    }
+    return updated;
   }
 
   /** Where the repos are, told to the agent — access it does not know about is no access. */

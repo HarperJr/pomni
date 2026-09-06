@@ -30,6 +30,12 @@ export interface RunOptions {
   itemId?: string;
   /** Stop after the first failure instead of running every repo. */
   bail?: boolean;
+  /**
+   * Where this run's copy of each repo actually is, by repo id; defaults to the repo's own
+   * working directory. A pipeline run passes its worktrees here so that a passing gate means
+   * *this* run's code passes, rather than whatever was in the shared directory at the time.
+   */
+  dirOverrides?: Record<string, string>;
   onOutput?: (runId: string, chunk: string) => void;
   onRunStart?: (run: Run) => void;
   onRunFinish?: (run: Run) => void;
@@ -108,7 +114,12 @@ export class RunService {
     if (!definition) {
       throw new ValidationError(`repo '${repo.id}' does not declare '${capability}'`);
     }
-    if (!repo.workingDirExists) {
+    // An override is this run's own checkout, made moments ago by git; whether the repo's
+    // original directory exists is a different question and not the one that matters here.
+    // The service has no FsProbe to stat the override with, so the executor's own failure is
+    // what reports a directory that has since gone.
+    const base = options.dirOverrides?.[repo.id] ?? repo.workingDir;
+    if (!options.dirOverrides?.[repo.id] && !repo.workingDirExists) {
       throw new ValidationError(
         `working directory for '${repo.projectId}/${repo.id}' is missing: ${repo.workingDir}`,
       );
@@ -120,7 +131,7 @@ export class RunService {
     }
 
     const id = ulid(this.clock.now().getTime());
-    const cwd = definition.cwd ? joinPath(repo.workingDir, definition.cwd) : repo.workingDir;
+    const cwd = definition.cwd ? joinPath(base, definition.cwd) : base;
     const logPath = this.docs.absolute(`${layout.runDir(id)}/output.log`);
     const startedAt = this.clock.iso();
 
@@ -302,6 +313,18 @@ export class RunService {
       summary: cancelled.summary,
     });
     return cancelled;
+  }
+
+  /**
+   * Whether a pid written down by some Pomni process is still a live process.
+   *
+   * It lives here because this is the service that owns process identity — it records the pid
+   * on a run and kills by it in `cancel`. Callers that hold a `RunService` therefore do not
+   * need an `Executor` of their own to tell a run in progress from a row left behind by a
+   * session that died.
+   */
+  async isProcessAlive(pid: number): Promise<boolean> {
+    return this.executor.isAlive(pid).catch(() => false);
   }
 
   /** Repos in this project that declare the capability, optionally narrowed to one. */

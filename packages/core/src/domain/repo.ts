@@ -8,6 +8,21 @@ import { RepoSourceSchema } from './source.js';
  * stack and its own commands — that is why capabilities live here and not on Project.
  */
 
+/**
+ * `auto`   — the default. A repo Pomni cloned gets a worktree per run; a repo the user linked
+ *            does not, because it is the user's own tree and the user did not ask.
+ * `always` — take a worktree even for a linked repo. `git worktree add` still never checks out,
+ *            moves or cleans the user's tree; it writes one bookkeeping entry under their
+ *            `.git/worktrees/`, which is exactly what this value is the consent for.
+ * `never`  — never; runs share this repo's directory, and the scheduler treats two runs
+ *            sharing it as a conflict.
+ *
+ * `always` is not a promise: a repo that cannot support worktrees at all — no commits, no git,
+ * a git too old — still falls back to the shared directory rather than failing the run.
+ */
+export const WorktreePolicySchema = z.enum(['auto', 'always', 'never']);
+export type WorktreePolicy = z.infer<typeof WorktreePolicySchema>;
+
 export const RepoRoleSchema = z.enum([
   'web',
   'api',
@@ -58,6 +73,8 @@ export const RepoSchema = z.object({
   status: RepoStatusSchema,
   stack: StackSchema.nullable().default(null),
   capabilities: CapabilityMapSchema.default({}),
+  /** Default 'auto', so every repos/*.yaml written before this field keeps parsing untouched. */
+  worktrees: WorktreePolicySchema.default('auto'),
   vcs: VcsInfoSchema.nullable().default(null),
   lastError: z.string().nullable().default(null),
   /** When the working copy was last fetched and re-detected. Null until the first sync. */
