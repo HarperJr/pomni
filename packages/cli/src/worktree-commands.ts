@@ -70,7 +70,12 @@ export function registerWorktreeCommands(
   worktree
     .command('remove <id>')
     .description('remove one worktree by id')
-    .option('--force', 'remove even if it is still live or has uncommitted work')
+    .option(
+      '--force',
+      'remove one Pomni is holding on to: a live run, or a worktree kept because it has ' +
+        'uncommitted work. Git still refuses to delete uncommitted changes, which is the ' +
+        'point — commit or copy them out first',
+    )
     .action(async (id: string, options: { force?: boolean }) => {
       const container = await open();
       await container.worktrees.removeOne(id, { force: Boolean(options.force) });

@@ -291,7 +291,7 @@ export class WorktreeService {
       if (state === 'kept') {
         throw new ConflictError(
           `'${worktree.path}' was kept because run ${worktree.runId} left uncommitted changes in it` +
-            `${worktree.keptReason ? ` (${worktree.keptReason})` : ''} — commit or copy them out first, then remove it with --force`,
+            `${worktree.keptReason ? ` (${worktree.keptReason})` : ''} — commit or copy them out, then remove it. \`--force\` gets past this message but not past git, which will still refuse while the changes are there.`,
         );
       }
       if (state === 'live') {
