@@ -225,6 +225,14 @@ export class PipelineService {
 
     const provider = await this.providers.resolve(input.providerId);
 
+    // Every agent, not just the entry one. Delegation is lazy, so an agent pointed at a
+    // provider that is gone, switched off, or cannot hand it the tools its prompt promises
+    // would otherwise be found by the orchestrator four steps in — after the run has paid for
+    // those steps, and with the failure reported as that agent's finding.
+    for (const agent of chosen.agents) {
+      await this.providers.assertAgentCanRun(agent, agent.provider ?? provider.id);
+    }
+
     // The run id comes first now, because the worktree's branch is named after it, and the
     // worktrees come before the workspace, because the directories the agents are given are
     // this run's copies rather than the repos themselves.
@@ -387,6 +395,12 @@ export class PipelineService {
 
     const workflow = (await this.workflows.get(previous.workflowId)) as Workflow;
     this.workflows.assertRunnable(workflow);
+
+    // The same pass as `start`: a provider may have been disabled or removed since the run
+    // was interrupted, and resuming into it would fail at the first step that needed it.
+    for (const agent of workflow.agents) {
+      await this.providers.assertAgentCanRun(agent, agent.provider ?? previous.providerId);
+    }
 
     const seed: Seed = { answered: new Map(), useCount: new Map() };
     let reused = 0;
@@ -634,7 +648,9 @@ export class PipelineService {
     const session = await this.openSession({
       projectId: input.projectId,
       agent: found.agent,
-      providerId: input.providerId,
+      // The agent's own choice wins here too: where an agent runs is a property of the agent,
+      // not of the surface that addressed it.
+      providerId: found.agent.provider ?? input.providerId,
       cwd: workspace.cwd,
       workspace,
       skillPrompt: input.skillPrompt,
@@ -833,7 +849,7 @@ export class PipelineService {
     const session = await this.openSession({
       projectId: run.projectId,
       agent,
-      providerId: run.providerId,
+      providerId: agent.provider ?? run.providerId,
       cwd,
       workspace,
       protocol: orchestrating
@@ -863,6 +879,9 @@ export class PipelineService {
       agentId: agent.id,
       agentName: agent.name,
       role: agent.role,
+      // The provider that actually ran it, resolved rather than as configured: a run spanning
+      // three providers is only readable afterwards if each step says which one it used.
+      providerId: provider.id,
       model,
       task,
       status: 'running',
@@ -889,6 +908,7 @@ export class PipelineService {
       agentId: agent.id,
       agentName: agent.name,
       role: agent.role,
+      providerId: provider.id,
       model,
       depth,
       task,

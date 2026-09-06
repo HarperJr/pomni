@@ -32,6 +32,15 @@ export const PipelineStepSchema = z.object({
   agentId: z.string(),
   agentName: z.string(),
   role: z.string(),
+  /**
+   * Which provider actually ran this step. Not derivable from the run any more: an agent may
+   * name its own, so a run can span three providers and only the step knows which was used.
+   *
+   * Null on steps recorded before the column existed. Those ran on the run's provider — there
+   * was no other option — so a reader may safely fall back to `PipelineRun.providerId`.
+   * Everything written from now on sets it.
+   */
+  providerId: z.string().nullable().default(null),
   model: z.string(),
   /** What this step was asked to do. For the entry step, the task itself. */
   task: z.string(),

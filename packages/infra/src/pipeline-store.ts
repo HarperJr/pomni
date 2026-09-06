@@ -145,10 +145,10 @@ export class SqlitePipelineStore implements PipelineStore {
   async insertStep(step: PipelineStep): Promise<void> {
     this.statement(
       `INSERT INTO pipeline_steps (id, run_id, parent_step_id, agent_id, agent_name, role,
-                                   model, task, status, output, error, outcome, unmet,
+                                   model, provider_id, task, status, output, error, outcome, unmet,
                                    actions, depth, started_at, ended_at, duration_ms,
                                    input_tokens, output_tokens, cost_usd)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       step.id,
       step.runId,
@@ -157,6 +157,7 @@ export class SqlitePipelineStore implements PipelineStore {
       step.agentName,
       step.role,
       step.model,
+      step.providerId,
       step.task,
       step.status,
       step.output,
@@ -178,7 +179,7 @@ export class SqlitePipelineStore implements PipelineStore {
     this.statement(
       `UPDATE pipeline_steps
          SET status = ?, output = ?, error = ?, outcome = ?, unmet = ?, actions = ?,
-             ended_at = ?, duration_ms = ?, input_tokens = ?, output_tokens = ?, cost_usd = ?
+             provider_id = ?, ended_at = ?, duration_ms = ?, input_tokens = ?, output_tokens = ?, cost_usd = ?
        WHERE id = ?`,
     ).run(
       step.status,
@@ -187,6 +188,7 @@ export class SqlitePipelineStore implements PipelineStore {
       step.outcome,
       JSON.stringify(step.unmet),
       JSON.stringify(step.actions),
+      step.providerId,
       step.endedAt,
       step.durationMs,
       step.inputTokens,
@@ -353,6 +355,7 @@ interface StepRow {
   agent_name: string;
   role: string;
   model: string;
+  provider_id: string | null;
   task: string;
   status: string;
   output: string | null;
@@ -476,6 +479,7 @@ function toStep(row: StepRow): PipelineStep {
     outcome: (row.outcome ?? 'unknown') as PipelineStep['outcome'],
     unmet: toList(row.unmet),
     actions: toActions(row.actions),
+    providerId: row.provider_id ?? null,
     depth: row.depth,
     startedAt: row.started_at,
     endedAt: row.ended_at,
@@ -576,6 +580,8 @@ const MIGRATIONS: string[] = [
    ALTER TABLE pipeline_runs ADD COLUMN output_tokens INTEGER NOT NULL DEFAULT 0;`,
 
   `ALTER TABLE pipeline_runs ADD COLUMN pid INTEGER;`,
+
+  `ALTER TABLE pipeline_steps ADD COLUMN provider_id TEXT;`,
 ];
 
 function migrate(db: SqliteDatabase): void {

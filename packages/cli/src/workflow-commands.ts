@@ -86,10 +86,11 @@ export function registerWorkflowCommands(
               style.bold(agent.id),
               agent.role === 'orchestrator' ? style.cyan('orchestrator') : 'agent',
               STRUGGLE[agent.struggle].label,
+              agent.provider ?? style.dim('(run)'),
               agent.prompt ? style.green('prompt ✓') : style.red('no prompt'),
               agent.name,
             ]),
-            ['', 'ID', 'ROLE', 'MODEL', 'PROMPT', 'NAME'],
+            ['', 'ID', 'ROLE', 'STRUGGLE', 'PROVIDER', 'PROMPT', 'NAME'],
           ),
         );
       }
@@ -190,6 +191,7 @@ export function registerWorkflowCommands(
     .option('--spec-file <path>', 'read the spec from a file')
     .option('--prompt-file <path>', 'set the system prompt from a file')
     .option('-m, --struggle <level>', StruggleSchema.options.join(' | '))
+    .option('--provider <id>', "where this agent runs; empty string clears back to the run's provider")
     .option('-o, --outputs <text>', 'what it produces')
     .option('--delegates-to <ids>', 'comma-separated agent ids (orchestrator only)')
     .option('--tools <ids>', 'comma-separated tool ids this agent may use; empty string clears')
@@ -210,6 +212,7 @@ export function registerWorkflowCommands(
           specFile?: string;
           promptFile?: string;
           struggle?: string;
+          provider?: string;
           outputs?: string;
           delegatesTo?: string;
           tools?: string;
@@ -224,6 +227,25 @@ export function registerWorkflowCommands(
         // the person typing, who should not have to remember whether Figma is MCP or a CLI.
         let granted: { mcp: string[]; cli: string[] } | undefined;
         let needsRun = false;
+
+        // Refuse a bad provider id here, at edit time, rather than leaving it to be
+        // discovered when the run starts.
+        //
+        // TODO: ProviderService is meant to grow a public `assertAgentCanRun(agent, providerId)`
+        // that also checks the provider is enabled and can give this agent the tools it asks
+        // for (only a claude-code provider has a tool loop at all — see `needsBuiltInTools`).
+        // That method was not importable yet at the time this was written. Once it lands,
+        // call it here instead of the bare existence check below, so this and the run-start
+        // check enforce exactly the same rule rather than two hand-written copies of it.
+        if (flags.provider !== undefined && flags.provider.trim()) {
+          const providerId = flags.provider.trim();
+          const provider = await container.providers.get(providerId).catch(() => null);
+          if (!provider) {
+            console.error(style.red(`no provider '${providerId}' — see \`pomni provider list\``));
+            process.exitCode = 1;
+            return;
+          }
+        }
 
         if (flags.tools !== undefined) {
           const ids = split(flags.tools) ?? [];
@@ -248,6 +270,7 @@ export function registerWorkflowCommands(
           spec: flags.specFile ? await readFile(flags.specFile, 'utf8') : flags.spec,
           prompt: flags.promptFile ? await readFile(flags.promptFile, 'utf8') : undefined,
           struggle: flags.struggle ? (StruggleSchema.parse(flags.struggle) as Struggle) : undefined,
+          provider: flags.provider,
           outputs: flags.outputs,
           delegatesTo: split(flags.delegatesTo),
           tools: {
@@ -506,7 +529,9 @@ ${item.body}`;
         container.events.subscribe((event) => {
           if (event.type === 'pipeline.step.started') {
             const indent = '  '.repeat(event.depth);
-            console.log(`${indent}${style.cyan('▸')} ${style.bold(event.agentName)} ${style.dim(event.model)}`);
+            console.log(
+              `${indent}${style.cyan('▸')} ${style.bold(event.agentName)} ${style.dim(`${event.providerId} · ${event.model}`)}`,
+            );
           }
           if (event.type === 'pipeline.step.finished') {
             console.log(

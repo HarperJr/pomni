@@ -38,6 +38,11 @@ export interface CreateAgentInput {
   spec?: string;
   prompt?: string;
   struggle?: Struggle;
+  /**
+   * Where this agent runs. Null or empty both mean the run's provider — the schema normalises
+   * them to null — so `--provider ""` and a cleared select clear it without a special case.
+   */
+  provider?: string | null;
   outputs?: string;
   delegatesTo?: string[];
   tools?: { files?: boolean; run?: boolean; verify?: boolean; mcp?: string[]; cli?: string[] };
@@ -194,6 +199,7 @@ export class WorkflowService {
       promptGeneratedAt: null,
       // An orchestrator is doing the planning, so it works harder by default.
       struggle: input.struggle ?? (role === 'orchestrator' ? 'high' : 'medium'),
+      provider: input.provider ?? null,
       outputs: input.outputs ?? '',
       delegatesTo: input.delegatesTo ?? [],
       tools: input.tools ?? {},
@@ -229,6 +235,9 @@ export class WorkflowService {
       ...(patch.spec !== undefined ? { spec: patch.spec } : {}),
       ...(patch.prompt !== undefined ? { prompt: patch.prompt } : {}),
       ...(patch.struggle !== undefined ? { struggle: patch.struggle } : {}),
+      // `''` and `null` are both a clear, and the schema turns either into null. Only an
+      // absent key leaves the agent where it was.
+      ...(patch.provider !== undefined ? { provider: patch.provider } : {}),
       ...(patch.outputs !== undefined ? { outputs: patch.outputs } : {}),
       ...(patch.delegatesTo !== undefined ? { delegatesTo: patch.delegatesTo } : {}),
       ...(patch.tools !== undefined ? { tools: { ...current.tools, ...patch.tools } } : {}),

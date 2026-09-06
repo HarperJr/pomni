@@ -50,6 +50,7 @@ const AgentBody = z.object({
   spec: z.string().optional(),
   prompt: z.string().optional(),
   struggle: StruggleSchema.optional(),
+  provider: z.string().nullable().optional(),
   outputs: z.string().optional(),
   delegatesTo: z.array(z.string()).optional(),
   tools: z

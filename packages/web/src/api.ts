@@ -475,6 +475,7 @@ export interface PipelineStep {
   agentId: string;
   agentName: string;
   role: string;
+  providerId: string | null;
   model: string;
   task: string;
   status: StepStatus;
@@ -615,6 +616,7 @@ export interface Agent {
   prompt: string;
   promptGeneratedAt: string | null;
   struggle: Struggle;
+  provider: string | null;
   delegatesTo: string[];
   outputs: string;
   tools: { files: boolean; run: boolean; mcp: string[]; cli: string[] };
@@ -1044,7 +1046,7 @@ export const api = {
       body: JSON.stringify({ content }),
     }),
 
-  addAgent: (workflowId: string, body: { name: string; role?: AgentRole }) =>
+  addAgent: (workflowId: string, body: { name: string; role?: AgentRole; provider?: string | null }) =>
     request<{ agent: Agent }>(`/api/workflows/${encodeURIComponent(workflowId)}/agents`, {
       method: 'POST',
       body: JSON.stringify(body),
@@ -1060,6 +1062,7 @@ export const api = {
       prompt?: string;
       outputs?: string;
       struggle?: Struggle;
+      provider?: string | null;
       delegatesTo?: string[];
       tools?: { files?: boolean; run?: boolean; mcp?: string[]; cli?: string[] };
     },

@@ -82,6 +82,19 @@ export const AgentSchema = z
     promptGeneratedAt: z.string().nullable().default(null),
     struggle: StruggleSchema.default('medium'),
     /**
+     * Where this agent runs. Null means the run's provider, which is what every workflow
+     * written before this field meant and still means.
+     *
+     * Orthogonal to `struggle`: this says *where*, `struggle` says *how hard*, and the chosen
+     * provider maps the level onto one of its own models. A scout can read files on Claude
+     * Code while a formatter in the same run costs nothing on a local endpoint.
+     *
+     * Empty and whitespace-only strings are normalised to null by the transform below, so
+     * `--provider ""` from the CLI and a `""` option from the web select both mean the same
+     * thing and no caller has to coerce first.
+     */
+    provider: z.string().nullable().default(null),
+    /**
      * Orchestrators only: which agents this one may delegate to. Empty means every other
      * agent in the workflow, which is the usual case and saves wiring a roster by hand.
      */
@@ -111,10 +124,18 @@ export const AgentSchema = z
   })
   .and(z.object({}).passthrough())
   .transform((value) => {
-    const raw = value as Record<string, unknown> & { struggle: Struggle };
+    const raw = value as Record<string, unknown> & {
+      struggle: Struggle;
+      provider: string | null;
+    };
     const legacy = typeof raw.modelScale === 'string' ? LEGACY_SCALE[raw.modelScale] : undefined;
     const { modelScale: _dropped, ...rest } = raw;
-    return { ...rest, struggle: legacy ?? raw.struggle } as Agent;
+    const provider = raw.provider?.trim();
+    return {
+      ...rest,
+      struggle: legacy ?? raw.struggle,
+      provider: provider ? provider : null,
+    } as Agent;
   });
 
 export interface Agent {
@@ -125,6 +146,8 @@ export interface Agent {
   prompt: string;
   promptGeneratedAt: string | null;
   struggle: Struggle;
+  /** Provider id, or null to use the run's. Never an empty string. */
+  provider: string | null;
   delegatesTo: string[];
   outputs: string;
   tools: { files: boolean; run: boolean; verify: boolean; mcp: string[]; cli: string[] };
@@ -134,6 +157,22 @@ export interface Agent {
 
 export function isOrchestrator(agent: Agent): boolean {
   return agent.role === 'orchestrator';
+}
+
+/**
+ * Whether this agent needs a provider that brings its own tool loop.
+ *
+ * True for any grant at all, not only the named registry tools: `files`, `run` and `verify`
+ * are abilities a plain chat endpoint cannot perform either. Pair it with `hasBuiltInTools`
+ * from `provider.ts` and refuse the run before the first model call — an agent told it can
+ * edit files, on a backend that cannot, spends a session discovering that and reports the
+ * discovery as its work.
+ *
+ * The rule lives here so the run check, the CLI and the editor all ask the same question.
+ */
+export function needsBuiltInTools(agent: Pick<Agent, 'tools'>): boolean {
+  const { files, run, verify, mcp, cli } = agent.tools;
+  return files || run || verify || mcp.length > 0 || cli.length > 0;
 }
 
 /** The prompt is stale when the spec changed after the prompt was generated. */

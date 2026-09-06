@@ -436,7 +436,7 @@ export function registerBacklogCommands(
                 const indent = '  '.repeat(event.depth);
                 console.log(
                   `${indent}${style.cyan('▸')} ${style.dim(itemId)} ${style.bold(event.agentName)} ${style.dim(
-                    event.model,
+                    `${event.providerId} · ${event.model}`,
                   )}`,
                 );
               }

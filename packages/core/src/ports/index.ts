@@ -365,6 +365,8 @@ export type PomniEvent =
       agentId: string;
       agentName: string;
       role: string;
+      /** Where this step is running. An agent may name its own, so a run can span several. */
+      providerId: string;
       model: string;
       depth: number;
       task: string;

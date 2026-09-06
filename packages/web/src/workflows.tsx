@@ -8,6 +8,7 @@ import {
   STRUGGLE_NOTE,
   type Agent,
   type AgentRole,
+  type ProviderStatus,
   type Struggle,
   type WorkflowDetail,
 } from './api';
@@ -545,6 +546,7 @@ function AgentEditor({
   const [prompt, setPrompt] = useState(agent.prompt);
   const [outputs, setOutputs] = useState(agent.outputs);
   const [struggle, setStruggle] = useState<Struggle>(agent.struggle);
+  const [provider, setProvider] = useState<string>(agent.provider ?? '');
   const [granted, setGranted] = useState<string[]>([...agent.tools.mcp, ...agent.tools.cli]);
   const [files, setFiles] = useState(agent.tools.files);
   const [run, setRun] = useState(agent.tools.run);
@@ -557,6 +559,18 @@ function AgentEditor({
     queryFn: () => api.listTools().then((result) => result.tools),
   });
 
+  const providers = useQuery({
+    queryKey: ['providers'],
+    queryFn: () => api.listProviders(),
+  });
+
+  const needsClaudeCode = files || run || granted.length > 0;
+  const runDefaultId = providers.data?.default ?? null;
+  const runDefault = (providers.data?.providers ?? []).find((item) => item.id === runDefaultId);
+  const selectedProvider = provider
+    ? (providers.data?.providers ?? []).find((item) => item.id === provider)
+    : runDefault;
+
   const refresh = () => queryClient.invalidateQueries({ queryKey: ['workflow', workflowId] });
 
   const save = useMutation({
@@ -568,6 +582,7 @@ function AgentEditor({
         prompt,
         outputs,
         struggle,
+        provider,
         tools: {
           files,
           // A CLI tool is run through the shell, so granting one without that grants
@@ -663,22 +678,53 @@ function AgentEditor({
         </label>
       </div>
 
-      <label>
-        <span className="lab">Model scale</span>
-        <select
-          value={struggle}
-          onChange={(event) => setStruggle(event.target.value as Struggle)}
-        >
-          {STRUGGLE_LEVELS.map((level) => (
-            <option key={level} value={level}>
-              {level}
+      <div className="field-row">
+        <label>
+          <span className="lab">Model scale</span>
+          <select
+            value={struggle}
+            onChange={(event) => setStruggle(event.target.value as Struggle)}
+          >
+            {STRUGGLE_LEVELS.map((level) => (
+              <option key={level} value={level}>
+                {level}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          <span className="lab">Provider</span>
+          <select value={provider} onChange={(event) => setProvider(event.target.value)}>
+            <option value="">
+              Run's provider{runDefault ? ` (${runDefault.label})` : ''}
             </option>
-          ))}
-        </select>
-        <span className="hint">
-          {STRUGGLE_NOTE[struggle]} Which model that is comes from the provider.
-        </span>
-      </label>
+            {(providers.data?.providers ?? []).map((item) => {
+              const incompatible = needsClaudeCode && item.kind !== 'claude-code';
+              const disabled = !item.enabled || incompatible;
+              return (
+                <option key={item.id} value={item.id} disabled={disabled}>
+                  {item.label}
+                  {!item.enabled ? ' — disabled' : ''}
+                  {item.enabled && incompatible ? ' — no tool loop, cannot run this agent' : ''}
+                </option>
+              );
+            })}
+          </select>
+        </label>
+      </div>
+      <div className="hint" style={{ marginTop: -6, marginBottom: 14 }}>
+        {STRUGGLE_NOTE[struggle]}{' '}
+        {selectedProvider
+          ? (() => {
+              const model = resolveModel(selectedProvider, struggle);
+              return model
+                ? `On ${selectedProvider.label}, "${struggle}" resolves to ${model}.`
+                : `${selectedProvider.label} has no model configured for any level.`;
+            })()
+          : 'Pick a provider to see which model each level resolves to.'}
+        {needsClaudeCode &&
+          ' This agent reads/writes files or runs commands, so it can only run on a claude-code provider.'}
+      </div>
 
       <label>
         <span className="lab">What it produces</span>
@@ -780,6 +826,35 @@ function AgentEditor({
 
 function firstLine(text: string): string {
   return text.split('\n')[0] ?? '';
+}
+
+/** Legacy struggle keys a provider may still carry, for the level each maps onto. */
+const LEGACY_KEY: Record<Struggle, 'fast' | 'balanced' | 'deep' | 'max'> = {
+  low: 'fast',
+  medium: 'balanced',
+  high: 'deep',
+  max: 'max',
+};
+
+/**
+ * Mirrors `resolveModel` in `packages/core/src/domain/provider.ts` — reimplemented here
+ * because the web package hand-mirrors core's types rather than importing them.
+ */
+function resolveModel(provider: ProviderStatus, struggle: Struggle): string | null {
+  const at = (level: Struggle): string | undefined =>
+    provider.models[level] ?? provider.models[LEGACY_KEY[level]];
+
+  const exact = at(struggle);
+  if (exact) return exact;
+
+  const index = STRUGGLE_LEVELS.indexOf(struggle);
+  for (let distance = 1; distance < STRUGGLE_LEVELS.length; distance += 1) {
+    for (const candidate of [STRUGGLE_LEVELS[index - distance], STRUGGLE_LEVELS[index + distance]]) {
+      const model = candidate ? at(candidate) : undefined;
+      if (model) return model;
+    }
+  }
+  return null;
 }
 
 /** Attached pipelines, shown on the project page. */

@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import type { Struggle } from '../domain/agent.js';
+import { needsBuiltInTools, type Agent, type Struggle } from '../domain/agent.js';
 import { ConflictError, NotFoundError, ValidationError } from '../domain/errors.js';
 import { assertSlug, deriveId } from '../domain/ids.js';
 import { layout } from '../domain/layout.js';
@@ -103,7 +103,18 @@ export class ProviderService {
   async resolve(preferred?: string): Promise<Provider> {
     const file = await this.load();
 
-    if (preferred) return this.get(preferred);
+    if (preferred) {
+      // A named provider is still refused when it is switched off. Returning it anyway meant
+      // a disabled provider ran anything that asked for it by id and only the fallback path
+      // respected the flag — which is not what "disabled" says on the Providers page.
+      const named = await this.get(preferred);
+      if (!named.enabled) {
+        throw new ValidationError(
+          `provider '${named.id}' is disabled — enable it on the Providers page, or choose another`,
+        );
+      }
+      return named;
+    }
     if (file.default) {
       const configured = file.providers.find((provider) => provider.id === file.default);
       if (configured?.enabled) return configured;
@@ -140,7 +151,20 @@ export class ProviderService {
     // A tool only reaches a session through the Claude Code CLI: the API backends here have
     // no tool loop to give it to. Saying so is better than a session whose prompt promises
     // a tool it was never handed.
-    if (options.tools?.length && provider.kind !== 'claude-code') {
+    //
+    // Asked of the domain rather than restated here, because `files` and `run` are abilities a
+    // chat endpoint cannot perform either — checking only the named grants let a file-editing
+    // agent onto an API backend, which is exactly the session that discovers it cannot work.
+    const needsTools = needsBuiltInTools({
+      tools: {
+        files: options.files ?? false,
+        run: options.run ?? false,
+        verify: (options.verify?.length ?? 0) > 0,
+        mcp: options.tools?.map((grant) => grant.tool.id) ?? [],
+        cli: [],
+      },
+    });
+    if (needsTools && !hasBuiltInTools(provider)) {
       throw new ValidationError(
         `provider '${provider.id}' cannot give an agent tools — only a claude-code provider can`,
       );
@@ -159,6 +183,54 @@ export class ProviderService {
       model: resolveModel(provider, struggle),
       tools: hasBuiltInTools(provider),
     };
+  }
+
+  /**
+   * Refuse an agent that cannot run where it is pointed — before the first model call.
+   *
+   * Three things go wrong here and a reader has to tell them apart: the provider was never
+   * configured, it exists but is switched off, or it exists and cannot give this agent the
+   * tools its grants promise. Each says the agent's name, because in a mixed-provider run the
+   * run's own provider is not the one at fault.
+   *
+   * Called for every agent in a workflow as a run starts, not as each step begins: delegation
+   * is lazy, so a leaf agent pointed at a dead provider would otherwise be discovered by that
+   * leaf, mid-run, and report the discovery as its work.
+   */
+  async assertAgentCanRun(
+    agent: Pick<Agent, 'name' | 'tools'>,
+    providerId: string,
+  ): Promise<Provider> {
+    let provider: Provider;
+    try {
+      provider = await this.get(providerId);
+    } catch (error) {
+      if (!(error instanceof NotFoundError)) throw error;
+      throw new ValidationError(
+        `agent '${agent.name}' runs on provider '${providerId}', which is not configured — ` +
+          "add it with `pomni provider add`, or clear the agent's provider to use the run's",
+        { agent: agent.name, providerId },
+      );
+    }
+
+    if (!provider.enabled) {
+      throw new ValidationError(
+        `agent '${agent.name}' runs on provider '${provider.id}', which is disabled — enable it ` +
+          "on the Providers page, or clear the agent's provider to use the run's",
+        { agent: agent.name, providerId },
+      );
+    }
+
+    if (needsBuiltInTools(agent) && !hasBuiltInTools(provider)) {
+      throw new ValidationError(
+        `agent '${agent.name}' is granted tools, and provider '${provider.id}' cannot give an ` +
+          'agent tools — only a claude-code provider can. Move it to a claude-code provider, ' +
+          'or take its tool grants away.',
+        { agent: agent.name, providerId },
+      );
+    }
+
+    return provider;
   }
 
   async create(input: CreateProviderInput): Promise<Provider> {

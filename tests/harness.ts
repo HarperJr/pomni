@@ -407,6 +407,12 @@ export class FakeLlm implements LlmPort {
   failCompleteWhen: RegExp | null = null;
 
   /**
+   * What each answer costs, when a test cares. Null by default, which is what a provider that
+   * does not report a price says — the run then has no total, exactly as today.
+   */
+  costUsd: number | null = null;
+
+  /**
    * Awaited before every answer. A test that needs to see a run while it is still `running`
    * holds this open, does its asserting, then releases it. Unset by default, so every other
    * test stays synchronous.
@@ -428,6 +434,7 @@ export class FakeLlm implements LlmPort {
       stopReason: 'end_turn',
       usage: { inputTokens: 10, outputTokens: 20, cacheReadTokens: 0, cacheCreationTokens: 0 },
       turns: 1,
+      ...(this.costUsd === null ? {} : { costUsd: this.costUsd }),
     };
   }
 
@@ -463,19 +470,38 @@ export class FakeLlm implements LlmPort {
   }
 }
 
-/** Hands the same fake model back for every provider, so tests never reach a network. */
-class FakeLlmFactory implements LlmFactory {
+export interface SessionOptions {
+  cwd?: string;
+  dirs?: string[];
+  tools?: ToolGrant[];
+  files?: boolean;
+}
+
+/**
+ * Hands the same fake model back for every provider, so tests never reach a network.
+ *
+ * It records *which* provider each session was built for, not only the last set of options.
+ * Once an agent can name its own provider, "the same fake for everyone" hides the only thing
+ * a mixed-provider run is about: a factory that forgets its argument cannot tell a run that
+ * spanned three providers from one that spanned none.
+ */
+export class FakeLlmFactory implements LlmFactory {
   /** The options the last session was built with — how a test sees what an agent was given. */
-  lastOptions: { cwd?: string; dirs?: string[]; tools?: ToolGrant[]; files?: boolean } = {};
+  lastOptions: SessionOptions = {};
+  /** Every session opened, in order, with the provider it was opened for. */
+  created: Array<{ providerId: string; options: SessionOptions }> = [];
 
   constructor(private readonly llm: FakeLlm) {}
 
-  create(
-    _provider: Provider,
-    options: { cwd?: string; dirs?: string[]; tools?: ToolGrant[]; files?: boolean } = {},
-  ): LlmPort {
+  create(provider: Provider, options: SessionOptions = {}): LlmPort {
     this.lastOptions = options;
+    this.created.push({ providerId: provider.id, options });
     return this.llm;
+  }
+
+  /** Provider ids of every session opened, in order. `status()` probes are not sessions. */
+  providersUsed(): string[] {
+    return this.created.map((entry) => entry.providerId);
   }
 }
 
