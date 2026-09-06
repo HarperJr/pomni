@@ -1,8 +1,15 @@
 import type { ZodType, ZodTypeDef } from 'zod';
 import type { Capability, CapabilityMap } from '../domain/capability.js';
+import type { Chat, ChatFilter, ChatMessage } from '../domain/chat.js';
 import type { Credential } from '../domain/credential.js';
 import type { VcsInfo } from '../domain/repo.js';
-import type { Artifact, PipelineFilter, PipelineRun, PipelineStep } from '../domain/pipeline.js';
+import type {
+  Artifact,
+  PipelineFilter,
+  PipelineRun,
+  PipelineStep,
+  Question,
+} from '../domain/pipeline.js';
 import type { Run, RunFilter, TestResult } from '../domain/run.js';
 
 /**
@@ -213,7 +220,36 @@ export interface PipelineStore {
   steps(runId: string): Promise<PipelineStep[]>;
   putArtifacts(artifacts: Artifact[]): Promise<void>;
   artifacts(runId: string): Promise<Artifact[]>;
+  insertQuestion(question: Question): Promise<void>;
+  updateQuestion(id: string, question: Question): Promise<void>;
+  getQuestion(id: string): Promise<Question | null>;
+  questions(runId: string): Promise<Question[]>;
   close(): void;
+}
+
+// ---------------------------------------------------------------------------
+// Chat store
+// ---------------------------------------------------------------------------
+
+/**
+ * Chats and their transcripts. SQLite, alongside the run and pipeline stores — a chat is an
+ * append-heavy log that nobody edits by hand, which is the opposite of what `.pomni/**.yaml` is
+ * for. Messages are never rewritten except to settle an action on them, so `updateMessage`
+ * takes the whole message rather than a patch.
+ */
+export interface ChatStore {
+  createChat(chat: Chat): Promise<void>;
+  /** Newest `updatedAt` first. */
+  listChats(filter?: ChatFilter): Promise<Chat[]>;
+  getChat(id: string): Promise<Chat | null>;
+  updateChat(chat: Chat): Promise<void>;
+  /** Cascades to its messages. */
+  deleteChat(id: string): Promise<void>;
+  appendMessage(message: ChatMessage): Promise<void>;
+  updateMessage(message: ChatMessage): Promise<void>;
+  /** `createdAt` ascending. */
+  listMessages(chatId: string): Promise<ChatMessage[]>;
+  getMessage(id: string): Promise<ChatMessage | null>;
 }
 
 // ---------------------------------------------------------------------------
@@ -257,6 +293,7 @@ export type PomniEvent =
   | { type: 'run.output'; projectId: string; runId: string; chunk: string }
   | { type: 'workflow.changed'; workflowId: string }
   | { type: 'provider.changed' }
+  | { type: 'tool.changed'; toolId: string }
   | { type: 'pipeline.started'; runId: string; projectId: string; workflowId: string; task: string }
   | {
       type: 'pipeline.step.started';
@@ -287,6 +324,21 @@ export type PomniEvent =
       toAgentId: string;
       task: string;
     }
+  | {
+      type: 'pipeline.question.asked';
+      runId: string;
+      questionId: string;
+      agentName: string;
+      question: string;
+    }
+  | { type: 'pipeline.question.answered'; runId: string; questionId: string }
+  | {
+      type: 'pipeline.escalated';
+      runId: string;
+      stepId: string;
+      agentName: string;
+      question: string;
+    }
   | { type: 'pipeline.cancelling'; runId: string }
   | {
       type: 'pipeline.finished';
@@ -307,7 +359,28 @@ export type PomniEvent =
       capability: string;
       status: string;
       summary: string | null;
-    };
+    }
+  | { type: 'chat.changed'; chatId: string }
+  | { type: 'chat.removed'; chatId: string }
+  | { type: 'chat.message.chunk'; chatId: string; messageId: string; text: string }
+  | {
+      type: 'chat.action.started';
+      chatId: string;
+      messageId: string;
+      actionId: string;
+      name: string;
+      writes: boolean;
+    }
+  | {
+      type: 'chat.action.finished';
+      chatId: string;
+      messageId: string;
+      actionId: string;
+      name: string;
+      status: string;
+      error: string | null;
+    }
+  | { type: 'chat.turn.finished'; chatId: string; messageId: string };
 
 export interface EmittedEvent {
   ts: string;
@@ -340,10 +413,14 @@ export const DURABLE_EVENT_TYPES: ReadonlySet<string> = new Set([
   'run.finished',
   'workflow.changed',
   'provider.changed',
+  'tool.changed',
   'pipeline.started',
   'pipeline.step.started',
   'pipeline.step.finished',
   'pipeline.flow',
+  'pipeline.escalated',
+  'pipeline.question.asked',
+  'pipeline.question.answered',
   'pipeline.finished',
   'item.created',
   'item.changed',

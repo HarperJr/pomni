@@ -13,6 +13,7 @@ import {
   type ProviderKind,
   type ProviderStatus,
 } from '../domain/provider.js';
+import type { ToolGrant } from '../domain/tool.js';
 import type { Clock, DocStore, EventBus, LlmPort } from '../ports/index.js';
 
 export interface CreateProviderInput {
@@ -31,7 +32,16 @@ export interface CreateProviderInput {
  * test can hand back a fake.
  */
 export interface LlmFactory {
-  create(provider: Provider, options?: { cwd?: string }): LlmPort;
+  create(
+    provider: Provider,
+    options?: {
+      cwd?: string;
+      dirs?: string[];
+      tools?: ToolGrant[];
+      files?: boolean;
+      run?: boolean;
+    },
+  ): LlmPort;
 }
 
 /**
@@ -114,12 +124,35 @@ export class ProviderService {
   /** An LlmPort ready to run, plus the model id for this scale. */
   async portFor(
     struggle: Struggle,
-    options: { provider?: string; cwd?: string } = {},
+    options: {
+      provider?: string;
+      cwd?: string;
+      dirs?: string[];
+      tools?: ToolGrant[];
+      files?: boolean;
+      run?: boolean;
+    } = {},
   ): Promise<{ provider: Provider; port: LlmPort; model: string; tools: boolean }> {
     const provider = await this.resolve(options.provider);
+
+    // A tool only reaches a session through the Claude Code CLI: the API backends here have
+    // no tool loop to give it to. Saying so is better than a session whose prompt promises
+    // a tool it was never handed.
+    if (options.tools?.length && provider.kind !== 'claude-code') {
+      throw new ValidationError(
+        `provider '${provider.id}' cannot give an agent tools — only a claude-code provider can`,
+      );
+    }
+
     return {
       provider,
-      port: this.factory.create(provider, { cwd: options.cwd }),
+      port: this.factory.create(provider, {
+        cwd: options.cwd,
+        dirs: options.dirs,
+        tools: options.tools,
+        files: options.files,
+        run: options.run,
+      }),
       model: resolveModel(provider, struggle),
       tools: hasBuiltInTools(provider),
     };

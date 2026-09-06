@@ -23,6 +23,31 @@ import {
  *     concurrent editor gets a conflict instead of losing work;
  *   - `.json` files are serialised as JSON, everything else as YAML.
  */
+/**
+ * Rename over the destination, retrying briefly on Windows.
+ *
+ * Windows refuses the rename with EPERM while any other process has the destination open —
+ * and something usually does: the server polls the same files the CLI is writing. The lock
+ * is momentary, so a few short retries turn a hard failure into a pause nobody notices.
+ * Silently losing the write is the alternative, and that is how a backlog item ends up
+ * never moving with no trace of why.
+ */
+async function replace(from: string, to: string): Promise<void> {
+  const waits = [0, 20, 60, 150, 300];
+
+  for (let attempt = 0; attempt < waits.length; attempt += 1) {
+    if (waits[attempt]) await new Promise((resolve) => setTimeout(resolve, waits[attempt]));
+    try {
+      await rename(from, to);
+      return;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      const transient = code === 'EPERM' || code === 'EACCES' || code === 'EBUSY';
+      if (!transient || attempt === waits.length - 1) throw error;
+    }
+  }
+}
+
 export class FileDocStore implements DocStore {
   readonly root: string;
 
@@ -80,7 +105,7 @@ export class FileDocStore implements DocStore {
     const tmpPath = `${absPath}.${process.pid.toString(36)}${Math.random().toString(36).slice(2, 8)}.tmp`;
     try {
       await writeFile(tmpPath, text, 'utf8');
-      await rename(tmpPath, absPath);
+      await replace(tmpPath, absPath);
     } catch (error) {
       await unlink(tmpPath).catch(() => undefined);
       throw error;

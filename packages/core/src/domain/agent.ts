@@ -88,11 +88,16 @@ export const AgentSchema = z
     delegatesTo: z.array(z.string()).default([]),
     /** What this agent is expected to produce. Shown to the orchestrator when delegating. */
     outputs: z.string().default(''),
-    /** Whether the agent may read and write files in the project's repos. */
+    /**
+     * What this agent may use. `files` and `run` are the built-in abilities; `mcp` and `cli`
+     * name tools from the registry, which must also be attached to the project.
+     */
     tools: z
       .object({
         files: z.boolean().default(false),
         run: z.boolean().default(false),
+        mcp: z.array(z.string()).default([]),
+        cli: z.array(z.string()).default([]),
       })
       .default({}),
     createdAt: z.string(),
@@ -116,7 +121,7 @@ export interface Agent {
   struggle: Struggle;
   delegatesTo: string[];
   outputs: string;
-  tools: { files: boolean; run: boolean };
+  tools: { files: boolean; run: boolean; mcp: string[]; cli: string[] };
   createdAt: string;
   updatedAt: string;
 }

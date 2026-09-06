@@ -3,6 +3,7 @@ import {
   type LlmFactory,
   type LlmPort,
   type Provider,
+  type ToolGrant,
 } from '@pomni/core';
 import { AnthropicLlm } from './llm.js';
 import { ClaudeCodeLlm } from './claude-code-llm.js';
@@ -16,12 +17,25 @@ import { OpenAiCompatibleLlm } from './openai-llm.js';
  * here and a kind to the schema — nothing above this line changes.
  */
 export class DefaultLlmFactory implements LlmFactory {
-  create(provider: Provider, options: { cwd?: string } = {}): LlmPort {
+  create(
+    provider: Provider,
+    options: {
+      cwd?: string;
+      dirs?: string[];
+      tools?: ToolGrant[];
+      files?: boolean;
+      run?: boolean;
+    } = {},
+  ): LlmPort {
     switch (provider.kind) {
       case 'claude-code':
         return new ClaudeCodeLlm({
           cwd: options.cwd,
+          dirs: options.dirs,
           allowedTools: provider.allowedTools,
+          tools: options.tools,
+          files: options.files,
+          run: options.run,
           maxTurns: provider.maxTurns,
           // With no repo to work in there is nothing for the built-in tools to do, so the
           // agent's own prompt replaces Claude Code's rather than being appended to it.

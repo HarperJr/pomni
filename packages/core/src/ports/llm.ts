@@ -44,12 +44,28 @@ export interface LlmUsage {
   cacheReadTokens: number;
 }
 
+/**
+ * One thing the session did on its way to an answer: a command, a file it changed, a skill
+ * it invoked, an MCP tool it called.
+ *
+ * Providers that run their own tool loop do the work out of sight; without this the only
+ * record of a fifteen-minute session is the paragraph it ended with.
+ */
+export interface AgentAction {
+  /** The tool's own name — `Bash`, `Edit`, `Skill`, `mcp__figma__get_design_context`. */
+  tool: string;
+  /** The part worth reading: the command, the path, the skill. */
+  detail: string;
+}
+
 export interface LlmResult {
   text: string;
   stopReason: string;
   usage: LlmUsage;
   /** Turns taken, counting the first. Only interesting for the tool loop. */
   turns: number;
+  /** What the session did, when the provider reports it. */
+  actions?: AgentAction[];
 }
 
 export interface ToolLoopHooks {

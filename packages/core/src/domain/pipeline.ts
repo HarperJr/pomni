@@ -14,6 +14,16 @@ export type StepStatus = z.infer<typeof StepStatusSchema>;
 export const PipelineStatusSchema = z.enum(['running', 'passed', 'failed', 'cancelled']);
 export type PipelineStatus = z.infer<typeof PipelineStatusSchema>;
 
+/**
+ * Whether the work actually happened, as the agent that did it reports.
+ *
+ * Separate from the step's `status`, which only says the model returned without throwing.
+ * An agent that explains at length why it could not do the job has still `done` its turn;
+ * conflating the two is what makes a run green when nothing was delivered.
+ */
+export const OutcomeSchema = z.enum(['done', 'partial', 'blocked', 'unknown']);
+export type Outcome = z.infer<typeof OutcomeSchema>;
+
 export const PipelineStepSchema = z.object({
   id: z.string(),
   runId: z.string(),
@@ -29,6 +39,12 @@ export const PipelineStepSchema = z.object({
   /** What it returned. */
   output: z.string().nullable(),
   error: z.string().nullable(),
+  /** Commands run, files touched, skills and MCP tools called, in order. */
+  actions: z.array(z.object({ tool: z.string(), detail: z.string() })).default([]),
+  /** What the agent says it achieved. `status` says it finished; this says whether it worked. */
+  outcome: OutcomeSchema.default('unknown'),
+  /** What it was asked for and did not deliver. */
+  unmet: z.array(z.string()).default([]),
   /** How deep in the delegation tree, for laying the view out. */
   depth: z.number().int().nonnegative(),
   startedAt: z.string(),
@@ -41,6 +57,24 @@ export const PipelineStepSchema = z.object({
 
 export type PipelineStep = z.infer<typeof PipelineStepSchema>;
 
+/**
+ * A file handed to a run as context.
+ *
+ * Content, not a path: the files worth attaching are often a spec, a log or a screenshot
+ * transcript that lives outside the repo, and half the agents in a workflow have no working
+ * directory to resolve a path against anyway.
+ */
+export const ContextFileSchema = z.object({
+  /** How the file is named to the agents. A basename, not the path it came from. */
+  name: z.string().min(1).max(200),
+  content: z.string().min(1),
+});
+export type ContextFile = z.infer<typeof ContextFileSchema>;
+
+/** Per file, and for all of them together. A run pays for this text once per agent. */
+export const MAX_CONTEXT_FILE_BYTES = 256_000;
+export const MAX_CONTEXT_BYTES = 512_000;
+
 export const PipelineRunSchema = z.object({
   id: z.string(),
   projectId: z.string(),
@@ -49,6 +83,8 @@ export const PipelineRunSchema = z.object({
   providerId: z.string(),
   /** Backlog item this run is for, when it was started from one. */
   itemId: z.string().nullable(),
+  /** The run this one is a second attempt at, so a retry is traceable to what it retried. */
+  rerunOf: z.string().nullable().default(null),
   task: z.string(),
   status: PipelineStatusSchema,
   result: z.string().nullable(),
@@ -58,6 +94,11 @@ export const PipelineRunSchema = z.object({
   gateSummary: z.string().nullable().default(null),
   /** What happened to the backlog item, if the run was started from one. */
   itemStatus: z.string().nullable().default(null),
+  /** The entry orchestrator's verdict on the whole run. */
+  outcome: OutcomeSchema.default('unknown'),
+  unmet: z.array(z.string()).default([]),
+  /** Files attached when the run was started. Every agent is given them. */
+  context: z.array(ContextFileSchema).default([]),
   startedAt: z.string(),
   endedAt: z.string().nullable(),
   durationMs: z.number().nullable(),
@@ -69,6 +110,7 @@ export type PipelineRun = z.infer<typeof PipelineRunSchema>;
 export interface PipelineRunDetail extends PipelineRun {
   steps: PipelineStep[];
   artifacts: Artifact[];
+  questions: Question[];
 }
 
 export interface PipelineFilter {
@@ -78,6 +120,114 @@ export interface PipelineFilter {
   status?: PipelineStatus;
   limit?: number;
 }
+
+/**
+ * The id an orchestrator delegates to when only a person can answer.
+ *
+ * Not an agent in any workflow: it is a reserved target, so asking a human costs the
+ * orchestrator nothing new to learn — it is the same delegation it already knows how to
+ * write, and the answer arrives where an agent's answer would.
+ */
+
+/** An agent handing a problem upwards, because it cannot settle it alone. */
+const EscalationSchema = z.object({
+  question: z.string().min(1),
+  /**
+   * True when the work cannot go on until a person answers. False means the orchestrator
+   * should hear about it and decide — most escalations are that, not this.
+   */
+  critical: z.boolean().default(false),
+});
+
+const VerdictSchema = z.object({
+  outcome: z.enum(['done', 'partial', 'blocked']),
+  unmet: z.array(z.string()).default([]),
+  escalate: EscalationSchema.optional(),
+});
+
+export interface Escalation {
+  question: string;
+  critical: boolean;
+}
+
+export interface Verdict {
+  outcome: Outcome;
+  unmet: string[];
+  escalate?: Escalation;
+}
+
+/**
+ * What every agent is told to end its answer with.
+ *
+ * The block is small on purpose. Asking for prose about success gets prose about success;
+ * asking for one of three words gets an answer a machine can act on.
+ */
+export const VERDICT_PROTOCOL = `## End your answer with
+
+\`\`\`json
+{"outcome": "done|partial|blocked", "unmet": ["what you were asked for and did not deliver"]}
+\`\`\`
+
+Say \`done\` only if it is true: nobody re-checks a green run, so a false one is found later
+by someone who trusted it. Be exact in \`unmet\` — "could not read the wireframes, no file
+open" is useful, "some issues" is not.
+
+Add \`"escalate": {"question": "...", "critical": true}\` when you cannot settle something
+yourself. \`critical\` stops the run and asks a person, and you get another turn with their
+reply; otherwise your orchestrator sees it and decides.`;
+
+/**
+ * Read an agent's verdict, and the prose without it.
+ *
+ * A missing block is `unknown` rather than `done`. Absence of a claim is not a claim of
+ * success — which is the whole failure this exists to prevent.
+ */
+export function parseVerdict(text: string): { verdict: Verdict; prose: string } {
+  for (const candidate of jsonBlocks(text)) {
+    const parsed = VerdictSchema.safeParse(candidate);
+    if (parsed.success) {
+      return {
+        verdict: {
+          outcome: parsed.data.outcome,
+          unmet: parsed.data.unmet,
+          ...(parsed.data.escalate ? { escalate: parsed.data.escalate } : {}),
+        },
+        prose: stripVerdict(text),
+      };
+    }
+  }
+  return { verdict: { outcome: 'unknown', unmet: [] }, prose: text };
+}
+
+/** The answer without its verdict block — what a person reads. */
+function stripVerdict(text: string): string {
+  return text
+    .replace(/\`\`\`(?:json)?[^\`\`\`]*"outcome"[\s\S]*?\`\`\`/g, '')
+    .trim();
+}
+
+export const HUMAN_AGENT_ID = 'human';
+
+export const QuestionStatusSchema = z.enum(['open', 'answered', 'abandoned']);
+export type QuestionStatus = z.infer<typeof QuestionStatusSchema>;
+
+/** Something a run stopped to ask a person. */
+export const QuestionSchema = z.object({
+  id: z.string(),
+  runId: z.string(),
+  /** The step that asked — an orchestrator, mid-round. */
+  stepId: z.string(),
+  agentId: z.string(),
+  agentName: z.string(),
+  question: z.string(),
+  answer: z.string().nullable(),
+  /** Files handed over with the answer — a screenshot, a spec, an export. */
+  attachments: z.array(ContextFileSchema).default([]),
+  status: QuestionStatusSchema,
+  askedAt: z.string(),
+  answeredAt: z.string().nullable(),
+});
+export type Question = z.infer<typeof QuestionSchema>;
 
 /** A file an agent produced during a run. */
 export const ArtifactSchema = z.object({
@@ -99,6 +249,35 @@ export const ArtifactSchema = z.object({
   createdAt: z.string(),
 });
 export type Artifact = z.infer<typeof ArtifactSchema>;
+
+/** How much text a set of context files adds to every agent's prompt. */
+export function contextBytes(files: ContextFile[]): number {
+  return files.reduce((total, file) => total + Buffer.byteLength(file.content, 'utf8'), 0);
+}
+
+/**
+ * The task an agent is actually given: its own instruction, then the attached files.
+ *
+ * Every agent gets them, not only the orchestrator. The protocol tells an orchestrator to
+ * write each delegation as if the agent can see nothing else, so context reaching only the
+ * top of the tree would have to be retyped into every delegation to survive — and would not.
+ */
+export function withContext(task: string, files: ContextFile[]): string {
+  if (files.length === 0) return task;
+
+  const fence = '```';
+
+  return [
+    task,
+    '',
+    '## Attached context',
+    '',
+    'Files attached to this task. They are the source of truth about it; prefer them over',
+    'what you would otherwise assume.',
+    '',
+    ...files.flatMap((file) => ['### ' + file.name, '', fence, file.content.trim(), fence, '']),
+  ].join('\n');
+}
 
 // ---------------------------------------------------------------------------
 // The orchestration protocol
@@ -136,6 +315,19 @@ other, because they run in parallel. Write each task as if the agent has no othe
 it cannot see this conversation, the original request, or what the other agents returned.
 
 You will then receive each agent's result, and can delegate again.
+
+There is one target that is not an agent. Delegating to \`human\` puts the question to the
+person who started the run, and the run waits — really waits — until they answer:
+
+\`\`\`json
+{"delegate": [{"agent": "human", "task": "Ship behind a flag, or hold the release?"}]}
+\`\`\`
+
+Use it when the answer is a decision that is theirs rather than yours: a trade-off with no
+right answer, a preference, permission for something irreversible. Do not use it for
+anything you could find out by delegating to an agent or reading the repo — every question
+stops the run until a person is at their desk. Ask everything you need in one delegation
+rather than one question per round, and make each question answerable in a sentence.
 
 When you have everything you need, reply with your final answer as ordinary prose — no json
 block. That ends the run, so make it the complete answer rather than a note that you are

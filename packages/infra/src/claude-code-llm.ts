@@ -4,7 +4,17 @@ import { mkdirSync } from 'node:fs';
 import { rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { LlmPort, LlmRequest, LlmResult, LlmToolSpec, ToolLoopHooks } from '@pomni/core';
+import {
+  mcpConfig,
+  toolGrants,
+  type AgentAction,
+  type LlmPort,
+  type LlmRequest,
+  type LlmResult,
+  type LlmToolSpec,
+  type ToolGrant,
+  type ToolLoopHooks,
+} from '@pomni/core';
 
 /**
  * A deliberately empty directory to run text-only sessions in.
@@ -20,6 +30,25 @@ function sandbox(): string {
   return dir;
 }
 
+/**
+ * Editing tools have to be named to be usable.
+ *
+ * `--allowedTools` pre-approves rather than restricts, and headless Claude Code denies
+ * anything that would otherwise prompt. Bash is allowed by default; Write and Edit are not.
+ * Leaving these out is what made every Pomni agent silently read-only — it would plan a
+ * change, try to apply it, be refused, and report the refusal as its result.
+ */
+const FILE_TOOLS = ['Write', 'Edit', 'MultiEdit', 'NotebookEdit'];
+
+/**
+ * The shell, for an agent allowed to run things.
+ *
+ * Headless Claude Code lets trivial commands through and gates the rest, so an agent could
+ * `echo` but not `npm test` — it would write a change, be refused the build, and report the
+ * refusal. `run` on an agent means it may run commands; this is what says so.
+ */
+const SHELL_TOOLS = ['Bash'];
+
 /** Tools a pure-text task has no use for, and which only invite the session to wander. */
 const TEXT_ONLY_DISALLOWED = [
   'Bash',
@@ -33,14 +62,46 @@ const TEXT_ONLY_DISALLOWED = [
   'Task',
 ];
 
+/**
+ * Everything the session may do without being asked, in one list.
+ *
+ * Order is provider config, then editing, then the agent's granted tools — but nothing here
+ * takes anything away: a name missing from this list is not forbidden, it merely has to ask,
+ * and in headless mode asking means being refused.
+ */
+export function sessionPermissions(options: {
+  allowedTools?: string[];
+  files?: boolean;
+  run?: boolean;
+  tools?: ToolGrant[];
+}): string[] {
+  return [
+    ...(options.allowedTools ?? []),
+    ...(options.files ? FILE_TOOLS : []),
+    ...(options.run ? SHELL_TOOLS : []),
+    ...toolGrants(options.tools ?? []),
+  ];
+}
+
 export interface ClaudeCodeOptions {
   /** Working directory for the session. An agent working in a repo wants the repo. */
   cwd?: string;
+  /**
+   * Every directory the session may touch. A project is several repos, and a change that
+   * crosses them cannot be made — or honestly estimated — from inside only one.
+   */
+  dirs?: string[];
   /** Restrict what the session may do. Empty means Claude Code's own defaults. */
   allowedTools?: string[];
   maxTurns?: number;
   /** Replace Claude Code's system prompt instead of appending to it. */
   replaceSystemPrompt?: boolean;
+  /** Tools this agent was granted: MCP servers to load, and binaries it may run. */
+  tools?: ToolGrant[];
+  /** Whether this agent is allowed to change files, which decides if editing is approved. */
+  files?: boolean;
+  /** Whether it may run commands — the difference between writing a change and building it. */
+  run?: boolean;
   timeoutMs?: number;
 }
 
@@ -79,12 +140,21 @@ export class ClaudeCodeLlm implements LlmPort {
   constructor(private readonly options: ClaudeCodeOptions = {}) {}
 
   async complete(request: LlmRequest): Promise<LlmResult> {
+    // Headless Claude Code takes one prompt, not a conversation, so a multi-turn exchange is
+    // flattened. The marker matters: without it an orchestrator cannot tell its own earlier
+    // replies apart from what was said to it.
     const prompt = request.messages
-      .map((message) => (message.role === 'user' ? message.content : `\n${message.content}\n`))
-      .join('\n')
+      .map((message) =>
+        message.role === 'user'
+          ? message.content
+          : `<your-earlier-reply>\n${message.content}\n</your-earlier-reply>`,
+      )
+      .join('\n\n')
       .trim();
 
-    const args = ['-p', '--output-format', 'json'];
+    // Streamed rather than a single blob: the same final result arrives on the last line,
+    // and the lines before it are the only account we get of what the session actually did.
+    const args = ['-p', '--output-format', 'stream-json', '--verbose'];
     if (request.model) args.push('--model', request.model);
     if (request.effort) args.push('--effort', request.effort);
 
@@ -103,10 +173,29 @@ export class ClaudeCodeLlm implements LlmPort {
       );
     }
 
-    if (this.options.allowedTools?.length) {
-      args.push('--allowedTools', ...this.options.allowedTools);
+    // Granted tools become two things: a config file naming the MCP servers, and permission
+    // patterns. `--allowedTools` pre-approves rather than restricts, so appending to it
+    // cannot take away the file and shell access an agent already had.
+    const granted = this.options.tools ?? [];
+    const permissions = sessionPermissions(this.options);
+
+    if (granted.some((grant) => grant.tool.kind === 'mcp')) {
+      const file = join(sandbox(), `mcp-${randomUUID()}.json`);
+      await writeFile(file, JSON.stringify(mcpConfig(granted), null, 2), 'utf8');
+      scratch.push(file);
+      // Only the servers Pomni granted: the machine's own MCP config is not this agent's.
+      args.push('--mcp-config', file, '--strict-mcp-config');
+    }
+
+    if (permissions.length > 0) {
+      args.push('--allowedTools', ...permissions);
     }
     if (this.options.maxTurns) args.push('--max-turns', String(this.options.maxTurns));
+
+    // The working directory is allowed implicitly; every other repo has to be named, or the
+    // session refuses to so much as list it.
+    const extra = (this.options.dirs ?? []).filter((dir) => dir && dir !== this.options.cwd);
+    if (extra.length > 0) args.push('--add-dir', ...extra);
 
     // No working directory means there is nothing to read or change, so keep the session
     // purely generative rather than letting it explore the sandbox.
@@ -114,13 +203,14 @@ export class ClaudeCodeLlm implements LlmPort {
 
     try {
       const raw = await this.run(args, request.signal, undefined, prompt);
-      const parsed = parse(raw);
+      const { result: parsed, actions } = readStream(raw);
 
       if (parsed.is_error) {
         throw new Error(parsed.result?.trim() || 'the Claude Code session reported an error');
       }
 
       return {
+        actions,
         text: (parsed.result ?? '').trim(),
         stopReason: parsed.stop_reason ?? 'end_turn',
         usage: {
@@ -251,10 +341,79 @@ export class ClaudeCodeLlm implements LlmPort {
 
       child.on('close', (code) => {
         if (code === 0) finish(null, stdout);
-        else finish(new Error(firstUseful(stderr) || `claude exited with code ${code}`));
+        else {
+          // stderr is often empty when the CLI gives up, and the last thing it managed to
+          // say on stdout is then the only clue there is. Losing it costs another run.
+          const said = firstUseful(stderr) || lastFrameError(stdout);
+          finish(new Error(said ? `claude: ${said}` : `claude exited with code ${code}`));
+        }
       });
     });
   }
+}
+
+/**
+ * Read a streamed session: the final result, and everything it did to get there.
+ *
+ * Each line is its own JSON object. Anything unparseable is skipped rather than thrown on —
+ * a malformed frame should cost us one action in a log, not the whole answer.
+ */
+export function readStream(raw: string): { result: ClaudeResult; actions: AgentAction[] } {
+  const actions: AgentAction[] = [];
+  let result: ClaudeResult | null = null;
+
+  for (const line of raw.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith('{')) continue;
+
+    let frame: StreamFrame;
+    try {
+      frame = JSON.parse(trimmed) as StreamFrame;
+    } catch {
+      continue;
+    }
+
+    if (frame.type === 'result') result = frame as ClaudeResult;
+
+    for (const block of frame.message?.content ?? []) {
+      if (block.type === 'tool_use' && block.name) {
+        actions.push({ tool: block.name, detail: describeCall(block.name, block.input ?? {}) });
+      }
+    }
+  }
+
+  // No result line at all: the CLI printed something else, which is still an answer.
+  return { result: result ?? parse(raw), actions };
+}
+
+/** The part of a tool call worth reading back later. */
+function describeCall(tool: string, input: Record<string, unknown>): string {
+  const pick = (...keys: string[]): string => {
+    for (const key of keys) {
+      const value = input[key];
+      if (typeof value === 'string' && value.trim()) return value.trim();
+    }
+    return '';
+  };
+
+  const detail = pick(
+    'command',
+    'skill',
+    'file_path',
+    'pattern',
+    'url',
+    'prompt',
+    'description',
+    'query',
+  );
+  return detail.length > 300 ? `${detail.slice(0, 300)}…` : detail;
+}
+
+interface StreamFrame {
+  type?: string;
+  message?: {
+    content?: Array<{ type?: string; name?: string; input?: Record<string, unknown> }>;
+  };
 }
 
 function parse(raw: string): ClaudeResult {
@@ -265,6 +424,22 @@ function parse(raw: string): ClaudeResult {
     // Not JSON: the CLI printed plain text, which is still a usable answer.
     return { type: 'result', result: trimmed };
   }
+}
+
+/** Whatever the last readable frame said, for when the CLI exits without explaining. */
+function lastFrameError(stdout: string): string {
+  const lines = stdout.split(/\r?\n/).filter((line) => line.trim().startsWith('{'));
+
+  for (const line of lines.reverse()) {
+    try {
+      const frame = JSON.parse(line) as { result?: string; error?: string; subtype?: string };
+      const said = frame.error ?? frame.result ?? frame.subtype;
+      if (typeof said === 'string' && said.trim()) return said.trim().slice(0, 300);
+    } catch {
+      continue;
+    }
+  }
+  return '';
 }
 
 function firstUseful(stderr: string): string {

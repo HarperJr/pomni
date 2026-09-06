@@ -7,6 +7,7 @@ import type {
   PipelineRun,
   PipelineStep,
   PipelineStore,
+  Question,
 } from '@pomni/core';
 
 type SqlValue = string | number | null;
@@ -48,10 +49,10 @@ export class SqlitePipelineStore implements PipelineStore {
   async insertRun(run: PipelineRun): Promise<void> {
     this.statement(
       `INSERT INTO pipeline_runs (id, project_id, workflow_id, workflow_name, provider_id,
-                                  item_id, task, status, result, error, gate_status,
-                                  gate_summary, item_status, started_at, ended_at,
-                                  duration_ms, cost_usd)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                                  item_id, rerun_of, task, context, status, result, error,
+                                  gate_status, gate_summary, item_status, started_at,
+                                  ended_at, duration_ms, cost_usd)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       run.id,
       run.projectId,
@@ -59,7 +60,9 @@ export class SqlitePipelineStore implements PipelineStore {
       run.workflowName,
       run.providerId,
       run.itemId,
+      run.rerunOf,
       run.task,
+      JSON.stringify(run.context),
       run.status,
       run.result,
       run.error,
@@ -77,7 +80,8 @@ export class SqlitePipelineStore implements PipelineStore {
     this.statement(
       `UPDATE pipeline_runs
          SET status = ?, result = ?, error = ?, gate_status = ?, gate_summary = ?,
-             item_status = ?, ended_at = ?, duration_ms = ?, cost_usd = ?
+             item_status = ?, outcome = ?, unmet = ?, ended_at = ?, duration_ms = ?,
+             cost_usd = ?
        WHERE id = ?`,
     ).run(
       run.status,
@@ -86,6 +90,8 @@ export class SqlitePipelineStore implements PipelineStore {
       run.gateStatus,
       run.gateSummary,
       run.itemStatus,
+      run.outcome,
+      JSON.stringify(run.unmet),
       run.endedAt,
       run.durationMs,
       run.costUsd,
@@ -133,9 +139,10 @@ export class SqlitePipelineStore implements PipelineStore {
   async insertStep(step: PipelineStep): Promise<void> {
     this.statement(
       `INSERT INTO pipeline_steps (id, run_id, parent_step_id, agent_id, agent_name, role,
-                                   model, task, status, output, error, depth, started_at,
-                                   ended_at, duration_ms, input_tokens, output_tokens, cost_usd)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                                   model, task, status, output, error, outcome, unmet,
+                                   actions, depth, started_at, ended_at, duration_ms,
+                                   input_tokens, output_tokens, cost_usd)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       step.id,
       step.runId,
@@ -148,6 +155,9 @@ export class SqlitePipelineStore implements PipelineStore {
       step.status,
       step.output,
       step.error,
+      step.outcome,
+      JSON.stringify(step.unmet),
+      JSON.stringify(step.actions),
       step.depth,
       step.startedAt,
       step.endedAt,
@@ -161,13 +171,16 @@ export class SqlitePipelineStore implements PipelineStore {
   async updateStep(id: string, step: PipelineStep): Promise<void> {
     this.statement(
       `UPDATE pipeline_steps
-         SET status = ?, output = ?, error = ?, ended_at = ?, duration_ms = ?,
-             input_tokens = ?, output_tokens = ?, cost_usd = ?
+         SET status = ?, output = ?, error = ?, outcome = ?, unmet = ?, actions = ?,
+             ended_at = ?, duration_ms = ?, input_tokens = ?, output_tokens = ?, cost_usd = ?
        WHERE id = ?`,
     ).run(
       step.status,
       step.output,
       step.error,
+      step.outcome,
+      JSON.stringify(step.unmet),
+      JSON.stringify(step.actions),
       step.endedAt,
       step.durationMs,
       step.inputTokens,
@@ -233,6 +246,54 @@ export class SqlitePipelineStore implements PipelineStore {
     }));
   }
 
+  async insertQuestion(question: Question): Promise<void> {
+    this.statement(
+      `INSERT INTO pipeline_questions (id, run_id, step_id, agent_id, agent_name, question,
+                                       answer, attachments, status, asked_at, answered_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      question.id,
+      question.runId,
+      question.stepId,
+      question.agentId,
+      question.agentName,
+      question.question,
+      question.answer,
+      JSON.stringify(question.attachments),
+      question.status,
+      question.askedAt,
+      question.answeredAt,
+    );
+  }
+
+  async updateQuestion(id: string, question: Question): Promise<void> {
+    this.statement(
+      `UPDATE pipeline_questions
+         SET answer = ?, attachments = ?, status = ?, answered_at = ?
+       WHERE id = ?`,
+    ).run(
+      question.answer,
+      JSON.stringify(question.attachments),
+      question.status,
+      question.answeredAt,
+      id,
+    );
+  }
+
+  async getQuestion(id: string): Promise<Question | null> {
+    const row = this.statement('SELECT * FROM pipeline_questions WHERE id = ?').get(
+      id,
+    ) as unknown as QuestionRow | undefined;
+    return row ? toQuestion(row) : null;
+  }
+
+  async questions(runId: string): Promise<Question[]> {
+    const rows = this.statement(
+      'SELECT * FROM pipeline_questions WHERE run_id = ? ORDER BY id',
+    ).all(runId) as unknown as QuestionRow[];
+    return rows.map(toQuestion);
+  }
+
   close(): void {
     try {
       this.db.close();
@@ -258,13 +319,17 @@ interface RunRow {
   workflow_name: string;
   provider_id: string;
   item_id: string | null;
+  rerun_of: string | null;
   task: string;
+  context: string | null;
   status: string;
   result: string | null;
   error: string | null;
   gate_status: string;
   gate_summary: string | null;
   item_status: string | null;
+  outcome: string | null;
+  unmet: string | null;
   started_at: string;
   ended_at: string | null;
   duration_ms: number | null;
@@ -282,6 +347,9 @@ interface StepRow {
   task: string;
   status: string;
   output: string | null;
+  outcome: string | null;
+  unmet: string | null;
+  actions: string | null;
   error: string | null;
   depth: number;
   started_at: string;
@@ -300,17 +368,83 @@ function toRun(row: RunRow): PipelineRun {
     workflowName: row.workflow_name,
     providerId: row.provider_id,
     itemId: row.item_id,
+    rerunOf: row.rerun_of ?? null,
     task: row.task,
+    context: toContext(row.context),
     status: row.status as PipelineRun['status'],
     result: row.result,
     error: row.error,
     gateStatus: (row.gate_status ?? 'skipped') as PipelineRun['gateStatus'],
     gateSummary: row.gate_summary,
     itemStatus: row.item_status,
+    outcome: (row.outcome ?? 'unknown') as PipelineRun['outcome'],
+    unmet: toList(row.unmet),
     startedAt: row.started_at,
     endedAt: row.ended_at,
     durationMs: row.duration_ms,
     costUsd: row.cost_usd,
+  };
+}
+
+/** Steps written before the column existed have no record of what they did. */
+function toActions(raw: string | null): PipelineStep['actions'] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    return Array.isArray(parsed) ? (parsed as PipelineStep['actions']) : [];
+  } catch {
+    return [];
+  }
+}
+
+/** A JSON list column, tolerant of rows written before the column existed. */
+function toList(raw: string | null): string[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    return Array.isArray(parsed) ? (parsed as string[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Runs written before context files existed have no column value, and no context. */
+function toContext(raw: string | null): PipelineRun['context'] {
+  if (!raw) return [];
+  try {
+    return JSON.parse(raw) as PipelineRun['context'];
+  } catch {
+    return [];
+  }
+}
+
+interface QuestionRow {
+  id: string;
+  run_id: string;
+  step_id: string;
+  agent_id: string;
+  agent_name: string;
+  question: string;
+  answer: string | null;
+  attachments: string | null;
+  status: string;
+  asked_at: string;
+  answered_at: string | null;
+}
+
+function toQuestion(row: QuestionRow): Question {
+  return {
+    id: row.id,
+    runId: row.run_id,
+    stepId: row.step_id,
+    agentId: row.agent_id,
+    agentName: row.agent_name,
+    question: row.question,
+    answer: row.answer,
+    attachments: toContext(row.attachments),
+    status: row.status as Question['status'],
+    askedAt: row.asked_at,
+    answeredAt: row.answered_at,
   };
 }
 
@@ -327,6 +461,9 @@ function toStep(row: StepRow): PipelineStep {
     status: row.status as PipelineStep['status'],
     output: row.output,
     error: row.error,
+    outcome: (row.outcome ?? 'unknown') as PipelineStep['outcome'],
+    unmet: toList(row.unmet),
+    actions: toActions(row.actions),
     depth: row.depth,
     startedAt: row.started_at,
     endedAt: row.ended_at,
@@ -395,6 +532,33 @@ const MIGRATIONS: string[] = [
      created_at TEXT NOT NULL
    );
    CREATE INDEX IF NOT EXISTS idx_pipeline_artifacts_run ON pipeline_artifacts(run_id, id);`,
+
+  `ALTER TABLE pipeline_runs ADD COLUMN context TEXT NOT NULL DEFAULT '[]';`,
+
+  `CREATE TABLE IF NOT EXISTS pipeline_questions (
+     id          TEXT PRIMARY KEY,
+     run_id      TEXT NOT NULL,
+     step_id     TEXT NOT NULL,
+     agent_id    TEXT NOT NULL,
+     agent_name  TEXT NOT NULL,
+     question    TEXT NOT NULL,
+     answer      TEXT,
+     status      TEXT NOT NULL,
+     asked_at    TEXT NOT NULL,
+     answered_at TEXT
+   );
+   CREATE INDEX IF NOT EXISTS idx_pipeline_questions_run ON pipeline_questions(run_id, id);`,
+
+  `ALTER TABLE pipeline_runs ADD COLUMN outcome TEXT NOT NULL DEFAULT 'unknown';
+   ALTER TABLE pipeline_runs ADD COLUMN unmet TEXT NOT NULL DEFAULT '[]';
+   ALTER TABLE pipeline_steps ADD COLUMN outcome TEXT NOT NULL DEFAULT 'unknown';
+   ALTER TABLE pipeline_steps ADD COLUMN unmet TEXT NOT NULL DEFAULT '[]';`,
+
+  `ALTER TABLE pipeline_runs ADD COLUMN rerun_of TEXT;`,
+
+  `ALTER TABLE pipeline_questions ADD COLUMN attachments TEXT NOT NULL DEFAULT '[]';`,
+
+  `ALTER TABLE pipeline_steps ADD COLUMN actions TEXT NOT NULL DEFAULT '[]';`,
 ];
 
 function migrate(db: SqliteDatabase): void {
