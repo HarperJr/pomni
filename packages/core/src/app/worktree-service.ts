@@ -1,11 +1,12 @@
 import { ConflictError, NotFoundError, ValidationError } from '../domain/errors.js';
 import { layout } from '../domain/layout.js';
-import { RepoSchema, type ResolvedRepo } from '../domain/repo.js';
+import { RepoSchema, type Repo, type ResolvedRepo } from '../domain/repo.js';
 import { ulid } from '../domain/ulid.js';
 import {
   assertPomniOwned,
   isPomniOwned,
   isRunBranch,
+  isolatesRuns,
   runBranch,
   worktreeEligibility,
   worktreeState,
@@ -174,6 +175,32 @@ export class WorktreeService {
 
   async list(filter: WorktreeFilter): Promise<Worktree[]> {
     return this.store.list(filter);
+  }
+
+  /**
+   * Which of these repos can hand each concurrent run its own checkout.
+   *
+   * The read-only half of {@link take}, for callers that have to know before they launch
+   * anything whether two runs on one repo would be sharing a directory. Never throws: a repo
+   * whose probe fails answers `false`, which is the reading that costs a lost opportunity to
+   * parallelise rather than two runs writing over each other.
+   */
+  async isolation(repos: Repo[]): Promise<Record<string, boolean>> {
+    const answers: Record<string, boolean> = {};
+    if (repos.length === 0) return answers;
+
+    // Asked once for the whole call, as in `take`: a property of the git on this machine.
+    const gitSupportsWorktrees = await this.git.supportsWorktrees().catch(() => false);
+
+    for (const repo of repos) {
+      try {
+        const probe = await this.probe(await this.resolve(repo), gitSupportsWorktrees);
+        answers[repo.id] = isolatesRuns(repo, probe);
+      } catch {
+        answers[repo.id] = false;
+      }
+    }
+    return answers;
   }
 
   /** Every worktree with what it actually is right now — what `pomni doctor` reports. */
@@ -426,6 +453,17 @@ export class WorktreeService {
       kept,
       reason,
     });
+  }
+
+  /** A stored repo with the directory it resolves to, via the same arms as `repoDir`. */
+  private async resolve(repo: Repo): Promise<ResolvedRepo> {
+    const workingDir = await this.repoDir({ projectId: repo.projectId, repoId: repo.id });
+    if (!workingDir) return { ...repo, workingDir: '', workingDirExists: false };
+    return {
+      ...repo,
+      workingDir,
+      workingDirExists: await this.fs.isDirectory(workingDir).catch(() => false),
+    };
   }
 
   private async probe(repo: ResolvedRepo, gitSupportsWorktrees: boolean): Promise<WorktreeProbe> {

@@ -329,6 +329,52 @@ describe('http api', () => {
     await app.close();
   });
 
+  it('serves a wave plan for the ready items', async () => {
+    const app = await createApp(harness, { webRoot: join(harness.dir, 'no-web') });
+
+    const ready = async (title: string, path: string): Promise<string> => {
+      const created = await harness.backlog.create('acme', { title, repos: ['api'] });
+      await harness.backlog.update('acme', created.id, {
+        body: [
+          '## Problem\n\nSupport load is high.\n',
+          '## Acceptance criteria\n\n- [ ] it works\n',
+          `## Plan\n\n1. Edit \`${path}\`\n`,
+        ].join('\n'),
+      });
+      await harness.backlog.transition('acme', created.id, 'specced');
+      await harness.backlog.transition('acme', created.id, 'ready');
+      return created.id;
+    };
+
+    const first = await ready('Magic link', 'src/auth.ts');
+    const second = await ready('Billing', 'src/billing.ts');
+
+    const response = await app.inject({ method: 'GET', url: '/api/projects/acme/items-waves' });
+    expect(response.statusCode).toBe(200);
+
+    const plan = response.json().plan;
+    expect(Object.keys(plan).sort()).toEqual(['blocked', 'conflicts', 'scopes', 'waves']);
+    expect(plan.blocked).toEqual([]);
+    expect(plan.scopes[first]).toEqual({ kind: 'paths', paths: ['src/auth.ts'], source: 'plan' });
+    expect(plan.scopes[second]).toEqual({
+      kind: 'paths',
+      paths: ['src/billing.ts'],
+      source: 'plan',
+    });
+
+    // The harness's fake git reports no worktree support for a linked repo, so `api` does not
+    // isolate runs and the two items are serialised on the repo rather than on their paths.
+    expect(plan.waves).toEqual([
+      { index: 1, itemIds: [first] },
+      { index: 2, itemIds: [second] },
+    ]);
+    expect(plan.conflicts).toEqual([
+      { a: first, b: second, reasons: [{ kind: 'shared_repo', repo: 'api' }] },
+    ]);
+
+    await app.close();
+  });
+
   it('returns an ETag and honours If-Match', async () => {
     const app = await createApp(harness, { webRoot: join(harness.dir, 'no-web') });
     const item = await harness.backlog.create('acme', { title: 'x' });

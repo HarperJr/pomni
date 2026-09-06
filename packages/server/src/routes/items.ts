@@ -181,6 +181,10 @@ export async function itemRoutes(app: FastifyInstance, container: PomniContainer
   app.get<{ Params: { id: string } }>('/api/projects/:id/items-flow', async (request) => ({
     flow: await container.backlog.flow(request.params.id),
   }));
+
+  app.get<{ Params: { id: string } }>('/api/projects/:id/items-waves', async (request) => ({
+    plan: await container.backlog.waves(request.params.id),
+  }));
 }
 
 function parseStatus(value: string | undefined): ItemStatus[] | ItemStatus | undefined {

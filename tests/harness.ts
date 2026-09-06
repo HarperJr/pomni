@@ -546,7 +546,15 @@ export async function createHarness<G extends GitPort = FakeGit>(
 
   const doctor = new DoctorService(projects, repos, executor, git, worktrees);
   // Tests are single-process: the lock adds latency without exercising anything.
-  const backlog = new BacklogService(docs, projects, runStore, new NoopLock(), clock, events);
+  const backlog = new BacklogService(
+    docs,
+    projects,
+    runStore,
+    new NoopLock(),
+    clock,
+    events,
+    worktrees,
+  );
   const llm = new FakeLlm();
   const llmFactory = new FakeLlmFactory(llm);
   const providerService = new ProviderService(docs, llmFactory, clock, events);

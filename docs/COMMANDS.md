@@ -126,13 +126,14 @@ the engine enforces; the body is prose you and an agent both edit. `pomni b` is 
 | `pomni backlog list [-p -s -t --priority -l -r -q]` | ✓ | Filterable list. `-s active` excludes done and cancelled. |
 | `pomni backlog board [-p]` | ✓ | Items grouped by column. |
 | `pomni backlog show <ID>` | ✓ | Frontmatter, dependency state, acceptance progress, full spec. |
-| `pomni backlog edit <ID> [--title -t --priority -e -r -l --branch]` | ✓ | Change fields. |
+| `pomni backlog edit <ID> [--title -t --priority -e -r -l --branch --touches]` | ✓ | Change fields. `--touches <comma,separated,paths>` overrides the paths parsed from the Plan section. |
 | `pomni backlog move <ID> <status> [--reason] [-f]` | ✓ | Run a transition through the state machine. |
 | `pomni backlog block <ID> <reason>` / `unblock <ID>` | ✓ | Block, and restore the prior status on unblock. |
 | `pomni backlog link <ID> --depends-on <IDs>` | ✓ | Add dependency edges (cycles refused). |
 | `pomni backlog reopen <ID>` | ✓ | `done` back to `in_progress`. |
 | `pomni backlog remove <ID>` (`rm`) | ✓ | Delete; refused while something depends on it. |
 | `pomni backlog next [-p]` | ✓ | The highest-priority `ready` item. |
+| `pomni backlog waves [-p] [--explain] [--run]` | ✓ | Group `ready` items into waves that may launch concurrently; deterministic, no model call. `--explain` prints the conflict graph and each item's path scope. `--run` launches wave 1, one item per launch, and exits non-zero if any failed. |
 | `pomni backlog open <ID>` | ✓ | Open the item file in `$EDITOR`. |
 | `pomni backlog groom [-p]` | · | Agent-assisted dedupe and re-prioritisation (M5). |
 
@@ -157,6 +158,21 @@ backlog ─► specced ─► ready ─► in_progress ─► in_review ─► d
 
 `--force` skips the guards and records the move as forced in the item's Log — an override
 you can see afterwards rather than one that hides.
+
+### Waves
+
+`pomni backlog waves` groups `ready` items so that everything worth running at once actually
+runs at once, instead of one launch at a time. Two items cannot share a wave when:
+
+- one `dependsOn` the other, directly or through a chain;
+- they share a repo that cannot give each concurrent run its own worktree (see
+  `worktrees` policy, [DATA-MODEL.md](DATA-MODEL.md) §5) — a repo that can isolate runs no
+  longer conflicts merely for being shared;
+- their `## Plan` sections (or a declared `touches` override) name overlapping paths.
+
+An item whose scope names no paths is read as touching its whole repo, so it never shares a
+wave with anything else in that repo. A `ready` item whose dependency is neither `done` nor
+itself in the plan is reported as blocked and placed in no wave.
 
 ## Feature loop — M3
 

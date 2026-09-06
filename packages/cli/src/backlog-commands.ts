@@ -1,6 +1,8 @@
 import { spawn } from 'node:child_process';
 import {
   BOARD_COLUMNS,
+  assertWavesDisjoint,
+  describeConflict,
   describeUnmetList,
   hasRequirements,
   layout,
@@ -9,10 +11,12 @@ import {
   type Estimate,
   type ItemStatus,
   type ItemType,
+  type PathScope,
   type PomniContainer,
   type Priority,
   type Requirements,
   type TransitionOffer,
+  type WavePlan,
 } from '@pomni/core';
 import type { Command } from 'commander';
 import { style, table } from './format.js';
@@ -181,6 +185,7 @@ export function registerBacklogCommands(
     .option('-r, --repos <ids>', 'comma-separated repos (replaces the list)')
     .option('-l, --labels <labels>', 'comma-separated labels (replaces the list)')
     .option('--branch <name>', 'branch this work lives on')
+    .option('--touches <paths>', 'comma-separated paths this item edits (replaces the list)')
     .action(async (id: string, flags: EditFlags) => {
       const container = await open();
       const [projectId, itemId] = await resolve(container, id, flags.project, defaultProject);
@@ -193,6 +198,7 @@ export function registerBacklogCommands(
         repos: flags.repos === undefined ? undefined : list(flags.repos),
         labels: flags.labels === undefined ? undefined : list(flags.labels),
         branch: flags.branch,
+        touches: flags.touches === undefined ? undefined : list(flags.touches),
       });
       console.log(`${style.green('updated')} ${updated.id}`);
     });
@@ -343,6 +349,136 @@ export function registerBacklogCommands(
     });
 
   backlog
+    .command('waves')
+    .description('group ready items into waves that can run concurrently')
+    .option('-p, --project <id>', 'project')
+    .option('--explain', 'show the conflict graph and each item\'s path scope')
+    .option('--run', 'launch wave 1')
+    .action(async (flags: { project?: string; explain?: boolean; run?: boolean }) => {
+      const container = await open();
+      const projectId = flags.project ?? (await defaultProject());
+      const plan: WavePlan = await container.backlog.waves(projectId);
+      const items = await container.backlog.list({ projectId });
+      const byId = new Map(items.map((item) => [item.id, item]));
+
+      if (plan.waves.length === 0 && plan.blocked.length === 0) {
+        console.log(style.dim("nothing is ready — move an item to 'ready' first"));
+        return;
+      }
+
+      for (const wave of plan.waves) {
+        console.log(`${style.bold(`wave ${wave.index}`)} ${style.dim(`(${wave.itemIds.length})`)}`);
+        for (const itemId of wave.itemIds) {
+          const item = byId.get(itemId);
+          console.log(`  ${item ? itemLine(item) : itemId}`);
+        }
+        console.log();
+      }
+
+      if (plan.blocked.length > 0) {
+        console.log(style.bold('blocked'));
+        for (const blocked of plan.blocked) {
+          const item = byId.get(blocked.itemId);
+          console.log(
+            `  ${style.bold(blocked.itemId)}  ${item ? item.title : ''} ${style.red(
+              `— waiting on ${blocked.waitingOn.join(', ')}`,
+            )}`,
+          );
+        }
+        console.log();
+      }
+
+      if (flags.explain) {
+        console.log(style.bold('conflicts'));
+        if (plan.conflicts.length === 0) {
+          console.log(style.dim('none — every ready item is independent'));
+        } else {
+          for (const edge of plan.conflicts) {
+            console.log(`${style.bold(edge.a)} <-> ${style.bold(edge.b)}`);
+            for (const reason of edge.reasons) {
+              console.log(`  ${describeConflict(reason)}`);
+            }
+          }
+        }
+
+        console.log();
+        console.log(style.bold('scopes'));
+        for (const [itemId, scope] of Object.entries(plan.scopes)) {
+          console.log(`${style.bold(itemId)}  ${describeScope(scope)}`);
+        }
+        console.log();
+      }
+
+      if (flags.run) {
+        const first = plan.waves[0];
+        if (!first || first.itemIds.length === 0) {
+          console.log(style.dim('nothing to run — wave 1 is empty'));
+          return;
+        }
+
+        // Cannot fail unless the grouping itself is wrong — a real assertion, not a guard
+        // against user input.
+        assertWavesDisjoint(plan);
+
+        console.log(`${style.cyan('running')} wave 1: ${first.itemIds.join(', ')}`);
+        console.log();
+
+        const results = await Promise.allSettled(
+          first.itemIds.map(async (itemId) => {
+            const item = byId.get(itemId);
+            const description = item ? `${item.title}\n\n${item.body}` : itemId;
+
+            const { run, completion } = await container.pipelines.start({
+              projectId,
+              task: description,
+              itemId,
+            });
+
+            const unsubscribe = container.events.subscribe((event) => {
+              if (event.type === 'pipeline.step.started' && event.runId === run.id) {
+                const indent = '  '.repeat(event.depth);
+                console.log(
+                  `${indent}${style.cyan('▸')} ${style.dim(itemId)} ${style.bold(event.agentName)} ${style.dim(
+                    event.model,
+                  )}`,
+                );
+              }
+              if (event.type === 'pipeline.step.finished' && event.runId === run.id) {
+                console.log(
+                  `  ${style.dim(itemId)} ${event.status === 'done' ? style.green('✓') : style.red('✗')} ${style.dim(
+                    event.summary,
+                  )}`,
+                );
+              }
+            });
+
+            try {
+              const finished = await completion;
+              if (finished.status === 'passed') {
+                console.log(`${style.green('✓')} ${itemId} finished in ${Math.round((finished.durationMs ?? 0) / 1000)}s`);
+              } else {
+                console.log(`${style.red('✗')} ${itemId} ${finished.status}: ${finished.error ?? ''}`);
+                throw new Error(`${itemId} ${finished.status}`);
+              }
+            } finally {
+              unsubscribe();
+            }
+          }),
+        );
+
+        const failed = results.filter((result) => result.status === 'rejected').length;
+        const passed = results.length - failed;
+        console.log();
+        console.log(
+          `${style.bold('wave 1 done')}  ${style.green(`${passed} passed`)}${
+            failed > 0 ? `  ${style.red(`${failed} failed`)}` : ''
+          }`,
+        );
+        if (failed > 0) process.exitCode = 1;
+      }
+    });
+
+  backlog
     .command('open <id>')
     .description('open the item file in $EDITOR')
     .option('-p, --project <id>', 'project')
@@ -388,6 +524,7 @@ interface ListFlags {
 interface EditFlags extends AddFlags {
   title?: string;
   branch?: string;
+  touches?: string;
 }
 
 interface MoveFlags {
@@ -478,6 +615,14 @@ function offerLine(offer: TransitionOffer): string {
     `  ${style.dim('✗')} ${offer.label}`,
     ...reasons.map((reason) => `      ${style.dim(reason)}`),
   ].join('\n');
+}
+
+/** `pomni backlog waves --explain`'s per-item line: what paths it reads as touching, and why. */
+function describeScope(scope: PathScope): string {
+  if (scope.kind === 'whole-repo') {
+    return style.dim('names no paths — read as touching its whole repo');
+  }
+  return `${scope.paths.join(', ')} ${style.dim(`(from ${scope.source})`)}`;
 }
 
 export function itemLine(item: BacklogItem): string {

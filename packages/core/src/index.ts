@@ -12,6 +12,7 @@ export * from './domain/project.js';
 export * from './domain/provider.js';
 export * from './domain/repo.js';
 export * from './domain/run.js';
+export * from './domain/schedule.js';
 export * from './domain/source.js';
 export * from './domain/ulid.js';
 export * from './domain/tool.js';

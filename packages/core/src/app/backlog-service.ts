@@ -36,8 +36,10 @@ import {
 import { layout } from '../domain/layout.js';
 import { flowOf, type Project } from '../domain/project.js';
 import type { Repo } from '../domain/repo.js';
+import { planWaves, type WavePlan } from '../domain/schedule.js';
 import type { Clock, DocRef, DocStore, EventBus, Lock, RunStore } from '../ports/index.js';
 import type { ProjectService } from './project-service.js';
+import type { WorktreeService } from './worktree-service.js';
 
 export interface CreateItemInput {
   title: string;
@@ -56,6 +58,8 @@ export interface UpdateItemInput {
   priority?: Priority;
   estimate?: Estimate | null;
   repos?: string[];
+  /** Paths this item edits — what the wave planner reads before it falls back to the Plan. */
+  touches?: string[];
   labels?: string[];
   dependsOn?: string[];
   branch?: string | null;
@@ -91,6 +95,7 @@ export class BacklogService {
     private readonly lock: Lock,
     private readonly clock: Clock,
     private readonly events: EventBus,
+    private readonly worktrees: WorktreeService,
   ) {}
 
   /**
@@ -395,6 +400,35 @@ export class BacklogService {
   /** The highest-priority `ready` item, which is what `feature next` will pick up. */
   async next(projectId: string): Promise<BacklogItem | null> {
     return pickNext(await this.list({ projectId }));
+  }
+
+  /**
+   * The `ready` items grouped into waves that may be launched at the same time.
+   *
+   * Read-only like {@link next}: it gathers what the planner needs and decides nothing. Every
+   * item goes in, not only the ready ones — a dependency only counts as satisfied when the item
+   * it points at is `done`, and that is a fact about the items the plan will not launch.
+   *
+   * Launching the waves is not this method's business; the CLI starts the runs itself.
+   */
+  async waves(projectId: string): Promise<WavePlan> {
+    const items = await this.list({ projectId });
+    const repos = (await this.projects.get(projectId)).repos;
+
+    // Asking whether a repo isolates runs costs git I/O per repo, so only the repos a ready
+    // item is actually going to touch are asked about. An item naming no repos means the whole
+    // project, which puts all of them in scope.
+    const ready = items.filter((item) => item.status === 'ready');
+    const named = new Set(ready.flatMap((item) => item.repos));
+    const inScope = ready.some((item) => item.repos.length === 0)
+      ? repos
+      : repos.filter((repo) => named.has(repo.id));
+
+    // Unreachable repos come back `false` rather than absent-and-throwing: one repo that is not
+    // on this machine must not cost the whole project its plan.
+    const repoIsolatesRuns = await this.worktrees.isolation(inScope);
+
+    return planWaves({ items, repoIsolatesRuns });
   }
 
   // -------------------------------------------------------------------------

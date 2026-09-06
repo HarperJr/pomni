@@ -49,6 +49,23 @@ export function TrackerPage() {
     enabled: selected !== null,
   });
 
+  // A nice-to-have overlay on top of the item list above: if it is loading or errors,
+  // the cards render exactly as they would without it.
+  const waves = useQuery({
+    queryKey: ['items', selected ?? '', 'waves'],
+    queryFn: () => api.listWaves(selected!),
+    enabled: selected !== null,
+  });
+
+  const waveByItem = new Map<string, number>();
+  const waitingOnByItem = new Map<string, string[]>();
+  for (const wave of waves.data?.waves ?? []) {
+    for (const itemId of wave.itemIds) waveByItem.set(itemId, wave.index);
+  }
+  for (const blocked of waves.data?.blocked ?? []) {
+    waitingOnByItem.set(blocked.itemId, blocked.waitingOn);
+  }
+
   const selectedProject = list.find((project) => project.id === selected);
   const itemsData = items.data ?? [];
 
@@ -129,6 +146,17 @@ export function TrackerPage() {
                     {item.repos.map((repo) => (
                       <span key={repo} className="tag">{repo}</span>
                     ))}
+                    {waveByItem.has(item.id) && (
+                      <span className="tag">wave {waveByItem.get(item.id)}</span>
+                    )}
+                    {waitingOnByItem.has(item.id) && (
+                      <span
+                        className="tag warn"
+                        title={`waiting on ${waitingOnByItem.get(item.id)!.join(', ')}`}
+                      >
+                        blocked
+                      </span>
+                    )}
                   </div>
                 </Link>
               ))}

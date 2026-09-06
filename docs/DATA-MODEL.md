@@ -440,6 +440,7 @@ estimate: M
 order: 30                # sparse rank within the board column
 labels: [auth]
 depends_on: [ACME-9]
+touches: []             # paths this item edits; empty means "parse ## Plan instead"
 branch: feat/acme-12-magic-link
 created: 2026-09-05
 updated: 2026-09-05
@@ -478,3 +479,9 @@ will eventually be wrong.
 **The body is opaque.** `deserializeMarkdown` returns `{ ...frontmatter, body }` with the
 body as one string, and the serializer writes it back untouched. That is what makes a spec
 edit show up in `git diff` as the prose change it was, rather than as a re-serialised blob.
+
+**`touches` overrides the Plan.** `pomni backlog waves` needs to know what an item edits, and
+prose is not always a reliable source. A non-empty `touches` list wins outright; an item that
+leaves it empty (the default, and what every item file predating the field parses to) has its
+paths read out of `## Plan` instead. See [COMMANDS.md](COMMANDS.md) §Waves for how paths are
+parsed and how conflicts are decided from them.

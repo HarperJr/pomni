@@ -156,6 +156,9 @@ POST   /api/projects/:id/items/:itemId/block | /unblock
 DELETE /api/projects/:id/items/:itemId   refused while something depends on it
 POST   /api/projects/:id/items/reorder   { status, orderedIds }   board drag-drop
 GET    /api/projects/:id/items-next      the highest-priority ready item
+GET    /api/projects/:id/items-waves     { plan: { waves, conflicts, blocked, scopes } } —
+                                          ready items grouped for concurrent launch; the
+                                          CLI's `pomni backlog waves` reads the same plan
 ```
 
 Transitions are a separate route rather than a `PATCH` of `status`, so a client cannot skate

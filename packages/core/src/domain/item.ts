@@ -67,6 +67,13 @@ export const BacklogItemSchema = z.object({
   estimate: EstimateSchema.nullable().default(null),
   /** Repos this item touches. Empty means "the whole project". */
   repos: z.array(z.string()).default([]),
+  /**
+   * Paths this item edits, relative to its repo. Overrides what `pomni backlog waves` would
+   * otherwise read out of the Plan section, for an item whose prose is a poor guide to what it
+   * actually rewrites. Empty means "not declared" — fall back to parsing the Plan, and if that
+   * finds nothing, read the item as touching its whole repo.
+   */
+  touches: z.array(z.string()).default([]),
   labels: z.array(z.string()).default([]),
   /** Items that must reach `done` before this one may start. */
   dependsOn: z.array(z.string()).default([]),

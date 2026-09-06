@@ -232,6 +232,8 @@ export interface BacklogItem {
   repos: string[];
   labels: string[];
   dependsOn: string[];
+  /** Optional frontmatter override for which paths this item edits. */
+  touches: string[];
   order: number;
   branch: string | null;
   /** Definition-of-done boxes a human has ticked: checklist key -> ISO timestamp. */
@@ -242,6 +244,42 @@ export interface BacklogItem {
   createdAt: string;
   updatedAt: string;
   body: string;
+}
+
+/**
+ * Mirrors `packages/core/src/domain/schedule.ts`. The web package cannot import core today
+ * (see `getItemFlow` above), so these shapes are re-implemented here; keep them in sync by hand.
+ */
+export type PathScope =
+  | { kind: 'paths'; paths: string[]; source: 'touches' | 'plan' }
+  | { kind: 'whole-repo' };
+
+export type ConflictReason =
+  | { kind: 'depends_on'; from: string; to: string; via: string[] }
+  | { kind: 'shared_repo'; repo: string }
+  | { kind: 'path_overlap'; path: string; otherPath: string };
+
+export interface ConflictEdge {
+  a: string;
+  b: string;
+  reasons: ConflictReason[];
+}
+
+export interface Wave {
+  index: number;
+  itemIds: string[];
+}
+
+export interface BlockedItem {
+  itemId: string;
+  waitingOn: string[];
+}
+
+export interface WavePlan {
+  waves: Wave[];
+  conflicts: ConflictEdge[];
+  blocked: BlockedItem[];
+  scopes: Record<string, PathScope>;
 }
 
 export interface BacklogItemDetail extends BacklogItem {
@@ -895,6 +933,11 @@ export const api = {
     request<{ flow: Flow }>(`/api/projects/${encodeURIComponent(projectId)}/items-flow`).then(
       (result) => result.flow,
     ),
+
+  listWaves: (projectId: string) =>
+    request<{ plan: WavePlan }>(
+      `/api/projects/${encodeURIComponent(projectId)}/items-waves`,
+    ).then((result) => result.plan),
 
   tickChecklist: (projectId: string, itemId: string, body: { key: string; ticked: boolean }) =>
     request<{ item: BacklogItemDetail }>(
