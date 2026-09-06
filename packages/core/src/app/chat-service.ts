@@ -1,4 +1,12 @@
 import {
+  parseAddresses,
+  stripAddresses,
+  type MessageAddress,
+  type ParsedAddress,
+  type ParsedMessage,
+} from '../domain/address.js';
+import type { Agent } from '../domain/agent.js';
+import {
   ChatMessageSchema,
   ChatSchema,
   assertExecutable,
@@ -14,8 +22,9 @@ import {
   type ProposedAction,
 } from '../domain/chat.js';
 import { NotFoundError, ValidationError } from '../domain/errors.js';
-import type { Provider } from '../domain/provider.js';
+import { resolveModel, type Provider } from '../domain/provider.js';
 import { ulid } from '../domain/ulid.js';
+import { findAgent } from '../domain/workflow.js';
 import type {
   ChatStore,
   Clock,
@@ -35,6 +44,7 @@ import {
   type ChatActionServices,
 } from './chat-actions.js';
 import type { BacklogService } from './backlog-service.js';
+import type { DiscoveryService } from './discovery-service.js';
 import type { PipelineService } from './pipeline-service.js';
 import type { ProjectService } from './project-service.js';
 import type { ProviderService } from './provider-service.js';
@@ -47,6 +57,64 @@ export interface CreateChatInput {
   providerId: string;
   model: string;
   title?: string;
+}
+
+/**
+ * The first thing a person types, which is also the thing that creates the chat.
+ *
+ * Provider and model are optional because the whole point is that nobody was asked. When they
+ * are given it is because the composer offered a change before the first send, not because a
+ * dialog demanded one.
+ */
+export interface FirstMessageInput {
+  text: string;
+  providerId?: string;
+  model?: string;
+}
+
+/** Re-pinning a chat. Both halves move together: a model belongs to the provider offering it. */
+export interface ModelChoice {
+  providerId: string;
+  model: string;
+}
+
+/** What the composer offers on `#`, `@` and `/`. Everything here actually exists. */
+export interface Addressables {
+  projects: Array<{ id: string; name: string }>;
+  agents: Array<{
+    workflowId: string;
+    workflowName: string;
+    agentId: string;
+    agentName: string;
+  }>;
+  skills: Array<{ name: string; description?: string }>;
+}
+
+/**
+ * What the addresses in one message turned out to mean.
+ *
+ * `notes` is the whole reason this is not a throw. A candidate that names nothing was never
+ * an address — `#include <stdio.h>` is the parser's own example — so the message still sends,
+ * the candidate stays in the prose where the person put it, and the reply says what does
+ * exist. Only `accepted` is stripped, and only `accepted` is recorded.
+ */
+interface ResolvedAddresses {
+  /** The project in force for this turn: the addressed one, else the chat's standing one. */
+  projectId: string | null;
+  agent: { workflowId: string; agent: Agent } | null;
+  skill: { name: string; body: string } | null;
+  accepted: ParsedAddress[];
+  notes: string[];
+}
+
+/** One reply, and who produced it. Both paths return this so the transcript records the same. */
+interface Turn {
+  text: string;
+  providerId: string;
+  model: string;
+  inputTokens: number;
+  outputTokens: number;
+  costUsd: number | null;
 }
 
 /**
@@ -90,6 +158,7 @@ export class ChatService {
     private readonly clock: Clock,
     private readonly events: EventBus,
     private readonly logger: Logger,
+    private readonly discovery: DiscoveryService,
   ) {
     this.services = {
       projects: this.projects,
@@ -120,6 +189,73 @@ export class ChatService {
     await this.store.createChat(chat);
     this.announce({ type: 'chat.changed', chatId: chat.id });
     return chat;
+  }
+
+  /**
+   * The way a chat actually begins: someone typed something and pressed send.
+   *
+   * Nobody is asked for a provider, a model or a title, because every one of those has a
+   * reasonable default and none of them is what the person came here to do. The default
+   * provider's medium model is used, and the header can change it afterwards.
+   *
+   * The provider is resolved *before* the row is written. A chat whose `model` is empty is not
+   * a chat anybody can carry on, so it must not be storable — which is why `providerId` and
+   * `model` stayed non-nullable when 'no dialog' arrived.
+   */
+  async createFromFirstMessage(input: FirstMessageInput): Promise<ChatDetail> {
+    const body = input.text.trim();
+    if (!body) throw new ValidationError('a message needs some words in it');
+
+    const provider = input.providerId
+      ? await this.enabledProvider(input.providerId)
+      : await this.providers.resolve();
+    const model = input.model ?? resolveModel(provider, 'medium');
+
+    const chat = await this.create({ providerId: provider.id, model });
+
+    // The row exists before the turn can run, so a turn that throws — the provider being down,
+    // or a refusal like an agent this project may not address — would otherwise leave an empty
+    // untitled chat in the list, and one more for every retry. The error is the answer; the
+    // chat is not, so it goes and the error carries on to the caller unchanged.
+    try {
+      await this.sendMessage(chat.id, body);
+    } catch (error) {
+      try {
+        await this.store.deleteChat(chat.id);
+        this.announce({ type: 'chat.removed', chatId: chat.id });
+      } catch (cleanup) {
+        // Reported, never rethrown: the failure worth telling the caller about is the first one.
+        this.logger.debug('could not remove the chat a first message failed in', cleanup);
+      }
+      throw error;
+    }
+
+    // After the reply, and never in front of it. A title nobody is waiting for is worth one
+    // cheap completion; a title the answer waits on is worth nothing.
+    void this.nameChat(chat.id, body, provider);
+
+    return this.get(chat.id);
+  }
+
+  /**
+   * Name a chat by hand.
+   *
+   * Settles the title as well as changing it: a generation still in flight checks
+   * `titleGeneratedAt` before it writes, so the person's name wins whichever lands last.
+   */
+  async rename(chatId: string, title: string): Promise<Chat> {
+    const chat = await this.require(chatId);
+    if (!title.trim()) throw new ValidationError('a chat needs a name — or leave the one it has');
+
+    const next = ChatSchema.parse({
+      ...chat,
+      // Same shaping a derived title gets: one line, collapsed, and short enough for the list.
+      title: deriveChatTitle(title),
+      titleGeneratedAt: this.clock.iso(),
+    });
+    await this.store.updateChat(next);
+    this.announce({ type: 'chat.changed', chatId });
+    return next;
   }
 
   async list(filter: ChatFilter = {}): Promise<Chat[]> {
@@ -166,8 +302,17 @@ export class ChatService {
    * Only the next turn is affected. Earlier messages keep the provider and model that actually
    * wrote them, and the change itself is recorded as a `system` message so the transcript does
    * not silently claim one model said everything in it.
+   *
+   * The provider moves with the model because the two are one choice: a model id means nothing
+   * apart from the provider that offers it, and the header shows both.
    */
-  async setModel(id: string, providerId: string, model: string): Promise<Chat> {
+  async setModel(id: string, choice: ModelChoice): Promise<Chat>;
+  /** @deprecated Pass a `ModelChoice`. Kept so existing call sites keep compiling. */
+  async setModel(id: string, providerId: string, model: string): Promise<Chat>;
+  async setModel(id: string, choice: ModelChoice | string, legacyModel?: string): Promise<Chat> {
+    const { providerId, model } =
+      typeof choice === 'string' ? { providerId: choice, model: legacyModel ?? '' } : choice;
+
     const chat = await this.require(id);
     const provider = await this.enabledProvider(providerId);
     assertModel(provider, model);
@@ -207,37 +352,51 @@ export class ChatService {
     const provider = await this.pinnedProvider(chat);
     const now = this.clock.iso();
 
+    const parsed = parseAddresses(body);
+    const addressed = await this.resolveAddresses(chat, parsed);
+    // Only what resolved. A `#include` that named no project stays where the person put it,
+    // because deleting it would change the question they asked.
+    const asked = stripAddresses(body, addressed.accepted) || body;
+
     await this.store.appendMessage(
       ChatMessageSchema.parse({
         id: ulid(this.clock.now().getTime()),
         chatId: id,
+        // Stored as typed, chips and all: the transcript should read as what was sent, and
+        // `forModel` takes the addresses back out on the way to the provider.
         role: 'user',
         text: body,
+        projectId: addressed.projectId,
+        addresses: addressed.accepted.map(toMessageAddress),
         createdAt: now,
       }),
     );
 
-    // Named once, from the first thing the person said. A later message never renames it.
+    // Named once, from the first thing the person said. A later message never renames it,
+    // and `nameChat` replaces this with something better if the generation lands.
     await this.store.updateChat(
-      ChatSchema.parse({ ...chat, title: chat.title || deriveChatTitle(body), updatedAt: now }),
+      ChatSchema.parse({
+        ...chat,
+        title: chat.title || deriveChatTitle(asked),
+        // `#project` holds until changed; that is what makes it context rather than a filter.
+        projectId: addressed.projectId,
+        updatedAt: now,
+      }),
     );
     this.announce({ type: 'chat.changed', chatId: id });
 
-    const history = this.history(await this.store.listMessages(id));
-    const { port } = await this.providers.portFor('medium', { provider: chat.providerId });
+    const answer = addressed.agent
+      ? // One agent, its own prompt, its own tools, no delegation. Deliberately not the chat's
+        // pinned model: an agent says what struggle its work deserves, and honouring the
+        // header here would run it on something it never asked for.
+        await this.askAgent(chat, addressed, asked)
+      : await this.askPomni(chat, provider, addressed);
 
-    const result = await port.complete({
-      model: chat.model,
-      system: this.systemPrompt(),
-      messages: history,
-      // Claude Code drives its own thinking; the flag is for the direct API path.
-      adaptiveThinking: provider.kind !== 'claude-code',
-      effort: 'medium',
-      maxTokens: 8000,
-    });
-
-    const { prose, calls } = parseActionCalls(result.text);
+    const { prose, calls } = parseActionCalls(answer.text);
     const messageId = ulid(this.clock.now().getTime());
+    // Every turn, addressed or not. An agent's answer will rarely contain an action block,
+    // but a turn that could skip the confirmation because of how it was addressed would be a
+    // way round the one gap this service exists to keep open.
     const { actions, rejected } = this.plan(calls);
 
     const message = ChatMessageSchema.parse({
@@ -246,18 +405,23 @@ export class ChatService {
       role: 'assistant',
       // A reply that was nothing but a block has no prose, and rendering the raw json at the
       // person would be showing them the plumbing. The action cards are the message.
-      text: [prose || (calls.length > 0 ? '' : result.text), ...rejected]
+      text: [
+        ...addressed.notes.map((note) => `_${note}_`),
+        prose || (calls.length > 0 ? '' : answer.text),
+        ...rejected,
+      ]
         .filter((line) => line.length > 0)
         .join('\n\n'),
-      providerId: chat.providerId,
-      model: chat.model,
+      providerId: answer.providerId,
+      model: answer.model,
+      projectId: addressed.projectId,
       actions,
       createdAt: this.clock.iso(),
-      inputTokens: result.usage.inputTokens,
-      outputTokens: result.usage.outputTokens,
+      inputTokens: answer.inputTokens,
+      outputTokens: answer.outputTokens,
       // Nothing in this repo converts tokens to money, and inventing a price would report a
       // number nobody could check. Null means "the provider did not say", not "free".
-      costUsd: null,
+      costUsd: answer.costUsd,
     });
 
     await this.store.appendMessage(message);
@@ -325,7 +489,318 @@ export class ChatService {
     return rejected;
   }
 
+  /**
+   * What the composer may offer on `#`, `@` and `/`.
+   *
+   * Every list is the same one the resolver reads, so what autocomplete shows and what an
+   * address resolves against cannot disagree. Agents and skills are per-project because that
+   * is where the authority is: the agents of the workflows attached to the addressed project,
+   * and the skills checked into that project's own repos.
+   */
+  async addressables(projectId: string | null): Promise<Addressables> {
+    const projects = (await this.projects.list()).map((project) => ({
+      id: project.id,
+      name: project.name,
+    }));
+
+    if (!projectId) return { projects, agents: [], skills: [] };
+
+    const workflows = await this.workflows.forProject(projectId);
+    const agents = workflows.flatMap((workflow) =>
+      workflow.agents.map((agent) => ({
+        workflowId: workflow.id,
+        workflowName: workflow.name,
+        agentId: agent.id,
+        agentName: agent.name,
+      })),
+    );
+
+    const scan = await this.discovery.scan(projectId);
+    const skills = scan.assets
+      .filter((asset) => asset.kind === 'skill')
+      .map((asset) => ({ name: asset.id, description: asset.description }));
+
+    return { projects, agents, skills };
+  }
+
   // -------------------------------------------------------------------------
+
+  /** A turn, whoever took it. The chat records who answered, so both paths report it. */
+  private async askPomni(
+    chat: Chat,
+    provider: Provider,
+    addressed: ResolvedAddresses,
+  ): Promise<Turn> {
+    const history = this.history(await this.store.listMessages(chat.id));
+    const { port } = await this.providers.portFor('medium', { provider: chat.providerId });
+
+    const result = await port.complete({
+      model: chat.model,
+      system: this.systemPrompt(addressed),
+      messages: history,
+      // Claude Code drives its own thinking; the flag is for the direct API path.
+      adaptiveThinking: provider.kind !== 'claude-code',
+      effort: 'medium',
+      maxTokens: 8000,
+    });
+
+    return {
+      text: result.text,
+      providerId: chat.providerId,
+      model: chat.model,
+      inputTokens: result.usage.inputTokens,
+      outputTokens: result.usage.outputTokens,
+      costUsd: null,
+    };
+  }
+
+  /**
+   * Put the message to one agent instead of to Pomni.
+   *
+   * One session, its own tools, no delegation — `runOneAgent` is where that is guaranteed.
+   * The chat's provider carries over so the header still governs what this costs, but the
+   * model does not: an agent declares what struggle its work deserves, and running it on
+   * whatever the header happened to say would be giving it a model it never asked for.
+   */
+  private async askAgent(
+    chat: Chat,
+    addressed: ResolvedAddresses,
+    task: string,
+  ): Promise<Turn> {
+    const target = addressed.agent;
+    if (!target || !addressed.projectId) {
+      throw new ValidationError('an agent can only be addressed inside a project');
+    }
+
+    const result = await this.pipelines.runOneAgent({
+      projectId: addressed.projectId,
+      workflowId: target.workflowId,
+      agentId: target.agent.id,
+      task,
+      skillPrompt: addressed.skill?.body,
+      providerId: chat.providerId,
+    });
+
+    return {
+      // Said out loud: an answer from one agent reads differently from Pomni's own, and a
+      // transcript that does not say which is which invites the reader to trust the wrong one.
+      text: [`**${target.agent.name}** (\`${result.workflowId}/${target.agent.id}\`):`, '', result.text].join(
+        '\n',
+      ),
+      providerId: result.providerId,
+      model: result.model,
+      inputTokens: result.usage.inputTokens,
+      outputTokens: result.usage.outputTokens,
+      costUsd: result.usage.costUsd,
+    };
+  }
+
+  /**
+   * Turn the candidates in a message into the things they name.
+   *
+   * Resolution is where knowledge of what exists lives, and it answers rather than refuses:
+   * an address that names nothing leaves the text alone and adds a line saying what does
+   * exist. The single exception is an agent that is real and is not this project's to run —
+   * that is a permission answer, and a note dressed as a suggestion would read as though the
+   * chat simply had not found it.
+   */
+  private async resolveAddresses(
+    chat: Chat,
+    parsed: ParsedMessage,
+  ): Promise<ResolvedAddresses> {
+    const accepted: ParsedAddress[] = [];
+    const notes: string[] = [];
+
+    for (const conflict of parsed.conflicts) {
+      notes.push(
+        `A message is about one project, so I took ${conflict.kept.raw} and left ${conflict.dropped
+          .map((entry) => entry.raw)
+          .join(', ')} in the text.`,
+      );
+    }
+
+    let projectId = chat.projectId;
+    if (parsed.project) {
+      const projects = await this.projects.list();
+      const match = projects.find((project) => project.id === parsed.project?.name);
+      if (match) {
+        projectId = match.id;
+        accepted.push(parsed.project);
+      } else {
+        notes.push(
+          `There is no project '${parsed.project.name}'. ${suggest(
+            projects.map((project) => project.id),
+            parsed.project.name,
+            'Projects here',
+            'There are no projects yet',
+          )}`,
+        );
+      }
+    }
+
+    let agent: ResolvedAddresses['agent'] = null;
+    for (const candidate of parsed.agents) {
+      if (agent) {
+        notes.push(
+          `One message runs one agent, so ${candidate.raw} was left in the text. Ask it in its own message.`,
+        );
+        continue;
+      }
+      if (!projectId) {
+        notes.push(
+          `${candidate.raw} needs a project — say #project in the same message, and I will put it to that project's agents.`,
+        );
+        continue;
+      }
+
+      const outcome = await this.resolveAgent(projectId, candidate);
+      if (!outcome.agent) {
+        notes.push(outcome.note);
+        continue;
+      }
+      agent = outcome.agent;
+      accepted.push(candidate);
+    }
+
+    let skill: ResolvedAddresses['skill'] = null;
+    if (parsed.skills.length > 0) {
+      // Scanned once even when the message is full of slashes: a URL in a question would
+      // otherwise cost one filesystem walk per segment.
+      const available = projectId
+        ? (await this.discovery.scan(projectId)).assets.filter((asset) => asset.kind === 'skill')
+        : [];
+
+      for (const candidate of parsed.skills) {
+        if (skill) continue;
+        if (!projectId) {
+          notes.push(
+            `${candidate.raw} needs a project — a skill is checked into a project's own repos, so say #project too.`,
+          );
+          continue;
+        }
+
+        const match = available.find((asset) => asset.id === candidate.name);
+        if (!match) {
+          notes.push(
+            `There is no skill '${candidate.name}' in '${projectId}'. ${suggest(
+              available.map((asset) => asset.id),
+              candidate.name,
+              'Its repos have',
+              'Its repos have no .claude/skills',
+            )}`,
+          );
+          continue;
+        }
+        skill = { name: match.id, body: match.body };
+        accepted.push(candidate);
+      }
+    }
+
+    return { projectId, agent, skill, accepted, notes };
+  }
+
+  /**
+   * Which agent `@name` or `@workflow/name` means, in the project that is in force.
+   *
+   * Authority comes from the project, never from the address. An agent is addressable here
+   * only through a workflow this project has attached — the same rule a task run obeys — so
+   * naming a workflow in the address narrows the search and can never widen it.
+   */
+  private async resolveAgent(
+    projectId: string,
+    address: ParsedAddress,
+  ): Promise<
+    | { agent: { workflowId: string; agent: Agent }; note?: undefined }
+    | { agent?: undefined; note: string }
+  > {
+    const attached = await this.workflows.forProject(projectId);
+    const searched = address.workflowId
+      ? attached.filter((workflow) => workflow.id === address.workflowId)
+      : attached;
+
+    for (const workflow of searched) {
+      const found = findAgent(workflow, address.name);
+      if (found) return { agent: { workflowId: workflow.id, agent: found } };
+    }
+
+    const available = attached.flatMap((workflow) =>
+      workflow.agents.map((entry) => `@${workflow.id}/${entry.id}`),
+    );
+    const here =
+      available.length > 0
+        ? `Here you can address: ${available.join(', ')}.`
+        : `No workflow attached to '${projectId}' has any agents yet.`;
+
+    // The refusal the acceptance criteria ask for, and the only one. The agent exists; it is
+    // not this project's to run, and saying "no such agent" would be untrue as well as
+    // unhelpful — the person would go looking for a typo that is not there.
+    const elsewhere = (await this.workflows.list()).find(
+      (workflow) =>
+        !attached.some((candidate) => candidate.id === workflow.id) &&
+        findAgent(workflow, address.name) !== null,
+    );
+    if (elsewhere) {
+      throw new ValidationError(
+        `'${address.name}' is in the workflow '${elsewhere.name}', which is not attached to ` +
+          `'${projectId}' — an agent only runs in a project whose workflow contains it. ${here}`,
+        { projectId, agentId: address.name, workflowId: elsewhere.id },
+      );
+    }
+
+    return { note: `There is no agent '${address.name}' in '${projectId}'. ${here}` };
+  }
+
+  /**
+   * Name the chat from what was actually said, on the cheapest model the provider has.
+   *
+   * Never on the request path: this is started after the reply is committed and its result is
+   * written only if nothing has settled the title in the meantime. A failure is not retried —
+   * it falls back to the first line of the first message, which is what the person would have
+   * called it anyway, and settles that.
+   */
+  private async nameChat(chatId: string, firstMessage: string, provider: Provider): Promise<void> {
+    let generated = '';
+
+    try {
+      const { port, model } = await this.providers.portFor('low', { provider: provider.id });
+      const result = await port.complete({
+        model,
+        system:
+          'Give this conversation a title: at most eight words, no quotes, no full stop, ' +
+          'naming the subject rather than describing the message. Reply with the title alone.',
+        messages: [{ role: 'user', content: firstMessage.slice(0, 2000) }],
+        adaptiveThinking: false,
+        effort: 'low',
+        maxTokens: 64,
+      });
+      generated = deriveChatTitle(result.text.replace(/^["'`]|["'`]$/g, ''));
+    } catch (error) {
+      this.logger.debug('could not generate a chat title', error);
+    }
+
+    try {
+      // Two fields, and only those two. A read-modify-write here would take a copy of the chat
+      // from before this completion started and put it back afterwards — reverting whatever
+      // turn landed in between, including its `updatedAt`, the project a `#project` set on it
+      // and its token totals. `settleTitle` also makes the `titleGeneratedAt` guard real: the
+      // check is in the same statement as the write, so a hand rename cannot be clobbered by a
+      // generation that read the row before it.
+      //
+      // `updatedAt` is deliberately untouched — naming a chat is not a turn in it, and bumping
+      // it would reorder the list under someone reading it.
+      const settled = await this.store.settleTitle(
+        chatId,
+        // Set either way: the fallback is a settled title, not a standing invitation to try
+        // again on the next turn.
+        generated || deriveChatTitle(firstMessage),
+        this.clock.iso(),
+      );
+      // False means a rename or another generation got there first, and it won.
+      if (settled) this.announce({ type: 'chat.changed', chatId });
+    } catch (error) {
+      this.logger.debug('could not store the generated chat title', error);
+    }
+  }
 
   /**
    * Run one action and record what actually happened.
@@ -491,7 +966,7 @@ export class ChatService {
       if (message.role === 'system') continue;
 
       if (message.role === 'user') {
-        turns.push({ role: 'user', content: message.text });
+        turns.push({ role: 'user', content: forModel(message) });
         continue;
       }
 
@@ -520,8 +995,8 @@ export class ChatService {
     }, []);
   }
 
-  private systemPrompt(): string {
-    return [
+  private systemPrompt(addressed: ResolvedAddresses): string {
+    const base = [
       'You are Pomni, talking to the person who runs this workspace.',
       '',
       'Pomni manages other projects: their repos, their backlog, the commands that build and',
@@ -533,11 +1008,27 @@ export class ChatService {
       'Answer from what you have looked up, not from what is plausible. Ids carry their project',
       "prefix, so 'POMN-21' says which project it is in. Be brief: this is a conversation, not a",
       'report.',
+      ...(addressed.projectId
+        ? [
+            '',
+            `This conversation is about the project '${addressed.projectId}'. Unless the person`,
+            'names another, that is the project every backlog item, repo and workflow refers to,',
+            'and it is what you pass as the project argument without asking which one they mean.',
+          ]
+        : []),
       '',
       actionBriefing(),
       '',
       CHAT_ACTION_PROTOCOL,
     ].join('\n');
+
+    // A skill goes above everything: it is the frame this turn was asked for, not an extra
+    // instruction added to a job description Pomni already has.
+    return addressed.skill
+      ? [`# Skill: ${addressed.skill.name}`, '', addressed.skill.body, '', '---', '', base].join(
+          '\n',
+        )
+      : base;
   }
 
   private async require(id: string): Promise<Chat> {
@@ -596,6 +1087,51 @@ export class ChatService {
   private announce(event: ChatEvent): void {
     this.events.emit(event);
   }
+}
+
+/** The stored form of an address: what it aimed at, without the offsets of one draft. */
+function toMessageAddress(address: ParsedAddress): MessageAddress {
+  return { kind: address.kind, name: address.name, workflowId: address.workflowId };
+}
+
+/**
+ * A stored message as the model should read it, with its chips taken back out.
+ *
+ * The offsets died with the draft, so the text is parsed again and only the candidates that
+ * match what was actually recorded are removed. An unresolved `#include` was never an address
+ * and is not one now, however many projects have been created since.
+ */
+function forModel(message: ChatMessage): string {
+  if (message.addresses.length === 0) return message.text;
+
+  const resolved = parseAddresses(message.text).addresses.filter((candidate) =>
+    message.addresses.some(
+      (recorded) =>
+        recorded.kind === candidate.kind &&
+        recorded.name === candidate.name &&
+        recorded.workflowId === candidate.workflowId,
+    ),
+  );
+  return stripAddresses(message.text, resolved) || message.text;
+}
+
+/**
+ * What exists, when what was typed does not.
+ *
+ * Near matches first — a typo is the common case and the person can see their own word in the
+ * answer — then the whole list, capped. An empty list gets its own sentence, because "Projects
+ * here: " with nothing after it reads like a bug.
+ */
+function suggest(available: string[], typed: string, lead: string, empty: string): string {
+  if (available.length === 0) return `${empty}.`;
+
+  const near = available.filter(
+    (entry) => entry.startsWith(typed) || typed.startsWith(entry) || entry.includes(typed),
+  );
+  const shown = (near.length > 0 ? near : available).slice(0, 12);
+  return `${lead}: ${shown.join(', ')}${
+    shown.length < (near.length > 0 ? near.length : available.length) ? ', …' : ''
+  }.`;
 }
 
 function actionIn(message: ChatMessage, actionId: string): ProposedAction {

@@ -152,6 +152,7 @@ export function createContainer(root: string, logLevel: LogLevel = 'warn'): Pomn
     clock,
     events,
     logger,
+    discovery,
   );
 
   return {

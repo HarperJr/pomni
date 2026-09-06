@@ -30,6 +30,7 @@ import { ulid } from '../domain/ulid.js';
 import { chooseWorkflow, entryAgent, findAgent, rosterFor, type Workflow } from '../domain/workflow.js';
 import { worktreeEligibility, type WorktreeProbe } from '../domain/worktree.js';
 import type { Artifact } from '../domain/pipeline.js';
+import type { Provider } from '../domain/provider.js';
 import type { ResolvedRepo } from '../domain/repo.js';
 import type {
   Clock,
@@ -37,6 +38,7 @@ import type {
   EventBus,
   GitPort,
   LlmMessage,
+  LlmPort,
   Logger,
   PipelineStore,
 } from '../ports/index.js';
@@ -66,6 +68,33 @@ export interface StartRunInput {
 export interface StartRunResult {
   run: PipelineRun;
   completion: Promise<PipelineRun>;
+}
+
+/** Where an agent works, and everything else it may read. See `workspace`. */
+export interface AgentWorkspace {
+  cwd: string | undefined;
+  dirs: string[];
+  repos: ResolvedRepo[];
+}
+
+export interface RunOneAgentInput {
+  projectId: string;
+  /** Which attached workflow the agent belongs to. Omitted, every attached one is searched. */
+  workflowId?: string;
+  agentId: string;
+  task: string;
+  /** A `/skill`'s instructions, loaded for this turn only. */
+  skillPrompt?: string;
+  providerId?: string;
+}
+
+export interface RunOneAgentResult {
+  text: string;
+  /** The workflow the agent was actually found in — the answer to a bare `@agent`. */
+  workflowId: string;
+  providerId: string;
+  model: string;
+  usage: { inputTokens: number; outputTokens: number; costUsd: number | null };
 }
 
 /** How many delegate-and-review rounds one orchestrator gets before we stop it. */
@@ -501,6 +530,140 @@ export class PipelineService {
     return run;
   }
 
+  /**
+   * Put one question to one agent, and give back what it said.
+   *
+   * Deliberately not a run: no `PipelineRun` row, no steps, no worktree, no project claim, no
+   * backlog move, and no delegation loop even if the agent happens to be an orchestrator. A
+   * chat asking `@codebase-scout` where something lives wants an answer, and paying for a
+   * run's whole apparatus to get one would also mean claiming repos out from under whatever
+   * is actually running in them. Starting a workflow is what `start` is for; the two must not
+   * be confused, so this cannot quietly become one.
+   *
+   * Because there is no run there are no `pipeline.*` events either — nothing is watching a
+   * run that does not exist, and the caller announces its own turn.
+   *
+   * The agent works in the repos' own directories rather than a copy of them, and that is
+   * precisely why an agent that can write is refused here. Without a run there is no worktree
+   * to contain it, so `files` or `run` from a chat means editing the person's own tree with
+   * nothing recording that it happened and nobody having confirmed it — while every other write
+   * a chat can reach waits for a confirmation. A chat reads; a run writes. An agent granted
+   * either is told to be started as a run instead, which is the surface that has the worktree,
+   * the steps and the log for it.
+   */
+  async runOneAgent(input: RunOneAgentInput): Promise<RunOneAgentResult> {
+    const task = input.task.trim();
+    if (!task) throw new ValidationError('an agent needs something to do');
+
+    await this.projects.getRef(input.projectId);
+
+    const attached = await this.workflows.forProject(input.projectId);
+    if (attached.length === 0) {
+      throw new ValidationError(
+        `no workflow is attached to '${input.projectId}' — attach one first`,
+      );
+    }
+
+    const searched = input.workflowId
+      ? attached.filter((candidate) => candidate.id === input.workflowId)
+      : attached;
+    if (searched.length === 0) {
+      throw new ValidationError(
+        `workflow '${input.workflowId}' is not attached to '${input.projectId}' — attached: ${attached
+          .map((candidate) => candidate.id)
+          .join(', ')}`,
+      );
+    }
+
+    // Authority is the project's, never the name that was typed. An agent that exists in some
+    // workflow nobody attached here is not an agent of this project, and saying which ones are
+    // is more use than saying no.
+    const found = searched
+      .map((candidate) => ({ workflow: candidate, agent: findAgent(candidate, input.agentId) }))
+      .find((entry) => entry.agent !== null);
+
+    if (!found?.agent) {
+      const available = searched.flatMap((candidate) =>
+        candidate.agents.map((agent) => `${candidate.id}/${agent.id}`),
+      );
+      throw new ValidationError(
+        `'${input.agentId}' is not in any workflow attached to '${input.projectId}'. ` +
+          (available.length > 0
+            ? `These are: ${available.join(', ')}.`
+            : 'None of its workflows has any agents yet.'),
+        { projectId: input.projectId, agentId: input.agentId, available },
+      );
+    }
+
+    // Before the session, not inside it: an agent that may write must not get as far as being
+    // handed a working directory. `verify` is left alone — it runs only the checks the repo
+    // declares, which is the point of granting it without a shell.
+    const writes = found.agent.tools.files
+      ? 'change files'
+      : found.agent.tools.run
+        ? 'run commands with Bash, which changes files just as directly'
+        : null;
+    if (writes) {
+      throw new ValidationError(
+        `'${found.agent.name}' can ${writes}, so it cannot be addressed from a chat — a chat ` +
+          'has no worktree to write in, and nothing confirming what it writes. Start it as a ' +
+          `run on '${input.projectId}' instead. Agents that only read still answer here.`,
+        { projectId: input.projectId, agentId: found.agent.id, workflowId: found.workflow.id },
+      );
+    }
+
+    const usable = (await this.repos.listResolved(input.projectId)).filter(
+      (repo) => repo.workingDirExists,
+    );
+    const workspace = this.workspace(usable, {}, undefined);
+
+    const session = await this.openSession({
+      projectId: input.projectId,
+      agent: found.agent,
+      providerId: input.providerId,
+      cwd: workspace.cwd,
+      workspace,
+      skillPrompt: input.skillPrompt,
+    });
+
+    const result = await session.port.complete({
+      model: session.model,
+      system: session.system,
+      messages: [{ role: 'user', content: task }],
+      adaptiveThinking: session.provider.kind !== 'claude-code',
+      effort: 'medium',
+      maxTokens: 16_000,
+    });
+
+    // The verdict block is part of every agent's prompt and so part of every agent's answer.
+    // Reading it off here is what stops a chat reply ending in a lump of json — but stripping
+    // the block must not throw away what it said. An agent is told to put what it could not
+    // deliver in `unmet` and nowhere else, so a partial answer whose `unmet` was dropped reads
+    // in the chat as a complete one.
+    const { verdict, prose } = parseVerdict(result.text);
+    const shortfall =
+      verdict.outcome !== 'done' && verdict.unmet.length > 0
+        ? `\n\n_Did not deliver: ${verdict.unmet.join('; ')}_`
+        : '';
+
+    return {
+      text: `${prose || result.text}${shortfall}`,
+      workflowId: found.workflow.id,
+      providerId: session.provider.id,
+      model: session.model,
+      usage: {
+        // Cache reads and writes are input, and most of the real volume. Counted the same way
+        // a pipeline step counts them, so the two numbers mean the same thing.
+        inputTokens:
+          result.usage.inputTokens +
+          result.usage.cacheReadTokens +
+          result.usage.cacheCreationTokens,
+        outputTokens: result.usage.outputTokens,
+        costUsd: result.costUsd ?? null,
+      },
+    };
+  }
+
   // -------------------------------------------------------------------------
 
   private async execute(
@@ -641,43 +804,43 @@ export class PipelineService {
     parentStepId: string | null;
     depth: number;
     cwd: string | undefined;
-    workspace: { cwd: string | undefined; dirs: string[]; repos: ResolvedRepo[] };
+    workspace: AgentWorkspace;
     seed?: Seed;
     addCost: (amount: number) => void;
   }): Promise<{ answer: string; verdict: Verdict }> {
     const { run, workflow, agent, task, parentStepId, depth, cwd, workspace, seed, addCost } =
       context;
-    assertRunnable(agent);
 
     const orchestrating = isOrchestrator(agent);
     const roster = orchestrating ? rosterFor(workflow, agent) : [];
 
     // Resolved before the step is recorded: an agent asking for a tool nobody gave the
     // project should fail as a configuration error, not halfway through a paid session.
-    const grants = await this.tools.grantsFor(run.projectId, [
-      ...agent.tools.mcp,
-      ...agent.tools.cli,
-    ]);
-
-    // What the repos say their own checks are. An agent that may verify gets exactly
-    // these and no shell, so it can prove a change without being able to undo one.
-    const checks = workspace.repos.flatMap((repo) =>
-      Object.values(repo.capabilities)
-        .map((capability) => capability.cmd)
-        .filter((cmd): cmd is string => Boolean(cmd)),
-    );
-
-    const { port, model, provider } = await this.providers.portFor(agent.struggle, {
-      provider: run.providerId,
-      // Only give an agent a working directory when it is allowed to touch files; an
-      // orchestrator with a repo tends to start doing the work itself.
-      cwd: agent.tools.files || agent.tools.run ? cwd : undefined,
-      dirs: agent.tools.files || agent.tools.run ? workspace.dirs : [],
-      tools: grants,
-      files: agent.tools.files,
-      run: agent.tools.run,
-      verify: agent.tools.verify || agent.tools.run ? checks : [],
+    const session = await this.openSession({
+      projectId: run.projectId,
+      agent,
+      providerId: run.providerId,
+      cwd,
+      workspace,
+      protocol: orchestrating
+        ? [
+            ORCHESTRATOR_PROTOCOL,
+            '',
+            '## Agents you can delegate to',
+            `- ${HUMAN_AGENT_ID} — the person who started this run. For decisions that are`
+              + ' theirs, not yours. The run waits until they answer.',
+            roster
+              .map(
+                (other) =>
+                  `- \`${other.id}\` — ${other.name}. ${other.spec.split('\n')[0] ?? ''}${
+                    other.outputs ? ` Returns: ${other.outputs}` : ''
+                  }`,
+              )
+              .join('\n'),
+          ].join('\n')
+        : undefined,
     });
+    const { port, model, provider } = session;
 
     const step: PipelineStep = {
       id: ulid(this.clock.now().getTime()),
@@ -725,66 +888,7 @@ export class PipelineService {
     let outputTokens = 0;
 
     try {
-      // Say what this agent may and may not do. An agent that discovers a refusal by
-      // being refused spends turns on it and reports the refusal as its finding — that
-      // has cost whole runs here.
-      const can = [
-        agent.tools.files ? 'read and change files' : null,
-        agent.tools.run ? 'run commands with Bash' : null,
-        !agent.tools.run && agent.tools.verify && checks.length > 0
-          ? `run exactly these checks, and nothing else: ${checks.join(', ')}`
-          : null,
-      ].filter(Boolean);
-      const cannot = [
-        agent.tools.files ? null : 'change files',
-        agent.tools.run || agent.tools.verify
-          ? null
-          : 'run commands — no build, no tests, no shell',
-        !agent.tools.run && agent.tools.verify ? 'run any other command' : null,
-      ].filter(Boolean);
-
-      const abilities = [
-        '## What you can do',
-        '',
-        can.length > 0 ? `You can ${can.join(' and ')}.` : 'You can read and think; that is all.',
-        cannot.length > 0
-          ? `You cannot ${cannot.join(', or ')}. Do not try, and do not report being unable` +
-            ' to as a finding — say what you would have run and let whoever can, run it.'
-          : '',
-      ].filter(Boolean).join('\n');
-
-      const briefing = toolBriefing(grants);
-      const repos =
-        agent.tools.files || agent.tools.run ? this.repoBriefing(workspace.repos) : null;
-
-      const system = orchestrating
-        ? [
-            agent.prompt,
-            '',
-            ORCHESTRATOR_PROTOCOL,
-            '',
-            '## Agents you can delegate to',
-            `- ${HUMAN_AGENT_ID} — the person who started this run. For decisions that are`
-              + ' theirs, not yours. The run waits until they answer.',
-            roster
-              .map(
-                (other) =>
-                  `- \`${other.id}\` — ${other.name}. ${other.spec.split('\n')[0] ?? ''}${
-                    other.outputs ? ` Returns: ${other.outputs}` : ''
-                  }`,
-              )
-              .join('\n'),
-          ].join('\n')
-        : agent.prompt;
-
-      // The briefing goes last: an agent's own prompt is what it is, and the tools it was
-      // handed are context added on top rather than part of its job description.
-      const briefed = briefing ? [system, '', briefing].join('\n') : system;
-      // Every agent, orchestrator or not, says what it achieved. Without it a step that
-      // explains why it could not do the job is indistinguishable from one that did it.
-      const prompt = [briefed, '', abilities, ...(repos ? ['', repos] : []), '', VERDICT_PROTOCOL].join(
-        '\n',
-      );
+      const prompt = session.system;
 
       // The orchestrator's own turns stay in the conversation. Sending only the latest
       // round back is what made a lead ask the same analyst the same question four times:
@@ -1077,6 +1181,112 @@ export class PipelineService {
 
       throw error;
     }
+  }
+
+  /**
+   * Everything one agent needs to take a turn: a port scoped to its tools, the model for its
+   * struggle, and the system prompt it runs under.
+   *
+   * The seam between a pipeline step and a single addressed agent. Both need the same prompt
+   * — its own, plus what it may do, plus where the repos are, plus the verdict block — and the
+   * same tool scoping, and a second copy of that would be a second place for an agent's grants
+   * to drift from what it was actually handed.
+   */
+  private async openSession(input: {
+    projectId: string;
+    agent: Agent;
+    providerId?: string;
+    cwd: string | undefined;
+    workspace: AgentWorkspace;
+    /** Goes between the agent's own prompt and its tool briefing: the orchestrator protocol. */
+    protocol?: string;
+    /** A skill's instructions, put above everything else so they frame the whole turn. */
+    skillPrompt?: string;
+  }): Promise<{ port: LlmPort; model: string; provider: Provider; system: string }> {
+    const { agent, workspace } = input;
+    assertRunnable(agent);
+
+    const grants = await this.tools.grantsFor(input.projectId, [
+      ...agent.tools.mcp,
+      ...agent.tools.cli,
+    ]);
+
+    // What the repos say their own checks are. An agent that may verify gets exactly
+    // these and no shell, so it can prove a change without being able to undo one.
+    const checks = workspace.repos.flatMap((repo) =>
+      Object.values(repo.capabilities)
+        .map((capability) => capability.cmd)
+        .filter((cmd): cmd is string => Boolean(cmd)),
+    );
+
+    const { port, model, provider } = await this.providers.portFor(agent.struggle, {
+      provider: input.providerId,
+      // Only give an agent a working directory when it is allowed to touch files; an
+      // orchestrator with a repo tends to start doing the work itself.
+      cwd: agent.tools.files || agent.tools.run ? input.cwd : undefined,
+      dirs: agent.tools.files || agent.tools.run ? workspace.dirs : [],
+      tools: grants,
+      files: agent.tools.files,
+      run: agent.tools.run,
+      verify: agent.tools.verify || agent.tools.run ? checks : [],
+    });
+
+    // Say what this agent may and may not do. An agent that discovers a refusal by
+    // being refused spends turns on it and reports the refusal as its finding — that
+    // has cost whole runs here.
+    const can = [
+      agent.tools.files ? 'read and change files' : null,
+      agent.tools.run ? 'run commands with Bash' : null,
+      !agent.tools.run && agent.tools.verify && checks.length > 0
+        ? `run exactly these checks, and nothing else: ${checks.join(', ')}`
+        : null,
+    ].filter(Boolean);
+    const cannot = [
+      agent.tools.files ? null : 'change files',
+      agent.tools.run || agent.tools.verify ? null : 'run commands — no build, no tests, no shell',
+      !agent.tools.run && agent.tools.verify ? 'run any other command' : null,
+    ].filter(Boolean);
+
+    const abilities = [
+      '## What you can do',
+      '',
+      can.length > 0 ? `You can ${can.join(' and ')}.` : 'You can read and think; that is all.',
+      cannot.length > 0
+        ? `You cannot ${cannot.join(', or ')}. Do not try, and do not report being unable` +
+          ' to as a finding — say what you would have run and let whoever can, run it.'
+        : '',
+    ]
+      .filter(Boolean)
+      .join('\n');
+
+    const briefing = toolBriefing(grants);
+    const repos = agent.tools.files || agent.tools.run ? this.repoBriefing(workspace.repos) : null;
+
+    const own = input.protocol ? [agent.prompt, '', input.protocol].join('\n') : agent.prompt;
+    // The briefing goes last: an agent's own prompt is what it is, and the tools it was
+    // handed are context added on top rather than part of its job description.
+    const briefed = briefing ? [own, '', briefing].join('\n') : own;
+    // Every agent, orchestrator or not, says what it achieved. Without it a step that
+    // explains why it could not do the job is indistinguishable from one that did it.
+    const system = [
+      briefed,
+      '',
+      abilities,
+      ...(repos ? ['', repos] : []),
+      '',
+      VERDICT_PROTOCOL,
+    ].join('\n');
+
+    return {
+      port,
+      model,
+      provider,
+      // A skill goes above the agent's own prompt rather than below it: it is the frame the
+      // turn is being asked for, not an extra instruction bolted onto the job description.
+      system: input.skillPrompt?.trim()
+        ? [input.skillPrompt.trim(), '', system].join('\n')
+        : system,
+    };
   }
 
   /**

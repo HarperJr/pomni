@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { MessageAddressSchema } from './address.js';
 import { ConflictError, ValidationError } from './errors.js';
 
 /**
@@ -96,6 +97,14 @@ export const ChatMessageSchema = z.object({
    */
   providerId: z.string().nullable().default(null),
   model: z.string().nullable().default(null),
+  /** The project in force when this turn ran, addressed or inherited. */
+  projectId: z.string().nullable().default(null),
+  /**
+   * What this message was aimed at, as resolved. Stored so a chip re-renders without
+   * re-parsing — and without re-guessing, since a candidate that named nothing was never an
+   * address and must not become one later when a project by that name is created.
+   */
+  addresses: z.array(MessageAddressSchema).default([]),
   actions: z.array(ProposedActionSchema).default([]),
   createdAt: z.string(),
   inputTokens: z.number().default(0),
@@ -112,6 +121,17 @@ export const ChatSchema = z.object({
   title: z.string().default(''),
   providerId: z.string(),
   model: z.string(),
+  /**
+   * The project this conversation is about, set by `#project` and held until changed. Null
+   * is a real answer — a chat about nothing in particular addresses no project.
+   */
+  projectId: z.string().nullable().default(null),
+  /**
+   * When the title stopped being provisional — generated, or fallen back, or renamed by
+   * hand. Non-null means nothing may overwrite it, which is how a late generation loses a
+   * race against a person who has already named the thing.
+   */
+  titleGeneratedAt: z.string().nullable().default(null),
   createdAt: z.string(),
   /** Bumped on every message. Chat lists sort by this, not `createdAt`. */
   updatedAt: z.string(),

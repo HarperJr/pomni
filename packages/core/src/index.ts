@@ -1,3 +1,4 @@
+export * from './domain/address.js';
 export * from './domain/agent.js';
 export * from './domain/capability.js';
 export * from './domain/chat.js';

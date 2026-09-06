@@ -4,6 +4,7 @@ import {
   StruggleSchema,
   PROVIDER_PRESETS,
   ProviderKindSchema,
+  resolveModel,
   type PomniContainer,
 } from '@pomni/core';
 import type { FastifyInstance } from 'fastify';
@@ -184,10 +185,24 @@ export async function workflowRoutes(
   app.get('/api/llm/status', async () => {
     const status = await container.providers.status();
     const usable = status.providers.find((provider) => provider.available);
+    const chosen = status.providers.find((provider) => provider.id === status.default) ?? usable;
+
+    // The concrete model a fresh chat would actually run on, so the composer can show it
+    // before any chat exists — without reimplementing `resolveModel`'s fallback in the client.
+    let defaultModel: { providerId: string; model: string } | null = null;
+    if (chosen) {
+      try {
+        defaultModel = { providerId: chosen.id, model: resolveModel(chosen, 'medium') };
+      } catch {
+        defaultModel = null;
+      }
+    }
+
     return {
       configured: Boolean(usable),
       auth: usable ? usable.detail : 'no usable provider — add one on the Providers page',
       default: status.default,
+      defaultModel,
       providers: status.providers,
     };
   });

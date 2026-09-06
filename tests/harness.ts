@@ -397,8 +397,21 @@ export class FakeLlm implements LlmPort {
   /** Tool calls to emit, in order, before finishing. Each entry is one turn. */
   toolPlan: LlmToolCall[][] = [];
   toolResults: string[] = [];
+  /**
+   * Make `complete` throw for the calls whose system prompt matches.
+   *
+   * Matched on the prompt rather than counted, because a service may make more calls than a
+   * test is thinking about — chat title generation is one — and "the third call fails" would
+   * then be a different call tomorrow. The prompt says which job is failing.
+   */
+  failCompleteWhen: RegExp | null = null;
 
   async complete(request: LlmRequest): Promise<LlmResult> {
+    if (this.failCompleteWhen?.test(request.system ?? '')) {
+      this.calls.push({ ...request, messages: [...request.messages] });
+      throw new Error('the provider is unavailable');
+    }
+
     // A copy: callers keep appending to the same conversation, and a recording that changes
     // after the fact cannot show what this call was actually given.
     this.calls.push({ ...request, messages: [...request.messages] });
@@ -592,6 +605,7 @@ export async function createHarness<G extends GitPort = FakeGit>(
     clock,
     events,
     logger,
+    discovery,
   );
 
   await workspace.init();

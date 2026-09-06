@@ -1143,6 +1143,100 @@ details.chip .log {
   margin: 0;
 }
 
+/* Provider + model, shown next to the tokens/cost in a chat's own header — never a dialog. */
+/* Click the title in a chat's header to rename it in place — no dialog. */
+.chat-title {
+  padding: 0;
+  border: 0;
+  background: none;
+  font-weight: 600;
+  font-size: inherit;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+
+.chat-title:hover {
+  text-decoration: underline;
+}
+
+.chat-title-input {
+  font-weight: 600;
+  font-size: inherit;
+  margin: 0;
+  padding: 1px 4px;
+}
+
+.chat-model-block {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+}
+
+.chat-model-picker {
+  display: flex;
+  gap: 6px;
+}
+
+.chat-model-picker select {
+  margin: 0;
+}
+
+.chat-hint {
+  color: var(--text-dim);
+  font-size: 12px;
+  margin-top: 6px;
+}
+
+.chat-composer-block .chat-hint:first-of-type {
+  margin-top: 8px;
+}
+
+/* One #project, @agent or /skill found in the draft. Unresolved ones say so instead of
+   disappearing — an address that names nothing is not an error. */
+.address-chips {
+  margin-bottom: 8px;
+}
+
+.address-chip {
+  gap: 6px;
+}
+
+.address-chip-unresolved {
+  border-style: dashed;
+  color: var(--text-dim);
+}
+
+.address-chip-dropped {
+  opacity: 0.7;
+}
+
+.address-suggestions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.address-suggestions button {
+  padding: 4px 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.address-suggestions button:hover {
+  background: var(--surface);
+}
+
+.address-suggestion-active {
+  border-color: var(--accent);
+  background: var(--surface);
+}
+
 /* One proposed or completed action under a message. A pending write is bordered in warn so
    it cannot be mistaken for a record of something that already happened. */
 .action-card {

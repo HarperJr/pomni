@@ -292,6 +292,19 @@ export interface ChatStore {
   listChats(filter?: ChatFilter): Promise<Chat[]>;
   getChat(id: string): Promise<Chat | null>;
   updateChat(chat: Chat): Promise<void>;
+  /**
+   * Settle the title, and nothing else on the row.
+   *
+   * A whole-row `updateChat` cannot do this: the title is generated off the request path, so a
+   * turn can land between reading the chat and writing it back, and writing the row back would
+   * revert that turn's `updatedAt`, its `#project` and its token totals. It also makes the
+   * `titleGeneratedAt` guard real rather than advisory — the check and the write are one
+   * statement, so a hand rename cannot be clobbered by a generation that read before it.
+   *
+   * `UPDATE chats SET title = ?, titleGeneratedAt = ? WHERE id = ? AND titleGeneratedAt IS NULL`.
+   * True when it wrote a row, false when a title was already settled.
+   */
+  settleTitle(chatId: string, title: string, at: string): Promise<boolean>;
   /** Cascades to its messages. */
   deleteChat(id: string): Promise<void>;
   appendMessage(message: ChatMessage): Promise<void>;

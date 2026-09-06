@@ -2,15 +2,19 @@ import { z } from 'zod';
 import type { PomniContainer } from '@pomni/core';
 import type { FastifyInstance } from 'fastify';
 
-const CreateChatBody = z.object({
-  providerId: z.string().min(1),
-  model: z.string().min(1),
-  title: z.string().optional(),
+const StartChatBody = z.object({
+  text: z.string().min(1),
+  providerId: z.string().min(1).optional(),
+  model: z.string().min(1).optional(),
 });
 
 const SetModelBody = z.object({
   providerId: z.string().min(1),
   model: z.string().min(1),
+});
+
+const RenameChatBody = z.object({
+  title: z.string().min(1),
 });
 
 const SendMessageBody = z.object({
@@ -21,6 +25,10 @@ const ListQuery = z.object({
   query: z.string().optional(),
   providerId: z.string().optional(),
   limit: z.coerce.number().int().positive().optional(),
+});
+
+const AddressablesQuery = z.object({
+  projectId: z.string().optional(),
 });
 
 export async function chatRoutes(app: FastifyInstance, container: PomniContainer): Promise<void> {
@@ -35,10 +43,16 @@ export async function chatRoutes(app: FastifyInstance, container: PomniContainer
     };
   });
 
+  /** What `#`, `@` and `/` can address, scoped to the addressed project when there is one. */
+  app.get('/api/chats/addressables', async (request) => {
+    const query = AddressablesQuery.parse(request.query);
+    return container.chat.addressables(query.projectId ?? null);
+  });
+
   app.post('/api/chats', async (request, reply) => {
-    const body = CreateChatBody.parse(request.body);
+    const body = StartChatBody.parse(request.body);
     reply.code(201);
-    return { chat: await container.chat.create(body) };
+    return { chat: await container.chat.createFromFirstMessage(body) };
   });
 
   app.get<{ Params: { id: string } }>('/api/chats/:id', async (request) => ({
@@ -52,7 +66,12 @@ export async function chatRoutes(app: FastifyInstance, container: PomniContainer
 
   app.patch<{ Params: { id: string } }>('/api/chats/:id/model', async (request) => {
     const body = SetModelBody.parse(request.body);
-    return { chat: await container.chat.setModel(request.params.id, body.providerId, body.model) };
+    return { chat: await container.chat.setModel(request.params.id, body) };
+  });
+
+  app.patch<{ Params: { id: string } }>('/api/chats/:id/title', async (request) => {
+    const body = RenameChatBody.parse(request.body);
+    return { chat: await container.chat.rename(request.params.id, body.title) };
   });
 
   app.post<{ Params: { id: string } }>('/api/chats/:id/messages', async (request, reply) => {

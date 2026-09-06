@@ -13,7 +13,7 @@ import {
 type SqlValue = string | number | null;
 
 interface SqliteStatement {
-  run(...params: SqlValue[]): unknown;
+  run(...params: SqlValue[]): { changes: number | bigint };
   get(...params: SqlValue[]): unknown;
   all(...params: SqlValue[]): unknown[];
 }
@@ -53,8 +53,8 @@ export class SqliteChatStore implements ChatStore {
   async createChat(chat: Chat): Promise<void> {
     this.statement(
       `INSERT INTO chats (id, title, providerId, model, createdAt, updatedAt,
-                          inputTokens, outputTokens, costUsd)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                          inputTokens, outputTokens, costUsd, projectId, titleGeneratedAt)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       chat.id,
       chat.title,
@@ -65,6 +65,8 @@ export class SqliteChatStore implements ChatStore {
       chat.inputTokens,
       chat.outputTokens,
       chat.costUsd,
+      chat.projectId,
+      chat.titleGeneratedAt,
     );
   }
 
@@ -101,7 +103,7 @@ export class SqliteChatStore implements ChatStore {
     this.statement(
       `UPDATE chats
          SET title = ?, providerId = ?, model = ?, updatedAt = ?,
-             inputTokens = ?, outputTokens = ?, costUsd = ?
+             inputTokens = ?, outputTokens = ?, costUsd = ?, projectId = ?, titleGeneratedAt = ?
        WHERE id = ?`,
     ).run(
       chat.title,
@@ -111,8 +113,23 @@ export class SqliteChatStore implements ChatStore {
       chat.inputTokens,
       chat.outputTokens,
       chat.costUsd,
+      chat.projectId,
+      chat.titleGeneratedAt,
       chat.id,
     );
+  }
+
+  /**
+   * Settles a title generated in the background, but only while it is still unset — a message
+   * sent while generation was in flight, or a hand rename, may have already changed the chat
+   * underneath it. A single `UPDATE ... WHERE titleGeneratedAt IS NULL` avoids the read-modify-
+   * write race that a read followed by `updateChat` would reintroduce.
+   */
+  async settleTitle(chatId: string, title: string, at: string): Promise<boolean> {
+    const result = this.statement(
+      `UPDATE chats SET title = ?, titleGeneratedAt = ? WHERE id = ? AND titleGeneratedAt IS NULL`,
+    ).run(title, at, chatId);
+    return Number(result.changes) > 0;
   }
 
   async deleteChat(id: string): Promise<void> {
@@ -122,8 +139,9 @@ export class SqliteChatStore implements ChatStore {
   async appendMessage(message: ChatMessage): Promise<void> {
     this.statement(
       `INSERT INTO chat_messages (id, chatId, role, text, providerId, model, actions,
-                                  createdAt, inputTokens, outputTokens, costUsd)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                                  createdAt, inputTokens, outputTokens, costUsd,
+                                  projectId, addresses)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       message.id,
       message.chatId,
@@ -136,6 +154,8 @@ export class SqliteChatStore implements ChatStore {
       message.inputTokens,
       message.outputTokens,
       message.costUsd,
+      message.projectId,
+      JSON.stringify(message.addresses),
     );
   }
 
@@ -143,7 +163,7 @@ export class SqliteChatStore implements ChatStore {
     this.statement(
       `UPDATE chat_messages
          SET role = ?, text = ?, providerId = ?, model = ?, actions = ?,
-             inputTokens = ?, outputTokens = ?, costUsd = ?
+             inputTokens = ?, outputTokens = ?, costUsd = ?, projectId = ?, addresses = ?
        WHERE id = ?`,
     ).run(
       message.role,
@@ -154,6 +174,8 @@ export class SqliteChatStore implements ChatStore {
       message.inputTokens,
       message.outputTokens,
       message.costUsd,
+      message.projectId,
+      JSON.stringify(message.addresses),
       message.id,
     );
   }
@@ -205,6 +227,8 @@ interface ChatRow {
   inputTokens: number;
   outputTokens: number;
   costUsd: number | null;
+  projectId: string | null;
+  titleGeneratedAt: string | null;
 }
 
 function toChat(row: ChatRow): Chat {
@@ -218,6 +242,8 @@ function toChat(row: ChatRow): Chat {
     inputTokens: row.inputTokens,
     outputTokens: row.outputTokens,
     costUsd: row.costUsd,
+    projectId: row.projectId,
+    titleGeneratedAt: row.titleGeneratedAt,
   });
 }
 
@@ -233,6 +259,8 @@ interface ChatMessageRow {
   inputTokens: number;
   outputTokens: number;
   costUsd: number | null;
+  projectId: string | null;
+  addresses: string;
 }
 
 function toChatMessage(row: ChatMessageRow): ChatMessage {
@@ -243,16 +271,18 @@ function toChatMessage(row: ChatMessageRow): ChatMessage {
     text: row.text,
     providerId: row.providerId,
     model: row.model,
-    actions: parseActions(row.actions),
+    actions: parseJsonArray(row.actions),
     createdAt: row.createdAt,
     inputTokens: row.inputTokens,
     outputTokens: row.outputTokens,
     costUsd: row.costUsd,
+    projectId: row.projectId,
+    addresses: parseJsonArray(row.addresses),
   });
 }
 
-/** Tolerant of a malformed or missing actions column; the schema still validates each entry. */
-function parseActions(raw: string | null): unknown[] {
+/** Tolerant of a malformed or missing JSON-array column; the schema still validates each entry. */
+function parseJsonArray(raw: string | null): unknown[] {
   if (!raw) return [];
   try {
     const parsed = JSON.parse(raw) as unknown;
@@ -290,6 +320,15 @@ const MIGRATIONS: string[] = [
      costUsd      REAL
    );
    CREATE INDEX IF NOT EXISTS idx_chat_messages_chat ON chat_messages(chatId, createdAt);`,
+
+  `ALTER TABLE chats ADD COLUMN projectId TEXT;
+   ALTER TABLE chats ADD COLUMN titleGeneratedAt TEXT;
+   UPDATE chats SET titleGeneratedAt = createdAt WHERE title != '';
+
+   ALTER TABLE chat_messages ADD COLUMN projectId TEXT;
+   ALTER TABLE chat_messages ADD COLUMN addresses TEXT NOT NULL DEFAULT '[]';
+
+   CREATE INDEX IF NOT EXISTS idx_chats_project ON chats(projectId, updatedAt DESC);`,
 ];
 
 function migrate(db: SqliteDatabase): void {

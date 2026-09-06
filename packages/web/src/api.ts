@@ -354,6 +354,22 @@ export interface ProviderStatus {
 export type ChatRole = 'user' | 'assistant' | 'system';
 export type ActionStatus = 'proposed' | 'confirmed' | 'rejected' | 'running' | 'executed' | 'failed';
 
+/** Mirrors `AddressKind` in `packages/core/src/domain/address.ts`. */
+export type AddressKind = 'project' | 'agent' | 'skill';
+
+/**
+ * A resolved address as recorded on a message. Mirrors `MessageAddress` in
+ * `packages/core/src/domain/address.ts` — deliberately without offsets, which are draft-only
+ * and never persisted.
+ */
+export interface MessageAddress {
+  kind: AddressKind;
+  /** The name after the sigil, lowercased. For an agent, the agent id alone. */
+  name: string;
+  /** `@workflow/agent` only. Null for the bare `@agent` form, and for every other kind. */
+  workflowId: string | null;
+}
+
 export interface ProposedAction {
   id: string;
   /** 'service.method' form, e.g. 'backlog.move'. */
@@ -376,11 +392,15 @@ export interface ProposedAction {
 export interface ChatMessage {
   id: string;
   chatId: string;
+  /** The project this message is addressed at, or the chat's own project. Null when neither. */
+  projectId: string | null;
   role: ChatRole;
   text: string;
   providerId: string | null;
   model: string | null;
   actions: ProposedAction[];
+  /** `#`, `@` and `/` addresses resolved on this message. */
+  addresses: MessageAddress[];
   createdAt: string;
   inputTokens: number;
   outputTokens: number;
@@ -390,10 +410,14 @@ export interface ChatMessage {
 export interface Chat {
   id: string;
   title: string;
+  /** Set by `#project` and held until changed; null for a chat that has never been addressed. */
+  projectId: string | null;
   providerId: string;
   model: string;
   createdAt: string;
   updatedAt: string;
+  /** When the generated title was written, or null if it is still the first line fallback. */
+  titleGeneratedAt: string | null;
   inputTokens: number;
   outputTokens: number;
   costUsd: number | null;
@@ -1172,7 +1196,14 @@ export const api = {
       method: 'DELETE',
     }),
 
-  llmStatus: () => request<{ configured: boolean; auth: string }>('/api/llm/status'),
+  llmStatus: () =>
+    request<{
+      configured: boolean;
+      auth: string;
+      default: string | null;
+      defaultModel: { providerId: string; model: string } | null;
+      providers: ProviderStatus[];
+    }>('/api/llm/status'),
 
   listRuns: (params: { project?: string; repo?: string; capability?: string; failed?: boolean; limit?: number } = {}) => {
     const query = new URLSearchParams();
@@ -1224,8 +1255,9 @@ export const api = {
     return request<{ chats: Chat[] }>(`/api/chats${qs ? `?${qs}` : ''}`);
   },
 
-  createChat: (body: { providerId: string; model: string; title?: string }) =>
-    request<{ chat: Chat }>('/api/chats', {
+  /** The first message creates the chat and runs the first turn in one call. */
+  startChat: (body: { text: string; providerId?: string; model?: string }) =>
+    request<{ chat: ChatDetail }>('/api/chats', {
       method: 'POST',
       body: JSON.stringify(body),
     }),
@@ -1240,6 +1272,19 @@ export const api = {
       method: 'PATCH',
       body: JSON.stringify(body),
     }),
+
+  renameChat: (id: string, title: string) =>
+    request<{ chat: Chat }>(`/api/chats/${encodeURIComponent(id)}/title`, {
+      method: 'PATCH',
+      body: JSON.stringify({ title }),
+    }),
+
+  chatAddressables: (projectId?: string | null) =>
+    request<{
+      projects: Array<{ id: string; name: string }>;
+      agents: Array<{ workflowId: string; workflowName: string; agentId: string; agentName: string }>;
+      skills: Array<{ name: string; description?: string }>;
+    }>(`/api/chats/addressables${projectId ? `?projectId=${encodeURIComponent(projectId)}` : ''}`),
 
   sendChatMessage: (id: string, text: string) =>
     request<{ message: ChatMessage }>(`/api/chats/${encodeURIComponent(id)}/messages`, {
