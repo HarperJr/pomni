@@ -11,8 +11,10 @@ import {
   type Estimate,
   type ItemStatus,
   type ItemType,
+  type EmittedEvent,
   type PathScope,
   type PomniContainer,
+  type PomniEvent,
   type Priority,
   type Requirements,
   type TransitionOffer,
@@ -416,8 +418,9 @@ export function registerBacklogCommands(
           return;
         }
 
-        // Cannot fail unless the grouping itself is wrong — a real assertion, not a guard
-        // against user input.
+        // `planWaves` already asserts this before returning, so this call is redundant today.
+        // Kept as a genuine guard for the day a plan arrives from somewhere other than
+        // `planWaves` — not a guard against anything a user did.
         assertWavesDisjoint(plan);
 
         console.log(`${style.cyan('running')} wave 1: ${first.itemIds.join(', ')}`);
@@ -428,14 +431,8 @@ export function registerBacklogCommands(
             const item = byId.get(itemId);
             const description = item ? `${item.title}\n\n${item.body}` : itemId;
 
-            const { run, completion } = await container.pipelines.start({
-              projectId,
-              task: description,
-              itemId,
-            });
-
-            const unsubscribe = container.events.subscribe((event) => {
-              if (event.type === 'pipeline.step.started' && event.runId === run.id) {
+            const printEvent = (event: PomniEvent & EmittedEvent) => {
+              if (event.type === 'pipeline.step.started') {
                 const indent = '  '.repeat(event.depth);
                 console.log(
                   `${indent}${style.cyan('▸')} ${style.dim(itemId)} ${style.bold(event.agentName)} ${style.dim(
@@ -443,16 +440,43 @@ export function registerBacklogCommands(
                   )}`,
                 );
               }
-              if (event.type === 'pipeline.step.finished' && event.runId === run.id) {
+              if (event.type === 'pipeline.step.finished') {
                 console.log(
                   `  ${style.dim(itemId)} ${event.status === 'done' ? style.green('✓') : style.red('✗')} ${style.dim(
                     event.summary,
                   )}`,
                 );
               }
+            };
+
+            // Subscribed before `start()` is even called: `start()` resolves once the run row
+            // exists and its pipeline is already executing, so the orchestrator's first
+            // `pipeline.step.started` can fire before we would otherwise have a handler for it.
+            // Events that arrive before we know this item's run id are buffered and replayed
+            // once `start()` tells us which run id is ours.
+            let runId: string | null = null;
+            const buffered: (PomniEvent & EmittedEvent)[] = [];
+            const unsubscribe = container.events.subscribe((event) => {
+              if (!('runId' in event)) return;
+              if (runId === null) {
+                buffered.push(event);
+                return;
+              }
+              if (event.runId === runId) printEvent(event);
             });
 
             try {
+              const { run, completion } = await container.pipelines.start({
+                projectId,
+                task: description,
+                itemId,
+              });
+              runId = run.id;
+              for (const event of buffered) {
+                if ('runId' in event && event.runId === runId) printEvent(event);
+              }
+              buffered.length = 0;
+
               const finished = await completion;
               if (finished.status === 'passed') {
                 console.log(`${style.green('✓')} ${itemId} finished in ${Math.round((finished.durationMs ?? 0) / 1000)}s`);

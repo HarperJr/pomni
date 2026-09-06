@@ -1288,3 +1288,13 @@ button.link:hover { text-decoration: underline; }
   border-color: var(--danger);
   color: var(--danger);
 }
+
+/* Спенд по прогонам: форма столбца важнее любого отдельного числа. */
+.spend { padding: 10px 16px; border-bottom: 1px solid var(--border); font-size: 13px; }
+.spend > summary { cursor: pointer; }
+.spend-row { display: flex; align-items: center; gap: 8px; margin-top: 6px; font-size: 12px; }
+.spend-when { flex: 0 0 78px; }
+.spend-n { flex: 0 0 72px; text-align: right; }
+.spend-bar { height: 8px; border-radius: 999px; background: var(--accent); flex: 0 0 auto; max-width: 30%; }
+.step-actions { margin-top: 4px; font-size: 12px; }
+.step-actions > summary { cursor: pointer; }

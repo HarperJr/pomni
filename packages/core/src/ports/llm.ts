@@ -42,6 +42,12 @@ export interface LlmUsage {
   inputTokens: number;
   outputTokens: number;
   cacheReadTokens: number;
+  /**
+   * Tokens written into the cache. Absent from `inputTokens`, and most of the real volume:
+   * a trivial session showed 2 input against 15,440 cache-read and 9,004 cache-creation, so
+   * reporting `inputTokens` alone understates a run by two orders of magnitude.
+   */
+  cacheCreationTokens: number;
 }
 
 /**
@@ -66,6 +72,8 @@ export interface LlmResult {
   turns: number;
   /** What the session did, when the provider reports it. */
   actions?: AgentAction[];
+  /** What the provider says this call cost, when it says. */
+  costUsd?: number;
 }
 
 export interface ToolLoopHooks {

@@ -216,6 +216,156 @@ describe('waves', () => {
     expect(() => planOf(items)).toThrow(/POMN-15[\s\S]*POMN-16/);
   });
 
+  it('still plans the ready work when two finished items point at each other', () => {
+    // The cycle is real, but it sits between two items nobody ready can reach. It is history,
+    // not a scheduling problem, and it must not cost the rest of the project its plan.
+    const items = [
+      item({ id: 'POMN-40', order: 10, status: 'done', dependsOn: ['POMN-41'] }),
+      item({ id: 'POMN-41', order: 20, status: 'cancelled', dependsOn: ['POMN-40'] }),
+      item({ id: 'POMN-42', order: 30, repos: ['core'], touches: ['src/auth.ts'] }),
+      item({ id: 'POMN-43', order: 40, repos: ['core'], touches: ['src/billing.ts'] }),
+    ];
+
+    const plan = planOf(items, { core: true });
+
+    expect(plan.waves).toEqual([{ index: 1, itemIds: ['POMN-42', 'POMN-43'] }]);
+    expect(plan.blocked).toEqual([]);
+  });
+
+  it('still refuses when a ready item depends into a cycle', () => {
+    // Same shape as above except that a ready item reaches the cycle: an item whose prerequisite
+    // can never finish must never be scheduled, so this one is meant to throw.
+    const items = [
+      item({ id: 'POMN-44', order: 10, repos: ['core'], dependsOn: ['POMN-45'] }),
+      item({ id: 'POMN-45', order: 20, status: 'in_progress', dependsOn: ['POMN-46'] }),
+      item({ id: 'POMN-46', order: 30, status: 'in_progress', dependsOn: ['POMN-45'] }),
+    ];
+
+    expect(() => planOf(items, { core: true })).toThrow(ValidationError);
+    expect(() => planOf(items, { core: true })).toThrow(/POMN-45[\s\S]*POMN-46/);
+  });
+
+  it('reads an item that names no repos as being in every repo, for the worktree rule too', () => {
+    // Distinct files on purpose: the only thing that can separate these two is the repo they
+    // share, and POMN-50 only shares it by naming no repos at all.
+    const items = () => [
+      item({ id: 'POMN-50', order: 10, repos: [], touches: ['src/auth.ts'] }),
+      item({ id: 'POMN-51', order: 20, repos: ['core'], touches: ['src/billing.ts'] }),
+    ];
+
+    const serialised = planOf(items(), { core: false });
+    expect(serialised.waves).toEqual([
+      { index: 1, itemIds: ['POMN-50'] },
+      { index: 2, itemIds: ['POMN-51'] },
+    ]);
+    expect(edgeBetween(serialised, 'POMN-50', 'POMN-51')?.reasons).toEqual([
+      { kind: 'shared_repo', repo: 'core' },
+    ]);
+
+    // The same pair against a repo that can hand each run its own checkout: nothing left to
+    // separate them.
+    const together = planOf(items(), { core: true });
+    expect(together.waves).toEqual([{ index: 1, itemIds: ['POMN-50', 'POMN-51'] }]);
+    expect(together.conflicts).toEqual([]);
+  });
+
+  it('treats an item whose Plan names only a bare filename as touching its whole repo', () => {
+    const items = [
+      // `schedule.ts` could be any file in the tree with that name, so it is not a path claim.
+      item({ id: 'POMN-52', order: 10, repos: ['core'], body: planSection('schedule.ts') }),
+      item({
+        id: 'POMN-53',
+        order: 20,
+        repos: ['core'],
+        body: planSection('packages/core/src/domain/item.ts'),
+      }),
+    ];
+
+    const plan = planOf(items, { core: true });
+
+    expect(plan.scopes['POMN-52']).toEqual({ kind: 'whole-repo' });
+    expect(waveOf(plan, 'POMN-52')).not.toBe(waveOf(plan, 'POMN-53'));
+    expect(edgeBetween(plan, 'POMN-52', 'POMN-53')?.reasons).toContainEqual({
+      kind: 'path_overlap',
+      path: '*',
+      otherPath: 'packages/core/src/domain/item.ts',
+    });
+  });
+
+  it('reads a Windows path as the same file its forward-slash twin names', () => {
+    const items = [
+      item({
+        id: 'POMN-54',
+        order: 10,
+        repos: ['core'],
+        body: planSection('packages\\core\\src\\domain\\schedule.ts'),
+      }),
+      item({
+        id: 'POMN-55',
+        order: 20,
+        repos: ['core'],
+        body: planSection('packages/core/src/domain/schedule.ts'),
+      }),
+    ];
+
+    const plan = planOf(items, { core: true });
+
+    expect(plan.scopes['POMN-54']).toEqual({
+      kind: 'paths',
+      paths: ['packages/core/src/domain/schedule.ts'],
+      source: 'plan',
+    });
+    expect(waveOf(plan, 'POMN-54')).not.toBe(waveOf(plan, 'POMN-55'));
+    expect(edgeBetween(plan, 'POMN-54', 'POMN-55')?.reasons).toContainEqual({
+      kind: 'path_overlap',
+      path: 'packages/core/src/domain/schedule.ts',
+      otherPath: 'packages/core/src/domain/schedule.ts',
+    });
+  });
+
+  it('reads an absolute Windows path as no path at all, unlike its repo-relative twin', () => {
+    // The pair is the whole point: the same file, spelled once from the drive root and once from
+    // the repo root. Only the second is something a repo-relative path could ever be compared
+    // against, so only the second may narrow the item's scope. Cutting `C:\Users\me\repo\` off
+    // the first would be the domain guessing where a repo starts.
+    const items = [
+      item({
+        id: 'POMN-56',
+        order: 10,
+        repos: ['core'],
+        body: planSection('C:\\Users\\me\\repo\\packages\\core\\x.ts'),
+      }),
+      item({ id: 'POMN-57', order: 20, repos: ['core'], body: planSection('packages\\core\\x.ts') }),
+    ];
+
+    const plan = planOf(items, { core: true });
+
+    expect(plan.scopes['POMN-56']).toEqual({ kind: 'whole-repo' });
+    expect(plan.scopes['POMN-57']).toEqual({
+      kind: 'paths',
+      paths: ['packages/core/x.ts'],
+      source: 'plan',
+    });
+  });
+
+  it('still plans a ready item whose finished dependencies point at each other', () => {
+    // POMN-1 is ready and waits on POMN-2, which is done; POMN-2 and POMN-3 are both done and
+    // name each other. The cycle is only reachable *through* finished work, and finished work is
+    // settled — so it is history, not something this plan has to be able to order.
+    const items = [
+      item({ id: 'POMN-1', order: 10, repos: ['core'], dependsOn: ['POMN-2'], touches: ['src/auth.ts'] }),
+      item({ id: 'POMN-2', order: 20, status: 'done', dependsOn: ['POMN-3'] }),
+      item({ id: 'POMN-3', order: 30, status: 'done', dependsOn: ['POMN-2'] }),
+    ];
+
+    const plan = planOf(items, { core: true });
+
+    expect(plan.waves).toEqual([{ index: 1, itemIds: ['POMN-1'] }]);
+    // And POMN-3 is not inherited as something POMN-1 waits on: a done dependency's own
+    // dependencies are already settled, so there is nothing left there to wait for.
+    expect(plan.blocked).toEqual([]);
+  });
+
   it('gives the same waves whatever order the backlog is read in', () => {
     const items = [
       item({ id: 'POMN-17', order: 10, repos: ['api'], dependsOn: ['POMN-19'], touches: ['a.ts'] }),
@@ -306,5 +456,72 @@ describe('reading paths out of a Plan section', () => {
     ].join('\n');
 
     expect(extractPlanPaths(plan)).toEqual(['packages/core/src/domain/schedule.ts']);
+  });
+
+  it('takes a separator, not backticks, as what makes a token a path', () => {
+    // Every one of these is backticked, and none of them names a directory. A bare filename
+    // could be any file in the tree; the dotted ones are not files at all.
+    const plan = [
+      '1. Rewrite `schedule.ts` and check `item.status` against `repo.id`.',
+      '2. Await `Promise.all`, then `./x.ts` and `/y.ts`.',
+      '',
+    ].join('\n');
+
+    expect(extractPlanPaths(plan)).toEqual([]);
+  });
+
+  it('reads a backslash path, so a Windows Plan is not silently scopeless', () => {
+    const plan = '1. Edit `packages\\core\\src\\domain\\schedule.ts`, then `src\\auth.ts`.\n';
+
+    expect(extractPlanPaths(plan)).toEqual([
+      'packages/core/src/domain/schedule.ts',
+      'src/auth.ts',
+    ]);
+  });
+
+  it('keeps a path that is relative to the repo and drops every one that is not', () => {
+    // Each of these normalises to something that *looks* repo-relative — `x/y.ts`,
+    // `host/share/x.ts`, `etc/passwd` — which is exactly why they have to be refused before
+    // normalisation rather than after it. The domain does not know where any repo root is.
+    const plan = [
+      '1. Edit `C:\\Users\\me\\repo\\packages\\core\\x.ts` and `C:/Users/me/repo/x.ts`.',
+      '2. Copy from `\\\\host\\share\\x.ts` into `/etc/passwd`.',
+      '',
+    ].join('\n');
+
+    expect(extractPlanPaths(plan)).toEqual([]);
+  });
+
+  it('leaves a quoted regex as prose rather than reading it as a path', () => {
+    // `\d+/\w+` normalises to `d+/w+` and `\d+\w+` to `d+w+` — the first would look like a real
+    // two-segment path and put two unrelated items in different waves for nothing.
+    const plan = '1. Match `\\d+/\\w+`, then `\\d+\\w+`, in `src/auth.ts`.\n';
+
+    expect(extractPlanPaths(plan)).toEqual(['src/auth.ts']);
+  });
+
+  it('does not invent a conflict between two items that quote the same regex', () => {
+    // The regression this guards: both Plans quote `\d+/\w+`, both would gain the path `d+/w+`,
+    // and two items touching entirely different files would then be serialised over a regex.
+    const items = [
+      item({
+        id: 'POMN-58',
+        order: 10,
+        repos: ['core'],
+        body: planSection('src/auth.ts', '\\d+/\\w+'),
+      }),
+      item({
+        id: 'POMN-59',
+        order: 20,
+        repos: ['core'],
+        body: planSection('src/billing.ts', '\\d+/\\w+'),
+      }),
+    ];
+
+    const plan = planOf(items, { core: true });
+
+    expect(plan.scopes['POMN-58']).toEqual({ kind: 'paths', paths: ['src/auth.ts'], source: 'plan' });
+    expect(plan.waves).toEqual([{ index: 1, itemIds: ['POMN-58', 'POMN-59'] }]);
+    expect(plan.conflicts).toEqual([]);
   });
 });

@@ -90,6 +90,33 @@ function useServerEvents() {
       source.addEventListener(type, refreshChat as EventListener);
     }
 
+    // The tracker's wave overlay (packages/web/src/tracker.tsx) needs its own query
+    // invalidated on exactly the events that can change a wave: an item's lifecycle, or
+    // the project's repo set. It is deliberately not folded into `refresh` above, which
+    // also fires on run.* and pipeline.* — a wave recompute shells out to git per repo,
+    // so it must not refetch on every one of those.
+    const refreshWaves = (event: MessageEvent<string>) => {
+      let projectId: string | undefined;
+      try {
+        projectId = (JSON.parse(event.data) as { projectId?: string }).projectId;
+      } catch {
+        // A malformed frame is not worth breaking the stream over.
+      }
+      if (projectId) void client.invalidateQueries({ queryKey: ['waves', projectId] });
+    };
+
+    for (const type of [
+      'item.created',
+      'item.changed',
+      'item.transitioned',
+      'item.removed',
+      'repo.added',
+      'repo.updated',
+      'repo.removed',
+    ]) {
+      source.addEventListener(type, refreshWaves as EventListener);
+    }
+
     return () => source.close();
   }, [client]);
 }

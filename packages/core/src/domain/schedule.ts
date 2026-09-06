@@ -9,7 +9,9 @@ import type { BacklogItem } from './item.js';
  * wave 1 has finished. Two items conflict when any of:
  *
  *   (a) one `dependsOn` the other, directly or through a chain;
- *   (b) they share a repo and that repo cannot give each run its own worktree;
+ *   (b) they share a repo and that repo cannot give each run its own worktree — and an item
+ *       naming no repos is read as being in every repo of the project, for this rule as much
+ *       as for the question of whether their paths are worth comparing;
  *   (c) their declared or inferred paths overlap — the same file, or one inside the other.
  *
  * Deterministic by construction: same backlog in, same waves out. Every ordering here is a
@@ -36,16 +38,38 @@ import type { BacklogItem } from './item.js';
  *   3. Each candidate is trimmed of wrapping prose punctuation: leading `( [ < " ' * _` and
  *      trailing `) ] > " ' * _ , ; : .`.
  *   4. A candidate is rejected outright when it contains whitespace (this is what stops
- *      `npm run typecheck` being read as a path), carries a URL scheme or contains `//`,
- *      starts with `-` `@` `#` or `+`, or contains a shell or glob metacharacter
- *      (`" ' \ $ & | ; < > ( ) { } [ ] * ? ! =`). That last rule is also why WHOLE_REPO_PATH
- *      can never collide with an extracted path.
- *   5. A surviving candidate is kept if it came from a backtick span and contains `/` or ends
- *      in a file extension (a `.` plus 1-8 alphanumerics); a bare word is kept only when it
- *      contains `/`.
- *   6. Survivors are normalised — backslashes to `/`, `.` and `..` segments resolved, a
- *      leading `./` or `/` dropped, a trailing `/` dropped, `//` collapsed — then deduplicated
- *      and sorted by codepoint.
+ *      `npm run typecheck` being read as a path), carries a URL scheme, starts with `-` `@`
+ *      `#` or `+`, or contains a shell or glob metacharacter
+ *      (`" ' $ & | ; < > ( ) { } [ ] * ? ! =`). That last rule is also why WHOLE_REPO_PATH
+ *      can never collide with an extracted path. A backslash is NOT a metacharacter here: on
+ *      Windows a Plan is as likely to say `packages\core\x.ts` as `packages/core/x.ts`, and
+ *      rejecting it made every such item silently whole-repo while `--explain` said it named
+ *      no paths.
+ *   4b. What survives must be repo-relative, because that is the only thing the paths it will
+ *      be compared against are. A drive-letter prefix (`C:\...`), a UNC prefix or `//`
+ *      anywhere, a leading `/`, and a `..` that is still there once the token is normalised
+ *      (`../packages/core/x.ts`) are all rejected rather than trimmed: the domain does not
+ *      know where any repo root is, so cutting an absolute path down to a relative one, or
+ *      deciding what sits above the root, would be a guess. The first three are tested on the
+ *      slash-folded token, so `\\host\share` cannot slip past the `//` test by spelling itself
+ *      with backslashes. A token that carries backslashes must also look like a Windows path to
+ *      keep them — no `/` mixed in, and every segment drawn only from ASCII letters, digits,
+ *      `_`, `.`, `~` and `-` — so `\d+/\w+` and `\d+\w+` stay prose. That segment rule is
+ *      narrower than what a filename may really hold: a segment carrying `@`, `+`, `%`, `#` or
+ *      a non-ASCII letter is turned away with them, and the item falls back to whole-repo.
+ *   4c. A trailing `:12` or `:12:5` is dropped before any of that, because prose cites a file
+ *      by line and the line number is not part of the file's name: `src/auth.ts:42` and
+ *      `src/auth.ts` have to reach the same path or the two items editing that file share a
+ *      wave. A `:` anywhere else rejects the token outright rather than being cut at, since
+ *      cutting would invent a shorter path that then falsely overlaps a real one.
+ *   5. Survivors are normalised — backslashes to `/`, `.` and `..` segments resolved, a
+ *      leading `./` or `/` dropped, a trailing `/` dropped, `//` collapsed.
+ *   6. A normalised candidate is kept only when it still contains `/`, whether it was
+ *      backticked or not. A single-segment token is not read as a path: `schedule.ts` could be
+ *      any file in the tree with that name, and `item.status`, `repo.id` or `Promise.all` are
+ *      not files at all. An item whose Plan names only bare tokens declares no paths and
+ *      falls through to the whole-repo reading, which over-conflicts rather than under-conflicts.
+ *   7. What is kept is deduplicated and sorted by codepoint.
  */
 
 /**
@@ -99,7 +123,12 @@ export interface WaveInput {
    * the item it points at is `done`, which cannot be checked from the ready set alone.
    */
   items: BacklogItem[];
-  /** `repoId -> can this repo give each run its own worktree`. A missing repo counts as false. */
+  /**
+   * `repoId -> can this repo give each run its own worktree`. A missing repo counts as false.
+   * Its keys also stand for the project's repos, which is what an item naming no repos is read
+   * as covering; the caller resolves it over every repo in the project whenever any ready item
+   * names none.
+   */
   repoIsolatesRuns: Record<string, boolean>;
 }
 
@@ -132,7 +161,6 @@ const TRAILING_PUNCTUATION = new Set([')', ']', '>', '"', "'", '*', '_', ',', ';
 const METACHARACTERS = new Set([
   '"',
   "'",
-  '\\',
   '$',
   '&',
   '|',
@@ -152,9 +180,21 @@ const METACHARACTERS = new Set([
   '`',
 ]);
 const URL_SCHEME = /^[A-Za-z][A-Za-z0-9+.-]*:\/\//;
-const FILE_EXTENSION = /\.[A-Za-z0-9]{1,8}$/;
 const FENCE = /^\s*(?:```|~~~)/;
 const BACKTICK_SPAN = /`([^`]+)`/g;
+/** `C:`, `d:` — a drive letter, in either the `C:\x` or the `C:/x` spelling. */
+const DRIVE_PREFIX = /^[A-Za-z]:/;
+/**
+ * What a segment of a backslash-written path may contain: ASCII letters, digits, `_`, `.`, `~`
+ * and `-`, and nothing else. Deliberately narrower than a real filename — it exists to tell
+ * `packages\core\schedule.ts` apart from a regex quoted in prose, and it pays for that by also
+ * turning away `@`, `+`, `%`, `#` and every non-ASCII letter. A backslash-written path holding
+ * one of those is not read as a path at all, so its item falls through to the whole-repo
+ * reading: over-conflicting, which costs a wave, not a collision.
+ */
+const BACKSLASH_PATH_SEGMENT = /^[A-Za-z0-9_.~-]+$/;
+/** A trailing `:12` or `:12:5` — how prose cites a line, and not part of the file's name. */
+const LINE_REFERENCE_SUFFIX = /:\d+(?::\d+)?$/;
 
 /** Strip wrapping prose punctuation. Repeated, so `("packages/core")` still reduces. */
 function trimPunctuation(raw: string): string {
@@ -170,19 +210,79 @@ function isRejected(token: string): boolean {
   if (token.length === 0) return true;
   if (/\s/.test(token)) return true;
   if (URL_SCHEME.test(token)) return true;
-  if (token.includes('//')) return true;
   const first = token[0] as string;
   if (first === '-' || first === '@' || first === '#' || first === '+') return true;
   for (const character of token) {
     if (METACHARACTERS.has(character)) return true;
   }
+
+  // A path read out of a Plan is repo-relative or it is nothing. A drive letter names a
+  // location no repo-relative path can ever equal, and nothing in the domain knows where a
+  // repo root sits, so there is no honest way to make it relative — deciding that the repo
+  // starts at `packages` would be a guess, and a wrong guess invents a path that then falsely
+  // overlaps a real one. Rejecting is the safe direction: an item left naming nothing reads
+  // as touching its whole repo, which over-conflicts.
+  if (DRIVE_PREFIX.test(token)) return true;
+
+  // The `//` and absolute tests run on the slash-folded form, so a backslash spelling cannot
+  // dodge them: `\\host\share\x.ts` is a UNC path, not the repo-relative `host/share/x.ts`
+  // that normalisation would otherwise turn it into.
+  const slashed = token.replace(/\\/g, '/');
+  if (slashed.startsWith('/')) return true;
+  if (slashed.includes('//')) return true;
+
+  // A `file:line` citation names the file, so the citation comes off before the rest of the
+  // token is judged — otherwise `src/auth.ts:42` and `src/auth.ts` are two unrelated paths and
+  // the two items editing that one file land in the same wave. This runs after the drive-letter
+  // test above, so it cannot reopen that hole: `C:\x\y.ts` has already been rejected, and
+  // `C:42` never reaches here either. Any surviving `:` rejects the token rather than being cut
+  // at — a truncated path would falsely overlap a real one, whereas a rejected token leaves the
+  // item naming nothing, which reads as its whole repo and over-conflicts.
+  const bare = token.replace(LINE_REFERENCE_SUFFIX, '');
+  if (bare.includes(':')) return true;
+
+  // A `..` still standing after normalisation points above the repo root, and where that root
+  // sits is exactly what the domain does not know. `../packages/core/x.ts` and
+  // `packages/core/x.ts` may well be one file; kept as written they overlap nothing, which is
+  // the unsafe direction, so the token is refused and its item reads as whole-repo instead.
+  // An interior `..` that resolves inside the repo (`a/b/../c` -> `a/c`) is unaffected.
+  if (escapesRepoRoot(normalisePathToken(bare))) return true;
+
+  // Backslashes are accepted because a Windows Plan writes `packages\core\x.ts`, not because
+  // any escaped prose is a path claim. Two things mark a backslash that is not a separator: it
+  // sits alongside `/` in one token (`\d+/\w+`), or it delimits something no file is named
+  // (`\d+\w+`). Either way the token is a quoted regex, and reading it as a path serialises
+  // two items into different waves for nothing.
+  if (bare.includes('\\')) {
+    if (bare.includes('/')) return true;
+    const segments = bare.split('\\').filter((segment) => segment.length > 0);
+    if (!segments.every((segment) => BACKSLASH_PATH_SEGMENT.test(segment))) return true;
+  }
+
   return false;
+}
+
+/** A path that still climbs above the repo root, and so cannot be placed without knowing it. */
+function escapesRepoRoot(path: string): boolean {
+  return path === '..' || path.startsWith('../');
+}
+
+/**
+ * The form a token is compared in: line citation dropped, then normalised. `undefined` when the
+ * token names nothing comparable — empty, or escaping the repo root. Every path that reaches
+ * `pathsOverlap` goes through here, so the two spellings of one file cannot arrive apart.
+ */
+function comparablePath(raw: string): string | undefined {
+  const path = normalisePathToken(raw.replace(LINE_REFERENCE_SUFFIX, ''));
+  if (path.length === 0 || escapesRepoRoot(path)) return undefined;
+  return path;
 }
 
 /**
  * Canonical form of a path token: `/` separators, no `.`/`..` segments, no leading `./` or `/`,
  * no trailing `/`. A `..` with nothing above it to pop is kept, so the token stays honest
- * rather than silently becoming a different path.
+ * rather than silently becoming a different path — `comparablePath` is what then refuses it,
+ * because a path above the repo root cannot be compared with one below it.
  */
 export function normalisePathToken(raw: string): string {
   const slashed = raw.replace(/\\/g, '/');
@@ -221,28 +321,27 @@ export function extractPlanPaths(plan: string): string[] {
     }
     if (inFence) continue;
 
-    const quoted: string[] = [];
+    const candidates: string[] = [];
     BACKTICK_SPAN.lastIndex = 0;
     let match = BACKTICK_SPAN.exec(line);
     while (match !== null) {
-      quoted.push(match[1] as string);
+      candidates.push(match[1] as string);
       match = BACKTICK_SPAN.exec(line);
     }
 
-    for (const span of quoted) {
-      const token = trimPunctuation(span);
-      if (isRejected(token)) continue;
-      // A backtick span is already a claim that this is code, so a bare filename counts.
-      if (token.includes('/') || FILE_EXTENSION.test(token)) kept.push(normalisePathToken(token));
-    }
+    // The backtick spans are blanked out before the words are taken, so the insides of
+    // `npm run typecheck` are never re-read as three separate words.
+    for (const word of line.replace(BACKTICK_SPAN, ' ').split(/\s+/)) candidates.push(word);
 
-    const bare = line.replace(BACKTICK_SPAN, ' ');
-    for (const word of bare.split(/\s+/)) {
-      const token = trimPunctuation(word);
+    for (const candidate of candidates) {
+      const token = trimPunctuation(candidate);
       if (isRejected(token)) continue;
-      // Unquoted prose needs a separator to be worth believing — otherwise every sentence
-      // ending in a word with a dot in it becomes a file.
-      if (token.includes('/')) kept.push(normalisePathToken(token));
+      // Rule 6: a separator is what makes a token a path claim, and backticks do not change
+      // that. A bare `schedule.ts` names no directory and `item.status` names no file at all;
+      // both are left out, so the item falls through to the whole-repo reading rather than
+      // being credited with a narrow scope it never claimed.
+      const path = comparablePath(token);
+      if (path !== undefined && path.includes('/')) kept.push(path);
     }
   }
 
@@ -254,7 +353,13 @@ export function extractPlanPaths(plan: string): string[] {
  * parsed; otherwise the whole repo.
  */
 export function itemScope(item: BacklogItem): PathScope {
-  const declared = sortedUnique(item.touches.map(normalisePathToken));
+  // Declared paths go through the same reading as inferred ones: a `touches` entry written as
+  // `src/auth.ts:42` or `../src/auth.ts` has to reach the same path the item next door reached
+  // by writing it plainly, or the two share a wave and one file. An entry that reaches nothing
+  // is dropped; an item left with none falls through to the Plan and then to whole-repo.
+  const declared = sortedUnique(
+    item.touches.map(comparablePath).filter((path): path is string => path !== undefined),
+  );
   if (declared.length > 0) return { kind: 'paths', paths: declared, source: 'touches' };
 
   const plan = parseSections(item.body)[SECTION_PLAN] ?? '';
@@ -282,6 +387,33 @@ export function pathsOverlap(a: string, b: string): boolean {
 // ---------------------------------------------------------------------------
 
 /**
+ * Every id reachable from `roots` by following `dependsOn`, the roots included. Membership only —
+ * the result is a set that is the same whatever order the walk took, so nothing downstream reads
+ * an ordering out of it.
+ *
+ * `traverse` decides whether to walk *through* an id; an id it refuses is still in the result,
+ * as a leaf. Cycle-safe either way, because `seen` is checked before the frontier grows.
+ */
+function reachableFrom(
+  roots: Iterable<string>,
+  direct: Map<string, string[]>,
+  traverse: (id: string) => boolean = () => true,
+): Set<string> {
+  const seen = new Set<string>();
+  const frontier = [...roots];
+
+  while (frontier.length > 0) {
+    const id = frontier.pop() as string;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    if (!traverse(id)) continue;
+    for (const dependency of direct.get(id) ?? []) frontier.push(dependency);
+  }
+
+  return seen;
+}
+
+/**
  * Every id each item transitively depends on, sorted. Ids naming items that do not exist are
  * kept as leaves — an unknown dependency is unsatisfied, not absent.
  *
@@ -303,7 +435,8 @@ export function dependencyClosure(items: BacklogItem[]): Map<string, string[]> {
       const from = stack.indexOf(id);
       const cycle = [...stack.slice(from === -1 ? 0 : from), id];
       throw new ValidationError(
-        `dependency cycle: ${cycle.join(' -> ')} — no wave can contain these items`,
+        `dependency cycle: ${cycle.join(' -> ')} — each waits on the next, so none can ever ` +
+          `start; drop one of those dependsOn links to break it`,
         { cycle },
       );
     }
@@ -364,22 +497,52 @@ function dependencyChain(direct: Map<string, string[]>, from: string, to: string
 // Conflicts
 // ---------------------------------------------------------------------------
 
-/** Empty `repos` means the whole project, so it intersects everything. */
-function reposCouldCollide(a: BacklogItem, b: BacklogItem): boolean {
-  if (a.repos.length === 0 || b.repos.length === 0) return true;
-  const mine = new Set(a.repos);
-  return b.repos.some((repo) => mine.has(repo));
+/**
+ * The repos an item is read as working in. Empty `repos` means the whole project — one reading,
+ * used by both rules below. Reading it as "everything" for collision but as "nothing" for the
+ * shared-repo rule is what let an item naming no repos share a wave with an item in a repo that
+ * cannot isolate runs, and both then wrote into one checkout.
+ *
+ * `projectRepos` is sorted, so the intersection below is sorted without re-sorting.
+ */
+function effectiveRepos(item: BacklogItem, projectRepos: string[]): string[] {
+  if (item.repos.length === 0) return projectRepos;
+  return sortedUnique(item.repos);
 }
 
-function sharedRepos(a: BacklogItem, b: BacklogItem): string[] {
-  const mine = new Set(a.repos);
-  return [...new Set(b.repos.filter((repo) => mine.has(repo)))].sort(compareCodepoint);
+/**
+ * Every repo the plan knows about: the ones the isolation map was resolved for — which is the
+ * whole project whenever any ready item names none — plus any a candidate names. Sorted by
+ * codepoint, so nothing downstream depends on the map's key order.
+ */
+function projectReposOf(repoIsolatesRuns: Record<string, boolean>, candidates: BacklogItem[]): string[] {
+  return sortedUnique([...Object.keys(repoIsolatesRuns), ...candidates.flatMap((item) => item.repos)]);
+}
+
+/**
+ * Whether the two could touch one checkout at all. Empty on either side means the plan has no
+ * repo information to go on — no isolation map and no repos named — and the conservative answer
+ * is yes, exactly as before this took a project repo list.
+ */
+function reposCouldCollide(a: string[], b: string[]): boolean {
+  if (a.length === 0 || b.length === 0) return true;
+  const mine = new Set(a);
+  return b.some((repo) => mine.has(repo));
+}
+
+/** The repos both work in, sorted. Both sides are already the effective sets. */
+function sharedRepos(a: string[], b: string[]): string[] {
+  const mine = new Set(a);
+  return b.filter((repo) => mine.has(repo));
 }
 
 function pathOverlapReasons(a: PathScope, b: PathScope): ConflictReason[] {
   if (a.kind === 'whole-repo' && b.kind === 'whole-repo') {
     return [{ kind: 'path_overlap', path: WHOLE_REPO_PATH, otherPath: WHOLE_REPO_PATH }];
   }
+  // One edge, not one per path: the whole repo covers every path the other side names, so the
+  // path recorded here is only the first of them. `describeConflict` words it as an example
+  // rather than as the file they collide on.
   if (a.kind === 'whole-repo') {
     const other = b.kind === 'paths' ? (b.paths[0] ?? WHOLE_REPO_PATH) : WHOLE_REPO_PATH;
     return [{ kind: 'path_overlap', path: WHOLE_REPO_PATH, otherPath: other }];
@@ -404,8 +567,9 @@ function pathOverlapReasons(a: PathScope, b: PathScope): ConflictReason[] {
 
 /**
  * Group the `ready` items into waves. `items` is the whole backlog; only `ready` items are
- * candidates, and only a `done` dependency counts as satisfied — `cancelled` blocks, because
- * an item whose prerequisite was cancelled needs a human, not a launch.
+ * candidates, and only a `done` dependency counts as satisfied — `cancelled` blocks forever,
+ * because an item whose prerequisite was cancelled needs a human, not a launch. What a cancelled
+ * item itself depended on is not walked: it is as settled as a `done` one.
  *
  * The result is checked with `assertWavesDisjoint` before it is returned.
  */
@@ -413,11 +577,43 @@ export function planWaves(input: WaveInput): WavePlan {
   const { items, repoIsolatesRuns } = input;
 
   const byId = new Map(items.map((item) => [item.id, item]));
-  const closure = dependencyClosure(items);
   const direct = new Map(items.map((item) => [item.id, [...item.dependsOn]]));
 
   const candidates = items.filter((item) => item.status === 'ready').sort(compareCandidates);
   const candidateIds = new Set(candidates.map((item) => item.id));
+
+  // The closure covers the candidates and what they still wait on, and nothing else. `items` is
+  // the whole backlog, so building it over all of them meant one cycle between two long-finished
+  // items threw and took the whole project's plan with it.
+  //
+  // The walk stops at a settled item — `done` or `cancelled` — and the closure treats it as a
+  // leaf: a settled item's own dependencies are no longer anyone's business, so they are neither
+  // a reason to hold a candidate back nor a graph this command has to be able to order. Without
+  // that, `ready -> done -> done -> back again` reached a cycle no item being scheduled was in,
+  // and threw over history.
+  //
+  // `cancelled` is a leaf for the same reason `done` is, and for the opposite conclusion. A
+  // cancelled prerequisite is dead, not pending: whatever it was itself waiting on will never
+  // be worked, so a cycle sitting behind it is history too and must not take the project's plan
+  // down. Being a leaf does NOT make it satisfied — the test below is `status !== 'done'`, so a
+  // candidate that depends on a cancelled item is still `blocked`, with that cancelled id in its
+  // `waitingOn`. That dependency can never be satisfied, and saying so is the honest answer;
+  // throwing over a cycle behind it prints nothing for the whole project instead.
+  //
+  // A cycle a candidate reaches through UNFINISHED work still throws — an item whose
+  // prerequisite can never finish must never be scheduled.
+  const isSettled = (id: string): boolean => {
+    const status = byId.get(id)?.status;
+    return status === 'done' || status === 'cancelled';
+  };
+  const relevant = reachableFrom(candidateIds, direct, (id) => !isSettled(id));
+  const closure = dependencyClosure(
+    items
+      .filter((item) => relevant.has(item.id))
+      .map((item) => (isSettled(item.id) ? { ...item, dependsOn: [] } : item)),
+  );
+
+  const projectRepos = projectReposOf(repoIsolatesRuns, candidates);
 
   const scopes: Record<string, PathScope> = {};
   for (const item of candidates) scopes[item.id] = itemScope(item);
@@ -461,13 +657,15 @@ export function planWaves(input: WaveInput): WavePlan {
       // A repo that cannot hand each run its own worktree serialises everything in it. Under
       // `noUncheckedIndexedAccess` the lookup is `boolean | undefined`, so `!== true` is the
       // only safe test — a repo missing from the map counts as not isolating.
-      for (const repo of sharedRepos(a, b)) {
+      const reposA = effectiveRepos(a, projectRepos);
+      const reposB = effectiveRepos(b, projectRepos);
+      for (const repo of sharedRepos(reposA, reposB)) {
         if (repoIsolatesRuns[repo] !== true) reasons.push({ kind: 'shared_repo', repo });
       }
 
       // Identical-looking paths in two different codebases are not the same file, so paths are
       // only compared when the items could collide at all.
-      if (reposCouldCollide(a, b)) {
+      if (reposCouldCollide(reposA, reposB)) {
         const scopeA = scopes[a.id] as PathScope;
         const scopeB = scopes[b.id] as PathScope;
         reasons.push(...pathOverlapReasons(scopeA, scopeB));
@@ -567,11 +765,13 @@ export function describeConflict(reason: ConflictReason): string {
       if (path === WHOLE_REPO_PATH && otherPath === WHOLE_REPO_PATH) {
         return 'neither names any paths, so both are read as touching their whole repo';
       }
+      // Deliberately not "which covers <path>": the other side may name a dozen paths and the
+      // whole repo covers all of them, so naming one as if it were the collision would be a lie.
       if (path === WHOLE_REPO_PATH) {
-        return `one names no paths and is read as touching its whole repo, which covers ${otherPath}`;
+        return `one names no paths and is read as touching its whole repo, which covers everything the other names, ${otherPath} among them`;
       }
       if (otherPath === WHOLE_REPO_PATH) {
-        return `one names no paths and is read as touching its whole repo, which covers ${path}`;
+        return `one names no paths and is read as touching its whole repo, which covers everything the other names, ${path} among them`;
       }
       if (path === otherPath) return `both touch ${path}`;
       return path.length < otherPath.length

@@ -375,6 +375,48 @@ describe('http api', () => {
     await app.close();
   });
 
+  it('serialises an item that names no repos against one that names the only repo', async () => {
+    const app = await createApp(harness, { webRoot: join(harness.dir, 'no-web') });
+
+    const ready = async (
+      title: string,
+      repos: string[],
+      path: string,
+    ): Promise<string> => {
+      const created = await harness.backlog.create('acme', { title, repos });
+      await harness.backlog.update('acme', created.id, {
+        body: [
+          '## Problem\n\nSupport load is high.\n',
+          '## Acceptance criteria\n\n- [ ] it works\n',
+          `## Plan\n\n1. Edit \`${path}\`\n`,
+        ].join('\n'),
+      });
+      await harness.backlog.transition('acme', created.id, 'specced');
+      await harness.backlog.transition('acme', created.id, 'ready');
+      return created.id;
+    };
+
+    // Distinct files, so their paths cannot be what separates them. `everywhere` names no repos,
+    // which means every repo in the project — including `api`, which the harness's fake git
+    // reports as unable to give each run its own worktree.
+    const everywhere = await ready('Rename the log fields', [], 'src/auth.ts');
+    const inApi = await ready('Billing', ['api'], 'src/billing.ts');
+
+    const response = await app.inject({ method: 'GET', url: '/api/projects/acme/items-waves' });
+    expect(response.statusCode).toBe(200);
+
+    const plan = response.json().plan;
+    expect(plan.waves).toEqual([
+      { index: 1, itemIds: [everywhere] },
+      { index: 2, itemIds: [inApi] },
+    ]);
+    expect(plan.conflicts).toEqual([
+      { a: everywhere, b: inApi, reasons: [{ kind: 'shared_repo', repo: 'api' }] },
+    ]);
+
+    await app.close();
+  });
+
   it('returns an ETag and honours If-Match', async () => {
     const app = await createApp(harness, { webRoot: join(harness.dir, 'no-web') });
     const item = await harness.backlog.create('acme', { title: 'x' });

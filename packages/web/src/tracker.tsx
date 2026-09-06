@@ -50,11 +50,18 @@ export function TrackerPage() {
   });
 
   // A nice-to-have overlay on top of the item list above: if it is loading or errors,
-  // the cards render exactly as they would without it.
+  // the cards render exactly as they would without it. Its query key is deliberately not
+  // a prefix of ['items', projectId] — that key gets invalidated by the SSE handler in
+  // main.tsx on every run/pipeline event, and each refetch here shells out to git across
+  // every in-scope repo. Kept fresh instead by a targeted invalidation in that same
+  // app-wide handler, for exactly the events that can change a wave: an item's lifecycle,
+  // or the project's repo set.
   const waves = useQuery({
-    queryKey: ['items', selected ?? '', 'waves'],
+    queryKey: ['waves', selected ?? ''],
     queryFn: () => api.listWaves(selected!),
     enabled: selected !== null,
+    staleTime: 60_000,
+    refetchOnWindowFocus: false,
   });
 
   const waveByItem = new Map<string, number>();
@@ -154,7 +161,7 @@ export function TrackerPage() {
                         className="tag warn"
                         title={`waiting on ${waitingOnByItem.get(item.id)!.join(', ')}`}
                       >
-                        blocked
+                        waiting
                       </span>
                     )}
                   </div>

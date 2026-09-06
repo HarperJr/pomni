@@ -108,6 +108,9 @@ export const PipelineRunSchema = z.object({
   startedAt: z.string(),
   endedAt: z.string().nullable(),
   durationMs: z.number().nullable(),
+  /** Every token this run spent, cache included. The sum of its steps. */
+  inputTokens: z.number().default(0),
+  outputTokens: z.number().default(0),
   costUsd: z.number().nullable(),
 });
 

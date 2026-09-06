@@ -481,6 +481,9 @@ export interface PipelineRun {
   startedAt: string;
   endedAt: string | null;
   durationMs: number | null;
+  /** Everything this run spent, cache included. */
+  inputTokens: number;
+  outputTokens: number;
   costUsd: number | null;
 }
 

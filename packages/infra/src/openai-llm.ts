@@ -88,7 +88,7 @@ export class OpenAiCompatibleLlm implements LlmPort {
       },
     }));
 
-    const total: LlmUsage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0 };
+    const total: LlmUsage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 };
     const maxTurns = request.maxTurns ?? DEFAULT_MAX_TURNS;
 
     let turns = 0;
@@ -250,6 +250,7 @@ function usageOf(response: ChatResponse): LlmUsage {
     inputTokens: response.usage?.prompt_tokens ?? 0,
     outputTokens: response.usage?.completion_tokens ?? 0,
     cacheReadTokens: response.usage?.prompt_tokens_details?.cached_tokens ?? 0,
+    cacheCreationTokens: 0,
   };
 }
 
@@ -257,6 +258,7 @@ function add(total: LlmUsage, next: LlmUsage): void {
   total.inputTokens += next.inputTokens;
   total.outputTokens += next.outputTokens;
   total.cacheReadTokens += next.cacheReadTokens;
+  total.cacheCreationTokens += next.cacheCreationTokens;
 }
 
 function safeParse(raw: string): Record<string, unknown> {

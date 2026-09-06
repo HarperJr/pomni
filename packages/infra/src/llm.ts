@@ -66,7 +66,7 @@ export class AnthropicLlm implements LlmPort {
       input_schema: tool.inputSchema as Anthropic.Tool.InputSchema,
     }));
 
-    const total: LlmUsage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0 };
+    const total: LlmUsage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 };
     const maxTurns = request.maxTurns ?? DEFAULT_MAX_TURNS;
 
     let turns = 0;
@@ -199,6 +199,7 @@ function usageOf(usage: Anthropic.Usage): LlmUsage {
     inputTokens: usage.input_tokens ?? 0,
     outputTokens: usage.output_tokens ?? 0,
     cacheReadTokens: usage.cache_read_input_tokens ?? 0,
+    cacheCreationTokens: usage.cache_creation_input_tokens ?? 0,
   };
 }
 
@@ -206,6 +207,7 @@ function add(total: LlmUsage, next: LlmUsage): void {
   total.inputTokens += next.inputTokens;
   total.outputTokens += next.outputTokens;
   total.cacheReadTokens += next.cacheReadTokens;
+  total.cacheCreationTokens += next.cacheCreationTokens;
 }
 
 /** Turn an SDK error into something a user can act on. */

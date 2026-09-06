@@ -6,6 +6,7 @@ import {
   type Artifact,
   type ContextFile,
   type Question,
+  type PipelineRun,
   type PipelineRunDetail,
   type PipelineStep,
   type StepStatus,
@@ -75,6 +76,8 @@ export function PipelinePanel({ projectId }: { projectId: string }) {
           Run a task
         </button>
       </div>
+
+      <Spend runs={runs.data ?? []} />
 
       {(runs.data ?? []).length === 0 ? (
         <div className="empty">
@@ -565,8 +568,6 @@ export function ConsolePage() {
         )}
       </div>
 
-      <Actions steps={data.steps} />
-
       <div className="console">
         <div className="card console-tree">
           <div className="card-head">
@@ -597,6 +598,7 @@ export function ConsolePage() {
                     </span>
                   )}
                   <div className="dim truncate step-task">{firstLine(step.task)}</div>
+                  <StepActions step={step} />
                   {step.unmet.map((entry, index) => (
                     <div className="unmet" key={index}>
                       {entry}
@@ -700,34 +702,70 @@ export function ConsolePage() {
  * The transcript is what it said; this is what it ran. A session that spent ten minutes and
  * reported one paragraph is unreadable without it — you cannot tell whether it looked.
  */
-function Actions({ steps }: { steps: PipelineStep[] }) {
-  const done = steps.filter((step) => step.actions.length > 0);
-  if (done.length === 0) return null;
+/**
+ * What one agent ran, folded into that agent.
+ *
+ * It used to be one list of everything, under everything, which grew with the run until the
+ * page was mostly other agents' shell history. Each agent's own commands belong to it.
+ */
+function StepActions({ step }: { step: PipelineStep }) {
+  if (step.actions.length === 0) return null;
 
   return (
-    <div className="card">
-      <div className="card-head">
-        What the agents ran
-        <span className="dim" style={{ fontWeight: 400 }}>
-          {done.reduce((total, step) => total + step.actions.length, 0)}
-        </span>
-      </div>
-      {done.map((step) => (
-        <div className="row" key={step.id}>
-          <div className="grow">
-            <div className="step-name">{step.agentName}</div>
-            {step.actions.map((action, index) => (
-              <div className="action" key={index}>
-                <span className={`tag action-${kindOf(action.tool)}`}>{action.tool}</span>
-                <span className="mono dim truncate grow">{action.detail}</span>
-              </div>
-            ))}
-          </div>
+    <details className="step-actions">
+      <summary className="dim">
+        {step.actions.length} command{step.actions.length === 1 ? '' : 's'}
+      </summary>
+      {step.actions.map((action, index) => (
+        <div className="action" key={index}>
+          <span className={`tag action-${kindOf(action.tool)}`}>{action.tool}</span>
+          <span className="mono dim truncate grow">{action.detail}</span>
         </div>
       ))}
-    </div>
+    </details>
   );
 }
+
+/** Tokens, in the shape a person reads: 1 234 567. */
+function tokens(value: number): string {
+  return value.toLocaleString('en-US').replace(/,/g, ' ');
+}
+
+/**
+ * How much each recent run cost, as a bar against the heaviest.
+ *
+ * The question is not what one run cost, it is whether they are getting worse — so the shape
+ * of the column matters more than any single number.
+ */
+function Spend({ runs }: { runs: PipelineRun[] }) {
+  const recent = runs.filter((run) => run.inputTokens + run.outputTokens > 0).slice(0, 10);
+  if (recent.length === 0) return null;
+
+  const peak = Math.max(...recent.map((run) => run.inputTokens + run.outputTokens));
+  const total = recent.reduce((sum, run) => sum + run.inputTokens + run.outputTokens, 0);
+  const cost = recent.reduce((sum, run) => sum + (run.costUsd ?? 0), 0);
+
+  return (
+    <details className="spend">
+      <summary>
+        <strong>{tokens(total)}</strong> tokens over {recent.length} runs
+        {cost > 0 && <span className="dim"> · ${cost.toFixed(2)}</span>}
+      </summary>
+      {[...recent].reverse().map((run) => {
+        const spent = run.inputTokens + run.outputTokens;
+        return (
+          <div className="spend-row" key={run.id}>
+            <span className="dim mono spend-when">{run.startedAt.slice(5, 16).replace('T', ' ')}</span>
+            <span className="spend-bar" style={{ width: `${Math.max(2, (spent / peak) * 100)}%` }} />
+            <span className="dim mono spend-n">{tokens(spent)}</span>
+            <span className="dim truncate grow">{firstLine(run.task)}</span>
+          </div>
+        );
+      })}
+    </details>
+  );
+}
+
 
 /** Shell, file, or something the agent reached for outside itself. */
 function kindOf(tool: string): string {

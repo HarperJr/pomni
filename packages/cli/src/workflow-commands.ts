@@ -552,6 +552,83 @@ ${item.body}`;
     });
 
   task
+    .command('spend')
+    .description('what the pipelines have been costing, run by run')
+    .option('-p, --project <id>', 'project')
+    .option('-n, --limit <n>', 'how many runs', '15')
+    .option('--by-agent', 'break the total down by agent instead')
+    .action(async (flags: { project?: string; limit: string; byAgent?: boolean }) => {
+      const container = await open();
+      const runs = (
+        await container.pipelines.list({
+          projectId: flags.project ?? (await defaultProject()),
+          limit: Number(flags.limit),
+        })
+      ).reverse();
+
+      if (runs.length === 0) {
+        console.log(style.dim('nothing has run yet'));
+        return;
+      }
+
+      const detailed = await Promise.all(runs.map((run) => container.pipelines.get(run.id)));
+
+      if (flags.byAgent) {
+        const byAgent = new Map<string, { tokens: number; cost: number; steps: number }>();
+
+        for (const run of detailed) {
+          for (const step of run.steps) {
+            const at = byAgent.get(step.agentName) ?? { tokens: 0, cost: 0, steps: 0 };
+            at.tokens += step.inputTokens + step.outputTokens;
+            at.cost += step.costUsd ?? 0;
+            at.steps += 1;
+            byAgent.set(step.agentName, at);
+          }
+        }
+
+        const rows = [...byAgent.entries()].sort((a, b) => b[1].tokens - a[1].tokens);
+        console.log(
+          table(
+            rows.map(([name, at]) => [
+              name,
+              String(at.steps),
+              thousands(at.tokens),
+              at.cost ? `$${at.cost.toFixed(2)}` : style.dim('—'),
+            ]),
+            ['AGENT', 'STEPS', 'TOKENS', 'COST'],
+          ),
+        );
+        return;
+      }
+
+      // A bar per run, scaled to the largest, so the shape of the spend is visible without
+      // reading the numbers. This is the question people actually ask: is it getting worse?
+      const totals = detailed.map((run) => ({
+        run,
+        tokens: run.steps.reduce((sum, step) => sum + step.inputTokens + step.outputTokens, 0),
+      }));
+      const peak = Math.max(...totals.map((entry) => entry.tokens), 1);
+
+      for (const { run, tokens } of totals) {
+        const bar = '█'.repeat(Math.max(1, Math.round((tokens / peak) * 28)));
+        const cost = run.costUsd ? `$${run.costUsd.toFixed(2)}` : style.dim('—');
+        console.log(
+          `${style.dim(run.startedAt.slice(5, 16).replace('T', ' '))}  ${style.cyan(bar)} ` +
+            `${thousands(tokens).padStart(9)}  ${cost.padStart(7)}  ` +
+            `${style.dim(run.steps.length + ' steps')}  ${truncate(run.task, 34)}`,
+        );
+      }
+
+      const tokens = totals.reduce((sum, entry) => sum + entry.tokens, 0);
+      const cost = detailed.reduce((sum, run) => sum + (run.costUsd ?? 0), 0);
+      console.log();
+      console.log(
+        `${style.bold(thousands(tokens))} tokens across ${totals.length} runs` +
+          (cost ? `, ${style.bold('$' + cost.toFixed(2))}` : ''),
+      );
+    });
+
+  task
     .command('questions')
     .description('what the running pipelines are waiting to be told')
     .option('-p, --project <id>', 'project')
@@ -868,4 +945,9 @@ function split(value: string | undefined): string[] | undefined {
     .split(',')
     .map((entry) => entry.trim())
     .filter((entry) => entry.length > 0);
+}
+
+/** 1234567 -> 1 234 567. Long token counts are unreadable without it. */
+function thousands(value: number): string {
+  return value.toLocaleString('en-US').replace(/,/g, ' ');
 }

@@ -405,7 +405,7 @@ export class FakeLlm implements LlmPort {
     return {
       text: this.replies.shift() ?? this.reply,
       stopReason: 'end_turn',
-      usage: { inputTokens: 10, outputTokens: 20, cacheReadTokens: 0 },
+      usage: { inputTokens: 10, outputTokens: 20, cacheReadTokens: 0, cacheCreationTokens: 0 },
       turns: 1,
     };
   }
@@ -428,7 +428,7 @@ export class FakeLlm implements LlmPort {
     return {
       text: this.reply,
       stopReason: 'end_turn',
-      usage: { inputTokens: 10, outputTokens: 20, cacheReadTokens: 0 },
+      usage: { inputTokens: 10, outputTokens: 20, cacheReadTokens: 0, cacheCreationTokens: 0 },
       turns: turns + 1,
     };
   }

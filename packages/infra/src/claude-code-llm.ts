@@ -118,6 +118,7 @@ interface ClaudeResult {
     input_tokens?: number;
     output_tokens?: number;
     cache_read_input_tokens?: number;
+    cache_creation_input_tokens?: number;
   };
 }
 
@@ -217,8 +218,11 @@ export class ClaudeCodeLlm implements LlmPort {
           inputTokens: parsed.usage?.input_tokens ?? 0,
           outputTokens: parsed.usage?.output_tokens ?? 0,
           cacheReadTokens: parsed.usage?.cache_read_input_tokens ?? 0,
+          cacheCreationTokens: parsed.usage?.cache_creation_input_tokens ?? 0,
         },
         turns: parsed.num_turns ?? 1,
+        // The CLI hands us the cost on every result frame; it used to land nowhere.
+        costUsd: parsed.total_cost_usd,
       };
     } finally {
       for (const file of scratch) await rm(file, { force: true }).catch(() => undefined);

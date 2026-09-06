@@ -213,6 +213,8 @@ export class PipelineService {
         startedAt: this.clock.iso(),
         endedAt: null,
         durationMs: null,
+        inputTokens: 0,
+        outputTokens: 0,
         costUsd: null,
       };
 
@@ -441,6 +443,7 @@ export class PipelineService {
         result: result.answer,
         endedAt: this.clock.iso(),
         durationMs: Date.now() - started,
+        ...(await this.tally(run.id)),
         costUsd: cost || null,
       };
 
@@ -483,6 +486,7 @@ export class PipelineService {
         error: message,
         endedAt: this.clock.iso(),
         durationMs: Date.now() - started,
+        ...(await this.tally(run.id)),
         costUsd: cost || null,
       };
 
@@ -589,6 +593,7 @@ export class PipelineService {
     const actions: PipelineStep['actions'] = [];
     const transcript: string[] = [`# Task\n\n${task}`];
     let inputTokens = 0;
+    let stepCost = 0;
     let outputTokens = 0;
 
     try {
@@ -662,8 +667,15 @@ export class PipelineService {
           maxTokens: 16_000,
         });
 
-        inputTokens += result.usage.inputTokens;
+        // Cache reads and writes are most of the real volume and were being dropped, so
+        // a 21-step run reported 240 input tokens. They are input; count them.
+        inputTokens +=
+          result.usage.inputTokens +
+          result.usage.cacheReadTokens +
+          result.usage.cacheCreationTokens;
         outputTokens += result.usage.outputTokens;
+        stepCost += result.costUsd ?? 0;
+        addCost(result.costUsd ?? 0);
         transcript.push(`\n# Reply (round ${round + 1})\n\n${result.text}`);
 
         history.push({ role: 'assistant', content: result.text });
@@ -840,6 +852,7 @@ export class PipelineService {
         durationMs: Date.now() - startedAt,
         inputTokens,
         outputTokens,
+        costUsd: stepCost || null,
       };
 
       await this.store.updateStep(step.id, done);
@@ -864,6 +877,7 @@ export class PipelineService {
         durationMs: Date.now() - startedAt,
         inputTokens,
         outputTokens,
+        costUsd: stepCost || null,
       };
 
       await this.store.updateStep(step.id, failed);
@@ -1208,6 +1222,15 @@ export class PipelineService {
       runId: question.runId,
       questionId: question.id,
     });
+  }
+
+  /** What this run spent, added up from its steps. */
+  private async tally(runId: string): Promise<{ inputTokens: number; outputTokens: number }> {
+    const steps = await this.store.steps(runId);
+    return {
+      inputTokens: steps.reduce((sum, step) => sum + step.inputTokens, 0),
+      outputTokens: steps.reduce((sum, step) => sum + step.outputTokens, 0),
+    };
   }
 
   private async moveItem(run: PipelineRun, to: string, reason: string): Promise<string | null> {

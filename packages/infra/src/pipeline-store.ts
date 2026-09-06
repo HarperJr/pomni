@@ -84,7 +84,7 @@ export class SqlitePipelineStore implements PipelineStore {
       `UPDATE pipeline_runs
          SET status = ?, pid = ?, result = ?, error = ?, gate_status = ?, gate_summary = ?,
              item_status = ?, outcome = ?, unmet = ?, ended_at = ?, duration_ms = ?,
-             cost_usd = ?
+             input_tokens = ?, output_tokens = ?, cost_usd = ?
        WHERE id = ?`,
     ).run(
       run.status,
@@ -98,6 +98,8 @@ export class SqlitePipelineStore implements PipelineStore {
       JSON.stringify(run.unmet),
       run.endedAt,
       run.durationMs,
+      run.inputTokens,
+      run.outputTokens,
       run.costUsd,
       id,
     );
@@ -338,6 +340,8 @@ interface RunRow {
   started_at: string;
   ended_at: string | null;
   duration_ms: number | null;
+  input_tokens: number | null;
+  output_tokens: number | null;
   cost_usd: number | null;
 }
 
@@ -388,6 +392,8 @@ function toRun(row: RunRow): PipelineRun {
     startedAt: row.started_at,
     endedAt: row.ended_at,
     durationMs: row.duration_ms,
+    inputTokens: row.input_tokens ?? 0,
+    outputTokens: row.output_tokens ?? 0,
     costUsd: row.cost_usd,
   };
 }
@@ -565,6 +571,9 @@ const MIGRATIONS: string[] = [
   `ALTER TABLE pipeline_questions ADD COLUMN attachments TEXT NOT NULL DEFAULT '[]';`,
 
   `ALTER TABLE pipeline_steps ADD COLUMN actions TEXT NOT NULL DEFAULT '[]';`,
+
+  `ALTER TABLE pipeline_runs ADD COLUMN input_tokens INTEGER NOT NULL DEFAULT 0;
+   ALTER TABLE pipeline_runs ADD COLUMN output_tokens INTEGER NOT NULL DEFAULT 0;`,
 
   `ALTER TABLE pipeline_runs ADD COLUMN pid INTEGER;`,
 ];
