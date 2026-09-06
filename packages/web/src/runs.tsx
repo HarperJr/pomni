@@ -182,7 +182,7 @@ export function RunPage() {
     <>
       <div className="page-head">
         <div>
-          <Link className="crumb" to={`/p/${projectId}`}>
+          <Link className="crumb" to={`/p/${projectId}?block=checks`}>
             ← {projectId}
           </Link>
           <h1>

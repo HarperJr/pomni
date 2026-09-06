@@ -187,7 +187,12 @@ a {
   border-bottom: none;
 }
 
-.row .grow {
+/* Takes the free space, and — the half that is easy to forget — may shrink below its own
+   content, so a `.truncate` inside it can actually clip. A flex item is min-width:auto by
+   default, which floors it at its text width and pushes it out of the container instead.
+   Defined once: it was scoped per container three times, and the containers that never got
+   a copy (.step-row, .tracker-project-row) are exactly where text escaped the block. */
+.grow {
   flex: 1;
   min-width: 0;
 }
@@ -207,6 +212,25 @@ a {
 .mono {
   font-family: var(--mono);
   font-size: 12px;
+}
+
+.connections {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  margin-top: 10px;
+  font-size: 12px;
+}
+
+.connections strong {
+  font-weight: 600;
+  margin-right: 4px;
+}
+
+/* For text that is allowed to be long: wrap it rather than let it widen its container. */
+.wrap {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .truncate {
@@ -583,6 +607,9 @@ svg.graph {
 .console-tree,
 .console-log {
   margin-top: 0 !important;
+  /* A grid item is min-width:auto by default, so a long task line would widen the column
+     rather than being clipped by it. */
+  min-width: 0;
 }
 
 .step-row {
@@ -609,6 +636,49 @@ svg.graph {
 .dot.step-running, .dot.step-pending { background: var(--warn); }
 .dot.step-done { background: var(--ok); }
 .dot.step-failed, .dot.step-cancelled { background: var(--danger); }
+
+/* The live flow of a running pipeline, unfolded under its row on the project page. */
+.run-entry:last-child > .row:last-child { border-bottom: none; }
+
+.flow {
+  border-bottom: 1px solid var(--border);
+  padding: 0 16px 12px 16px;
+  font-size: 13px;
+}
+
+.run-entry:last-child .flow { border-bottom: none; }
+
+.flow-note {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 0 8px 2px;
+  min-width: 0;
+}
+
+.flow-note strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.flow-steps {
+  max-height: 260px;
+  overflow: auto;
+  border-left: 2px solid var(--border);
+  padding-left: 8px;
+}
+
+.flow-step {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 0;
+  min-width: 0;
+}
+
+.flow-step .step-name { font-weight: 600; margin-right: 0; }
+.flow-step.live .step-name { color: var(--warn); }
 
 .log-body { max-height: 620px; overflow: auto; }
 
@@ -649,4 +719,572 @@ a.row:hover {
   border-radius: var(--radius);
   padding: 12px;
   font-size: 13px;
+}
+
+/* Files attached to a run: as a removable list while starting one, as an openable
+   list once it has started. */
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 4px 0 2px;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  max-width: 100%;
+  padding: 3px 6px 3px 9px;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  background: var(--surface-2);
+  font-size: 12px;
+}
+
+.chip .mono {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chip button {
+  padding: 0 4px;
+  border: 0;
+  background: none;
+  color: var(--text-dim);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.chip button:hover {
+  color: var(--danger);
+}
+
+details.chip[open] {
+  display: block;
+  border-radius: var(--radius);
+  padding: 6px 10px 2px;
+}
+
+details.chip summary {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  cursor: pointer;
+  list-style: none;
+}
+
+details.chip summary::-webkit-details-marker {
+  display: none;
+}
+
+details.chip .log {
+  max-height: 260px;
+  margin: 8px -10px 0;
+  border-radius: 0 0 var(--radius) var(--radius);
+}
+
+/* -- tracker -------------------------------------------------------------- */
+
+.tracker {
+  display: grid;
+  grid-template-columns: minmax(220px, 32%) 1fr;
+  gap: 16px;
+  align-items: start;
+}
+
+@media (max-width: 900px) {
+  .tracker { grid-template-columns: 1fr; }
+}
+
+.tracker-projects,
+.tracker-items {
+  min-width: 0;
+}
+
+.tracker-project-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  text-align: left;
+  border: none;
+  border-radius: 0;
+  border-bottom: 1px solid var(--border);
+  background: transparent;
+  font: inherit;
+  color: var(--text);
+  padding: 12px 16px;
+}
+
+.tracker-project-row:last-child { border-bottom: none; }
+.tracker-project-row:hover { background: var(--surface-2); }
+.tracker-project-row.selected { background: var(--surface-2); font-weight: 600; }
+
+.tracker-count {
+  min-width: 20px;
+  text-align: right;
+}
+
+/* One offer in an item's move-to row: its button, and — when disabled — why beside it. */
+.transition-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.transition-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.transition-reason {
+  margin-top: 0;
+}
+
+.checklist-row {
+  margin-top: 2px;
+}
+
+/* A tag that is also a switch: attaching a tool to a project, granting one to an agent. */
+.tag.toggle {
+  cursor: pointer;
+  background: none;
+  font-family: inherit;
+}
+
+.tag.toggle:hover {
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+.tag.toggle.on {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--accent-text);
+}
+
+.tag.warn {
+  border-color: var(--warn);
+  color: var(--warn);
+}
+
+/* A run stopped to ask a person something. Deliberately loud: the run is doing nothing at
+   all until this is answered. */
+.question {
+  border: 1px solid var(--warn);
+  border-radius: var(--radius);
+  background: var(--surface);
+  padding: 12px 14px;
+  margin: 12px 0;
+}
+
+.question-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  margin-bottom: 8px;
+}
+
+.question-text {
+  font-size: 14px;
+  margin-bottom: 10px;
+  white-space: pre-wrap;
+}
+
+.question-reply {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.question-reply textarea {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+}
+
+.flow .question {
+  margin: 12px 0 4px;
+}
+
+/* Outcome, not just completion: an agent that finished while saying it could not do the
+   job must not look like one that did it. */
+.dot.outcome-done { background: var(--ok); }
+.dot.outcome-partial { background: var(--warn); }
+.dot.outcome-blocked { background: var(--danger); }
+.dot.outcome-unknown { background: var(--border-strong); }
+
+.tag.outcome-partial { border-color: var(--warn); color: var(--warn); }
+.tag.outcome-blocked { border-color: var(--danger); color: var(--danger); }
+.tag.outcome-unknown { color: var(--text-dim); }
+
+.unmet {
+  font-size: 12px;
+  color: var(--danger);
+  margin-top: 3px;
+}
+
+.unmet::before {
+  content: '— ';
+}
+
+/* The retry sits on the run's row, outside the link that wraps the rest of it. */
+.run-entry {
+  position: relative;
+}
+
+.run-entry > .rerun {
+  position: absolute;
+  top: 10px;
+  right: 12px;
+  padding: 2px 10px;
+  font-size: 12px;
+}
+
+/* A project has six blocks; showing all six at once made the page a scroll rather than a
+   place you look things up. The sidebar picks one. */
+.project-layout {
+  display: grid;
+  grid-template-columns: minmax(170px, 18%) 1fr;
+  gap: 16px;
+  align-items: start;
+  margin-top: 16px;
+}
+
+@media (max-width: 900px) {
+  .project-layout { grid-template-columns: 1fr; }
+}
+
+.project-nav,
+.project-section {
+  min-width: 0;
+}
+
+.project-section > .card:first-child {
+  margin-top: 0;
+}
+
+.project-nav-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  text-align: left;
+  border: none;
+  border-radius: 0;
+  border-bottom: 1px solid var(--border);
+  background: transparent;
+  font: inherit;
+  color: var(--text);
+  padding: 10px 14px;
+  cursor: pointer;
+}
+
+.project-nav-row:last-child { border-bottom: none; }
+.project-nav-row:hover { background: var(--surface-2); }
+
+.project-nav-row.selected {
+  background: var(--surface-2);
+  font-weight: 600;
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.question-files {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.question-files .hint {
+  flex: 1;
+  min-width: 200px;
+}
+
+/* What an agent ran, as opposed to what it said. */
+.action {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+  font-size: 12px;
+}
+
+.tag.action-shell { border-color: var(--accent); color: var(--accent); }
+.tag.action-write { border-color: var(--warn); color: var(--warn); }
+.tag.action-reach { border-color: var(--border-strong); }
+
+/* -- chat ------------------------------------------------------------------ */
+
+.chat-layout {
+  display: grid;
+  grid-template-columns: minmax(220px, 30%) 1fr;
+  gap: 16px;
+  align-items: start;
+}
+
+@media (max-width: 900px) {
+  .chat-layout { grid-template-columns: 1fr; }
+}
+
+.chat-list,
+.chat-detail {
+  min-width: 0;
+}
+
+.chat-list-row.selected {
+  background: var(--surface-2);
+  font-weight: 600;
+}
+
+.chat-detail > .card {
+  margin-top: 0;
+}
+
+.chat-detail > .card + .card {
+  margin-top: 16px;
+}
+
+.chat-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 16px;
+}
+
+.chat-thread {
+  padding: 16px;
+  max-height: 560px;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.chat-message {
+  max-width: 90%;
+}
+
+.chat-message-user {
+  align-self: flex-end;
+}
+
+.chat-message-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  margin-bottom: 4px;
+}
+
+.chat-message-user .chat-message-head {
+  justify-content: flex-end;
+}
+
+.chat-message-text {
+  padding: 8px 12px;
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  display: inline-block;
+}
+
+.chat-message-user .chat-message-text {
+  background: var(--accent);
+  color: var(--accent-text);
+}
+
+/* A model change or other note the server appended — read, not spoken. */
+.chat-system {
+  align-self: center;
+  color: var(--text-dim);
+  font-size: 12px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.chat-composer {
+  padding: 12px 16px;
+}
+
+.chat-composer-row {
+  display: flex;
+  gap: 10px;
+  align-items: flex-end;
+}
+
+.chat-composer-row textarea {
+  flex: 1;
+  margin: 0;
+}
+
+/* One proposed or completed action under a message. A pending write is bordered in warn so
+   it cannot be mistaken for a record of something that already happened. */
+.action-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  margin-top: 8px;
+  background: var(--surface);
+}
+
+.action-card.action-pending {
+  border-color: var(--warn);
+}
+
+.action-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.action-description {
+  margin-top: 6px;
+  font-size: 13px;
+  color: var(--text-dim);
+}
+
+.action-pending .action-description {
+  color: var(--text);
+}
+
+.action-buttons {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.action-result {
+  margin-top: 8px;
+  max-height: 200px;
+  border-radius: var(--radius);
+}
+
+/* Chat is not a place you go: a floating button on every page, and a panel that opens over
+   what you were already doing, header to footer, with the page kept underneath. */
+:root {
+  /* The page is a centred column: 1100px wide with 24px of padding. Anything that floats
+     should line up with that column's edge rather than the window's, or it sits in the
+     margin looking detached on a wide screen. */
+  --page-edge: max(24px, calc(50vw - 550px + 24px));
+  --header-h: 56px;
+}
+
+.chat-fab {
+  position: fixed;
+  right: var(--page-edge);
+  bottom: 24px;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 56px;
+  height: 56px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: var(--accent);
+  color: var(--accent-text);
+  cursor: pointer;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.22);
+  transition: transform 120ms ease, box-shadow 120ms ease;
+}
+
+.chat-fab:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.28);
+}
+
+.chat-fab:active { transform: translateY(0); }
+.chat-fab:focus-visible { outline: 2px solid var(--text); outline-offset: 3px; }
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-fab { transition: none; }
+  .chat-fab:hover { transform: none; }
+}
+
+/* A dialog, not a takeover: it sits inside the page, below the header and clear of the
+   bottom, on the same column as everything else. */
+.chat-overlay {
+  position: fixed;
+  top: calc(var(--header-h) + 32px);
+  bottom: 32px;
+  left: var(--page-edge);
+  right: var(--page-edge);
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--bg);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.28);
+}
+
+.chat-overlay-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 20px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+  font-size: 13px;
+}
+
+.chat-overlay-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 0 20px 20px;
+}
+
+/* Inside the overlay a conversation is a button, not a link: navigating would move the page
+   underneath, which is the one thing a modal must not do. */
+button.link {
+  border: 0;
+  background: none;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+button.link:hover { text-decoration: underline; }
+
+/* The backdrop is what catches a click outside the dialog. It is deliberately faint: the
+   page underneath stays readable, because not losing your place is the point of a dialog. */
+.chat-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  background: rgba(0, 0, 0, 0.28);
+}
+
+.chat-close {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text-dim);
+  font-size: 17px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.chat-close:hover {
+  border-color: var(--danger);
+  color: var(--danger);
 }

@@ -12,7 +12,7 @@ import {
   type WorkflowDetail,
 } from './api';
 import { Alert, Dialog, errorMessage } from './components';
-import { HandoffPicker, WorkflowGraph, WorkflowMap } from './graph';
+import { WorkflowGraph } from './graph';
 
 export function WorkflowsPage() {
   const [creating, setCreating] = useState(false);
@@ -54,21 +54,6 @@ export function WorkflowsPage() {
         </div>
       )}
 
-      {(workflows.data ?? []).length > 0 && (
-        <div className="card" style={{ marginBottom: 16 }}>
-          <div className="card-head">
-            How they connect
-            <div className="spacer" />
-            <span className="dim" style={{ fontWeight: 400, fontSize: 12 }}>
-              an arrow is a handoff — what the next pipeline picks up
-            </span>
-          </div>
-          <div style={{ padding: '4px 12px' }}>
-            <WorkflowMap workflows={workflows.data ?? []} />
-          </div>
-        </div>
-      )}
-
       <div className="grid">
         {(workflows.data ?? []).map((workflow) => (
           <Link key={workflow.id} className="project-card" to={`/w/${workflow.id}`}>
@@ -88,6 +73,8 @@ export function WorkflowsPage() {
                 </span>
               ))}
             </div>
+            <Connections workflow={workflow} all={workflows.data ?? []} />
+
             <div style={{ marginTop: 10 }}>
               <span className={`status status-${workflow.runnable ? 'ready' : 'cloning'}`}>
                 <span className="dot" />
@@ -101,6 +88,44 @@ export function WorkflowsPage() {
       {creating && <NewWorkflowDialog onClose={() => setCreating(false)} />}
       {importing && <ImportDialog onClose={() => setImporting(false)} />}
     </>
+  );
+}
+
+/**
+ * What feeds a workflow, and what it feeds.
+ *
+ * Only the Out edge is stored. In is everyone whose Out points here, so the two halves can
+ * never contradict each other — and a workflow from another project appearing in your In is
+ * exactly the signal that the pipe crosses projects.
+ */
+function inboundOf(workflow: WorkflowDetail, all: WorkflowDetail[]): WorkflowDetail[] {
+  return all.filter((candidate) => candidate.handoffTo === workflow.id);
+}
+
+/** Where a handed-off run would land. */
+function projectOf(workflow: WorkflowDetail): string {
+  return workflow.projects.length > 0 ? ` · ${workflow.projects.join(', ')}` : '';
+}
+
+function Connections({ workflow, all }: { workflow: WorkflowDetail; all: WorkflowDetail[] }) {
+  const inbound = inboundOf(workflow, all);
+  const out = all.find((candidate) => candidate.id === workflow.handoffTo);
+  if (inbound.length === 0 && !out) return null;
+
+  return (
+    <div className="connections dim">
+      {inbound.length > 0 && (
+        <span>
+          <strong>In</strong> {inbound.map((source) => source.name).join(', ')}
+        </span>
+      )}
+      {out && (
+        <span>
+          <strong>Out</strong> {out.name}
+          {projectOf(out)}
+        </span>
+      )}
+    </div>
   );
 }
 
@@ -272,6 +297,7 @@ export function WorkflowPage() {
   if (!workflow.data) return <div className="dim">Loading…</div>;
 
   const data = workflow.data;
+  const inbound = inboundOf(data, all.data ?? []);
   const orchestrators = data.agents.filter((agent) => agent.role === 'orchestrator');
   const workers = data.agents.filter((agent) => agent.role === 'agent');
 
@@ -314,13 +340,47 @@ export function WorkflowPage() {
         <div style={{ padding: '4px 12px' }}>
           <WorkflowGraph workflow={data} onSelect={setEditing} />
         </div>
+      </div>
+
+      <div className="card">
+        <div className="card-head">
+          In and Out
+          <div className="spacer" />
+          <span className="dim" style={{ fontWeight: 400, fontSize: 12 }}>
+            optional — where work arrives from, and where it goes next
+          </span>
+        </div>
         <div className="row">
           <div className="grow">
-            <HandoffPicker
-              workflow={data}
-              workflows={all.data ?? []}
-              onChange={(handoffTo) => handoff.mutate(handoffTo)}
-            />
+            <span className="lab">In</span>
+            <div className="dim">
+              {inbound.length > 0
+                ? inbound.map((source) => `${source.name}${projectOf(source)}`).join(', ')
+                : 'nothing hands off to this workflow'}
+            </div>
+          </div>
+          <div className="grow">
+            <label style={{ margin: 0 }}>
+              <span className="lab">Out</span>
+              <select
+                value={data.handoffTo ?? ''}
+                onChange={(event) => handoff.mutate(event.target.value || null)}
+              >
+                <option value="">Nothing — this is the end</option>
+                {(all.data ?? [])
+                  .filter((candidate) => candidate.id !== data.id)
+                  .map((candidate) => (
+                    <option key={candidate.id} value={candidate.id}>
+                      {candidate.name}
+                      {projectOf(candidate)}
+                    </option>
+                  ))}
+              </select>
+              <span className="hint">
+                When this pipeline finishes, its result is what the next one starts from — in
+                its own project, which is usually a different one.
+              </span>
+            </label>
           </div>
         </div>
       </div>
@@ -485,15 +545,44 @@ function AgentEditor({
   const [prompt, setPrompt] = useState(agent.prompt);
   const [outputs, setOutputs] = useState(agent.outputs);
   const [struggle, setStruggle] = useState<Struggle>(agent.struggle);
+  const [granted, setGranted] = useState<string[]>([...agent.tools.mcp, ...agent.tools.cli]);
+  const [files, setFiles] = useState(agent.tools.files);
+  const [run, setRun] = useState(agent.tools.run);
   const [error, setError] = useState<string | null>(null);
   const promptRef = useRef<HTMLTextAreaElement | null>(null);
   const queryClient = useQueryClient();
+
+  const registry = useQuery({
+    queryKey: ['tools'],
+    queryFn: () => api.listTools().then((result) => result.tools),
+  });
 
   const refresh = () => queryClient.invalidateQueries({ queryKey: ['workflow', workflowId] });
 
   const save = useMutation({
     mutationFn: () =>
-      api.updateAgent(workflowId, agent.id, { name, role, spec, prompt, outputs, struggle }),
+      api.updateAgent(workflowId, agent.id, {
+        name,
+        role,
+        spec,
+        prompt,
+        outputs,
+        struggle,
+        tools: {
+          files,
+          // A CLI tool is run through the shell, so granting one without that grants
+          // nothing. Turn it on rather than saving a setting that cannot work.
+          run: run || (registry.data ?? []).some(
+            (tool) => granted.includes(tool.id) && tool.kind === 'cli',
+          ),
+          mcp: (registry.data ?? [])
+            .filter((tool) => granted.includes(tool.id) && tool.kind === 'mcp')
+            .map((tool) => tool.id),
+          cli: (registry.data ?? [])
+            .filter((tool) => granted.includes(tool.id) && tool.kind === 'cli')
+            .map((tool) => tool.id),
+        },
+      }),
     onSuccess: async () => {
       await refresh();
       onClose();
@@ -600,6 +689,40 @@ function AgentEditor({
         />
         <span className="hint">
           Shown to the orchestrator when it decides what to delegate here.
+        </span>
+      </label>
+
+      <label>
+        <span className="lab">What it may use</span>
+        <div className="tags" style={{ marginTop: 2 }}>
+          <button className={`tag toggle${files ? ' on' : ''}`} onClick={() => setFiles(!files)}>
+            {files ? '✓ ' : '+ '}read and write files
+          </button>
+          <button className={`tag toggle${run ? ' on' : ''}`} onClick={() => setRun(!run)}>
+            {run ? '✓ ' : '+ '}run commands
+          </button>
+          {(registry.data ?? []).map((tool) => {
+            const on = granted.includes(tool.id);
+            return (
+              <button
+                key={tool.id}
+                className={`tag toggle${on ? ' on' : ''}`}
+                title={tool.description || tool.id}
+                onClick={() =>
+                  setGranted(
+                    on ? granted.filter((id) => id !== tool.id) : [...granted, tool.id],
+                  )
+                }
+              >
+                {on ? '✓ ' : '+ '}
+                {tool.name}
+              </button>
+            );
+          })}
+        </div>
+        <span className="hint">
+          A tool also has to be attached to the project the run belongs to, on the Tools page.
+          Its usage notes are added to this agent's prompt when the run starts.
         </span>
       </label>
 

@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useState, type ReactNode } from 'react';
-import { Link, useNavigate, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { AddRepoDialog } from './AddRepoDialog';
 import { api, REPO_ROLES, type Credential, type Repo, type RepoRole } from './api';
 import { Alert, Dialog, StatusBadge, errorMessage } from './components';
@@ -115,11 +115,31 @@ function NewProjectDialog({ onClose }: { onClose: () => void }) {
 // Project detail
 // ---------------------------------------------------------------------------
 
+/**
+ * The blocks of a project, in the order you meet them: what the code is, what is planned,
+ * what the agents are doing, and the machinery behind that.
+ */
+const SECTIONS = [
+  { id: 'repos', label: 'Repos' },
+  { id: 'backlog', label: 'Backlog' },
+  { id: 'runs', label: 'Agent runs' },
+  { id: 'checks', label: 'Checks' },
+  { id: 'workflows', label: 'Workflows' },
+  { id: 'discovery', label: 'Discovery' },
+] as const;
+
 export function ProjectPage() {
   const { projectId = '' } = useParams();
   const [adding, setAdding] = useState(false);
+  const [params, setParams] = useSearchParams();
   const queryClient = useQueryClient();
   const navigate = useNavigate();
+
+  // In the URL, so a section can be linked to and survives a reload — and so the nav's
+  // remember/recall brings you back to the block you were reading, not the project's top.
+  const requested = params.get('block') ?? '';
+  const active = SECTIONS.some((section) => section.id === requested) ? requested : 'repos';
+  const select = (id: string) => setParams(id === 'repos' ? {} : { block: id }, { replace: true });
 
   const project = useQuery({
     queryKey: ['project', projectId],
@@ -128,6 +148,25 @@ export function ProjectPage() {
     refetchInterval: (query) =>
       query.state.data?.repos.some((repo) => repo.status === 'cloning') ? 1200 : false,
   });
+
+  // The keys are the panels' own, so opening a block reuses what the count already fetched
+  // rather than asking again. The old page rendered every panel at once, so this is fewer
+  // requests than before, not more.
+  const items = useQuery({
+    queryKey: ['items', projectId, false],
+    queryFn: () => api.listItems(projectId, 'active').then((result) => result.items),
+  });
+
+  const pipelines = useQuery({
+    queryKey: ['pipelines', projectId],
+    queryFn: () => api.listPipelines(projectId).then((result) => result.runs),
+  });
+
+  const counts: Record<string, number | string> = {
+    repos: project.data?.repos.length ?? '',
+    backlog: items.data?.length ?? '',
+    runs: pipelines.data?.length ?? '',
+  };
 
   const remove = useMutation({
     mutationFn: () => api.deleteProject(projectId, true),
@@ -169,33 +208,50 @@ export function ProjectPage() {
 
       {project.data.description && <p className="dim">{project.data.description}</p>}
 
-      <div className="card">
-        <div className="card-head">
-          Repos
-          <span className="dim" style={{ fontWeight: 400 }}>
-            {project.data.repos.length}
-          </span>
+      <div className="project-layout">
+        <div className="card project-nav">
+          {SECTIONS.map((section) => (
+            <button
+              key={section.id}
+              className={`project-nav-row${section.id === active ? ' selected' : ''}`}
+              aria-current={section.id === active}
+              onClick={() => select(section.id)}
+            >
+              <span className="grow truncate">{section.label}</span>
+              <span className="dim mono">{counts[section.id] ?? ''}</span>
+            </button>
+          ))}
         </div>
-        {project.data.repos.length === 0 ? (
-          <div className="empty">
-            No repos yet. Clone one from git, or link a folder that is already on this machine.
-          </div>
-        ) : (
-          project.data.repos.map((repo) => (
-            <RepoRow key={repo.id} projectId={projectId} repo={repo} />
-          ))
-        )}
+
+        <div className="project-section">
+          {active === 'repos' && (
+            <div className="card">
+              <div className="card-head">
+                Repos
+                <span className="dim" style={{ fontWeight: 400 }}>
+                  {project.data.repos.length}
+                </span>
+              </div>
+              {project.data.repos.length === 0 ? (
+                <div className="empty">
+                  No repos yet. Clone one from git, or link a folder that is already on this
+                  machine.
+                </div>
+              ) : (
+                project.data.repos.map((repo) => (
+                  <RepoRow key={repo.id} projectId={projectId} repo={repo} />
+                ))
+              )}
+            </div>
+          )}
+
+          {active === 'runs' && <PipelinePanel projectId={projectId} />}
+          {active === 'workflows' && <ProjectWorkflows projectId={projectId} />}
+          {active === 'discovery' && <DiscoveryPanel projectId={projectId} />}
+          {active === 'backlog' && <ItemList projectId={projectId} />}
+          {active === 'checks' && <RunList projectId={projectId} />}
+        </div>
       </div>
-
-      <PipelinePanel projectId={projectId} />
-
-      <ProjectWorkflows projectId={projectId} />
-
-      <DiscoveryPanel projectId={projectId} />
-
-      <ItemList projectId={projectId} />
-
-      <RunList projectId={projectId} />
 
       {adding && <AddRepoDialog projectId={projectId} onClose={() => setAdding(false)} />}
     </>

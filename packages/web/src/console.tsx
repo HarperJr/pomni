@@ -4,6 +4,8 @@ import { Link, useParams } from 'react-router-dom';
 import {
   api,
   type Artifact,
+  type ContextFile,
+  type Question,
   type PipelineRunDetail,
   type PipelineStep,
   type StepStatus,
@@ -17,9 +19,32 @@ function isLive(step: PipelineStep): boolean {
   return ACTIVE.includes(step.status);
 }
 
+/**
+ * The dot's colour: what the agent achieved, not merely that its turn ended.
+ *
+ * A step that finished while explaining it could not do the job used to look exactly like
+ * one that did it. Green now means the agent said `done` and nothing less.
+ */
+function dotClass(step: PipelineStep): string {
+  if (isLive(step) || step.status !== 'done') return `step-${step.status}`;
+  return `outcome-${step.outcome}`;
+}
+
+const OUTCOME_NOTE: Record<string, string> = {
+  partial: 'did some of it',
+  blocked: 'could not do it',
+  unknown: 'did not say whether it worked',
+};
+
 /** Start a run, and see the ones that already happened. */
 export function PipelinePanel({ projectId }: { projectId: string }) {
   const [starting, setStarting] = useState(false);
+  const queryClient = useQueryClient();
+
+  const rerun = useMutation({
+    mutationFn: (runId: string) => api.rerunPipeline(runId),
+    onSuccess: async () => queryClient.invalidateQueries({ queryKey: ['pipelines', projectId] }),
+  });
 
   const runs = useQuery({
     queryKey: ['pipelines', projectId],
@@ -59,17 +84,32 @@ export function PipelinePanel({ projectId }: { projectId: string }) {
         </div>
       ) : (
         (runs.data ?? []).map((run) => (
-          <Link key={run.id} className="row" to={`/p/${projectId}/console/${run.id}`}>
-            <div className="grow">
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                <RunBadge status={run.status} />
-                <span className="tag">{run.workflowName}</span>
-                <span className="truncate">{run.task}</span>
+          <div className="run-entry" key={run.id}>
+            <Link className="row" to={`/p/${projectId}/console/${run.id}`}>
+              <div className="grow">
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
+                  <RunBadge status={run.status} />
+                  <span className="tag">{run.workflowName}</span>
+                  <span className="truncate grow">{firstLine(run.task)}</span>
+                </div>
+                <div className="dim mono truncate">{run.result ?? run.error ?? ''}</div>
               </div>
-              <div className="dim mono truncate">{run.result ?? run.error ?? ''}</div>
-            </div>
-            <span className="dim mono">{duration(run.durationMs)}</span>
-          </Link>
+              <span className="dim mono">{duration(run.durationMs)}</span>
+            </Link>
+            {/* A run that stopped without finishing the job is the one you came here to
+                restart, so the button is on the row rather than a click away. */}
+            {run.status !== 'running' && (run.status !== 'passed' || run.outcome !== 'done') && (
+              <button
+                className="ghost rerun"
+                disabled={rerun.isPending}
+                onClick={() => rerun.mutate(run.id)}
+                title="Run it again, telling the agents how this attempt ended"
+              >
+                Run again
+              </button>
+            )}
+            {run.status === 'running' && <LiveFlow runId={run.id} />}
+          </div>
         ))
       )}
 
@@ -80,6 +120,105 @@ export function PipelinePanel({ projectId }: { projectId: string }) {
           onClose={() => setStarting(false)}
         />
       )}
+    </div>
+  );
+}
+
+/**
+ * The delegation tree of a run that is happening now, unfolded under its row.
+ *
+ * The console shows the same tree beside the transcript. Here it answers the one question
+ * worth asking from the project page - who is working, on what, right now - without
+ * leaving the page for it.
+ */
+function LiveFlow({ runId }: { runId: string }) {
+  const queryClient = useQueryClient();
+  const scroller = useRef<HTMLDivElement | null>(null);
+
+  const run = useQuery({
+    queryKey: ['pipeline', runId],
+    queryFn: () => api.getPipeline(runId).then((result) => result.run),
+    refetchInterval: (query) => (query.state.data?.status === 'running' ? 1500 : false),
+  });
+
+  // Polling keeps the tree honest if a frame is missed; the event stream is what makes an
+  // agent light up the moment it starts.
+  useEffect(() => {
+    const source = new EventSource('/api/events');
+
+    const onStep = (event: MessageEvent<string>) => {
+      const data = JSON.parse(event.data) as { runId?: string };
+      if (data.runId !== runId) return;
+      void queryClient.invalidateQueries({ queryKey: ['pipeline', runId] });
+    };
+
+    for (const type of [
+      'pipeline.step.started',
+      'pipeline.step.finished',
+      'pipeline.flow',
+      'pipeline.question.asked',
+      'pipeline.question.answered',
+      'pipeline.finished',
+    ]) {
+      source.addEventListener(type, onStep as EventListener);
+    }
+
+    return () => source.close();
+  }, [runId, queryClient]);
+
+  const asking = (run.data?.questions ?? []).filter((question) => question.status === 'open');
+  const steps = run.data?.steps ?? [];
+  const live = steps.filter(isLive);
+  const done = steps.filter((step) => step.status === 'done').length;
+  const working = live.map((step) => step.agentName).join(', ');
+
+  // Follow the work as it moves down the tree, so the active agent stays in view.
+  useEffect(() => {
+    scroller.current?.querySelector('.flow-step.live')?.scrollIntoView({ block: 'nearest' });
+  }, [working]);
+
+  if (steps.length === 0 && asking.length === 0) {
+    return <div className="flow dim">Waiting for the orchestrator to plan the work...</div>;
+  }
+
+  return (
+    <div className="flow">
+      {/* Asked here as well as in the console: this row is where you are looking when a run
+          you started goes quiet, and the answer is what unblocks it. */}
+      {asking.map((question) => (
+        <QuestionBox key={question.id} question={question} runId={runId} />
+      ))}
+
+      <div className="flow-note">
+        {live.length > 0 ? (
+          <>
+            <span className="dot spin" style={{ background: 'var(--warn)' }} />
+            <strong>{working}</strong>
+          </>
+        ) : (
+          <span className="dim">no agent is working - an orchestrator is deciding</span>
+        )}
+        <div className="spacer" />
+        <span className="dim mono">
+          {done}/{steps.length} done
+        </span>
+      </div>
+
+      <div className="flow-steps" ref={scroller}>
+        {steps.map((step) => (
+          <div
+            key={step.id}
+            className={`flow-step${isLive(step) ? ' live' : ''}`}
+            style={{ paddingLeft: 6 + step.depth * 16 }}
+          >
+            <span className={`dot ${dotClass(step)}${isLive(step) ? ' spin' : ''}`} />
+            <span className="step-name">{step.agentName}</span>
+            {step.role === 'orchestrator' && <span className="tag">orch</span>}
+            <span className="dim truncate grow">{firstLine(step.task)}</span>
+            <span className="dim mono step-meta">{duration(step.durationMs)}</span>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
@@ -97,8 +236,24 @@ function StartRunDialog({
   const [itemId, setItemId] = useState('');
   const [task, setTask] = useState('');
   const [workflowId, setWorkflowId] = useState('');
+  const [context, setContext] = useState<Array<{ name: string; content: string }>>([]);
   const [error, setError] = useState<string | null>(null);
   const queryClient = useQueryClient();
+
+  /** Read the picked files here; the browser is the only thing that can. */
+  const attach = async (picked: FileList | null) => {
+    if (!picked || picked.length === 0) return;
+
+    try {
+      const read = await Promise.all(
+        [...picked].map(async (file) => ({ name: file.name, content: await file.text() })),
+      );
+      setContext((current) => [...current, ...read]);
+      setError(null);
+    } catch (caught) {
+      setError(errorMessage(caught));
+    }
+  };
 
   // Only what is actually open — running a done item is almost never what was meant.
   const items = useQuery({
@@ -116,6 +271,7 @@ function StartRunDialog({
         task: source === 'item' && chosen ? `${chosen.title}\n\n${chosen.body}` : task,
         itemId: source === 'item' ? itemId : undefined,
         workflowId: workflowId || undefined,
+        context: context.length > 0 ? context : undefined,
       }),
     onSuccess: async (result) => {
       await queryClient.invalidateQueries({ queryKey: ['pipelines', projectId] });
@@ -207,8 +363,46 @@ function StartRunDialog({
           Left automatic, the workflow whose hints match the task wins.
         </span>
       </label>
+
+      <label>
+        <span className="lab">Context files</span>
+        <input
+          type="file"
+          multiple
+          onChange={(event) => {
+            void attach(event.target.value ? event.target.files : null);
+            event.target.value = '';
+          }}
+        />
+        {context.length > 0 && (
+          <div className="chips">
+            {context.map((file, index) => (
+              <span className="chip" key={`${file.name}-${index}`}>
+                <span className="mono">{file.name}</span>
+                <span className="dim">{kb(file.content)}</span>
+                <button
+                  aria-label={`Remove ${file.name}`}
+                  onClick={() => setContext(context.filter((_, at) => at !== index))}
+                >
+                  ×
+                </button>
+              </span>
+            ))}
+          </div>
+        )}
+        <span className="hint">
+          Text files — a spec, a log, a schema. Every agent in the workflow is given them, so
+          attach what the work needs and not the whole repo.
+        </span>
+      </label>
     </Dialog>
   );
+}
+
+/** Size of an attachment as the agents will see it, not as it sits on disk. */
+function kb(content: string): string {
+  const bytes = new TextEncoder().encode(content).length;
+  return bytes < 1000 ? `${bytes} B` : `${Math.round(bytes / 100) / 10} kB`;
 }
 
 // ---------------------------------------------------------------------------
@@ -241,6 +435,12 @@ export function ConsolePage() {
     queryKey: ['pipeline', runId],
     queryFn: () => api.getPipeline(runId).then((result) => result.run),
     refetchInterval: (query) => (query.state.data?.status === 'running' ? 1500 : false),
+  });
+
+  const rerun = useMutation({
+    mutationFn: () => api.rerunPipeline(runId),
+    // Straight into the new run: the old one is history the moment this starts.
+    onSuccess: (result) => window.location.assign(`/p/${projectId}/console/${result.run.id}`),
   });
 
   const cancel = useMutation({
@@ -284,6 +484,8 @@ export function ConsolePage() {
       'pipeline.step.output',
       'pipeline.step.finished',
       'pipeline.flow',
+      'pipeline.question.asked',
+      'pipeline.question.answered',
       'pipeline.finished',
     ]) {
       source.addEventListener(type, onStep as EventListener);
@@ -309,30 +511,61 @@ export function ConsolePage() {
     <>
       <div className="page-head">
         <div>
-          <Link className="crumb" to={`/p/${projectId}`}>
+          <Link className="crumb" to={`/p/${projectId}?block=runs`}>
             ← {projectId}
           </Link>
           <h1>{data.workflowName}</h1>
         </div>
         <div className="spacer" />
         <RunBadge status={data.status} />
-        {data.status === 'running' && (
+        {data.status === 'running' ? (
           <button className="danger" onClick={() => cancel.mutate()} disabled={cancel.isPending}>
             Stop
+          </button>
+        ) : (
+          <button
+            className="primary"
+            onClick={() => rerun.mutate()}
+            disabled={rerun.isPending}
+            title="Start again, telling the agents how this attempt ended"
+          >
+            {rerun.isPending ? 'Starting…' : 'Run again'}
           </button>
         )}
       </div>
 
       <div className="card">
         <div className="row">
-          <div className="grow">{data.task}</div>
+          <div className="grow wrap">{data.task}</div>
           <span className="dim mono">
             {data.steps.length} step{data.steps.length === 1 ? '' : 's'}
             {active > 0 ? ` · ${active} running` : ''}
             {data.costUsd ? ` · $${data.costUsd.toFixed(3)}` : ''}
           </span>
         </div>
+
+        {data.questions
+          .filter((question) => question.status === 'open')
+          .map((question) => (
+            <QuestionBox key={question.id} question={question} runId={data.id} />
+          ))}
+
+        {data.context.length > 0 && (
+          <div className="chips" style={{ marginTop: 10 }}>
+            {data.context.map((file) => (
+              <details className="chip attached" key={file.name}>
+                <summary>
+                  <span className="mono">{file.name}</span>
+                  <span className="dim">{kb(file.content)}</span>
+                </summary>
+                <pre className="log">{file.content}</pre>
+              </details>
+            ))}
+          </div>
+        )}
       </div>
+
+      <Actions steps={data.steps} />
 
       <div className="console">
         <div className="card console-tree">
@@ -354,11 +587,21 @@ export function ConsolePage() {
                 style={{ paddingLeft: 12 + step.depth * 18 }}
                 onClick={() => setSelected(selected === step.id ? null : step.id)}
               >
-                <span className={`dot step-${step.status}${isLive(step) ? ' spin' : ''}`} />
+                <span className={`dot ${dotClass(step)}${isLive(step) ? ' spin' : ''}`} />
                 <span className="grow">
                   <span className="step-name">{step.agentName}</span>
                   {step.role === 'orchestrator' && <span className="tag">orch</span>}
-                  <div className="dim truncate step-task">{step.task}</div>
+                  {step.status === 'done' && step.outcome !== 'done' && (
+                    <span className={`tag outcome-${step.outcome}`}>
+                      {OUTCOME_NOTE[step.outcome]}
+                    </span>
+                  )}
+                  <div className="dim truncate step-task">{firstLine(step.task)}</div>
+                  {step.unmet.map((entry, index) => (
+                    <div className="unmet" key={index}>
+                      {entry}
+                    </div>
+                  ))}
                 </span>
                 <span className="dim mono step-meta">{duration(step.durationMs)}</span>
               </button>
@@ -451,6 +694,49 @@ export function ConsolePage() {
  * What the run produced: files it changed, and the merge request those changes are waiting
  * for. Agent answers are already in the transcript, so they are not repeated here.
  */
+/**
+ * What an agent did on the way to its answer.
+ *
+ * The transcript is what it said; this is what it ran. A session that spent ten minutes and
+ * reported one paragraph is unreadable without it — you cannot tell whether it looked.
+ */
+function Actions({ steps }: { steps: PipelineStep[] }) {
+  const done = steps.filter((step) => step.actions.length > 0);
+  if (done.length === 0) return null;
+
+  return (
+    <div className="card">
+      <div className="card-head">
+        What the agents ran
+        <span className="dim" style={{ fontWeight: 400 }}>
+          {done.reduce((total, step) => total + step.actions.length, 0)}
+        </span>
+      </div>
+      {done.map((step) => (
+        <div className="row" key={step.id}>
+          <div className="grow">
+            <div className="step-name">{step.agentName}</div>
+            {step.actions.map((action, index) => (
+              <div className="action" key={index}>
+                <span className={`tag action-${kindOf(action.tool)}`}>{action.tool}</span>
+                <span className="mono dim truncate grow">{action.detail}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/** Shell, file, or something the agent reached for outside itself. */
+function kindOf(tool: string): string {
+  if (tool === 'Bash') return 'shell';
+  if (tool.startsWith('mcp__') || tool === 'Skill') return 'reach';
+  if (['Write', 'Edit', 'MultiEdit', 'NotebookEdit'].includes(tool)) return 'write';
+  return 'read';
+}
+
 function Artifacts({ artifacts }: { artifacts: Artifact[] }) {
   const files = artifacts.filter((artifact) => artifact.kind === 'file');
   const reports = artifacts.filter((artifact) => artifact.kind === 'report');
@@ -487,6 +773,116 @@ function Artifacts({ artifacts }: { artifacts: Artifact[] }) {
       ))}
     </div>
   );
+}
+
+/**
+ * A question the run is stopped on, and the box to answer it in.
+ *
+ * The run is polling for this answer, so the reply goes straight back into the agent's
+ * conversation — there is nothing else to press afterwards.
+ */
+export function QuestionBox({ question, runId }: { question: Question; runId: string }) {
+  const [text, setText] = useState('');
+  const [files, setFiles] = useState<ContextFile[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const queryClient = useQueryClient();
+
+  const attach = async (picked: FileList | null) => {
+    if (!picked || picked.length === 0) return;
+    try {
+      const read = await Promise.all(
+        [...picked].map(async (file) => ({ name: file.name, content: await file.text() })),
+      );
+      setFiles((current) => [...current, ...read]);
+      setError(null);
+    } catch (caught) {
+      setError(errorMessage(caught));
+    }
+  };
+
+  const answer = useMutation({
+    mutationFn: () => api.answerQuestion(question.id, text, files.length > 0 ? files : undefined),
+    onSuccess: async () => {
+      setText('');
+      setFiles([]);
+      await queryClient.invalidateQueries({ queryKey: ['pipeline', runId] });
+      await queryClient.invalidateQueries({ queryKey: ['questions'] });
+    },
+    onError: (caught) => setError(errorMessage(caught)),
+  });
+
+  return (
+    <div className="question">
+      <div className="question-head">
+        <span className="dot spin" style={{ background: 'var(--warn)' }} />
+        <strong>{question.agentName} is asking you</strong>
+        <div className="spacer" />
+        <span className="dim mono">the run is waiting</span>
+      </div>
+
+      <div className="question-text">{question.question}</div>
+
+      <Alert kind="error">{error}</Alert>
+
+      <div className="question-reply">
+        <textarea
+          rows={2}
+          value={text}
+          onChange={(event) => setText(event.target.value)}
+          placeholder="Your answer — a sentence is usually enough."
+          onKeyDown={(event) => {
+            // Enter sends; the box is for a sentence, not an essay.
+            if (event.key === 'Enter' && !event.shiftKey && text.trim()) {
+              event.preventDefault();
+              answer.mutate();
+            }
+          }}
+          autoFocus
+        />
+        <button
+          className="primary"
+          onClick={() => answer.mutate()}
+          disabled={(!text.trim() && files.length === 0) || answer.isPending}
+        >
+          {answer.isPending ? 'Sending…' : 'Answer'}
+        </button>
+      </div>
+
+      <div className="question-files">
+        <label className="attach">
+          <input
+            type="file"
+            multiple
+            onChange={(event) => {
+              void attach(event.target.value ? event.target.files : null);
+              event.target.value = '';
+            }}
+          />
+        </label>
+        {files.map((file, index) => (
+          <span className="chip" key={`${file.name}-${index}`}>
+            <span className="mono">{file.name}</span>
+            <span className="dim">{kb(file.content)}</span>
+            <button
+              aria-label={`Remove ${file.name}`}
+              onClick={() => setFiles(files.filter((_, at) => at !== index))}
+            >
+              ×
+            </button>
+          </span>
+        ))}
+        <span className="hint" style={{ margin: 0 }}>
+          A file answers as well as words — the agent that asked gets it now, and every agent
+          after it gets it too.
+        </span>
+      </div>
+    </div>
+  );
+}
+
+/** A task is a whole spec; a one-line row shows its first line, not its first paragraph. */
+function firstLine(text: string): string {
+  return text.split('\n').find((line) => line.trim().length > 0)?.trim() ?? text;
 }
 
 function agentFor(run: PipelineRunDetail, stepId: string): string {

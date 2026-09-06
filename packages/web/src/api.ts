@@ -6,6 +6,7 @@ export interface Problem {
   code?: string;
   current?: unknown;
   errors?: unknown;
+  unmet?: unknown;
 }
 
 export class ApiError extends Error {
@@ -15,6 +16,11 @@ export class ApiError extends Error {
   ) {
     super(problem.title);
     this.name = 'ApiError';
+  }
+
+  /** Set on a 422 from a refused transition — which requirements were not met, machine-readable. */
+  get unmet(): UnmetRequirement[] | undefined {
+    return this.problem.unmet as UnmetRequirement[] | undefined;
   }
 }
 
@@ -116,15 +122,13 @@ export interface Credential {
   createdAt: string;
 }
 
-export type ItemStatus =
-  | 'backlog'
-  | 'specced'
-  | 'ready'
-  | 'in_progress'
-  | 'in_review'
-  | 'done'
-  | 'blocked'
-  | 'cancelled';
+/**
+ * A status is whatever a project's flow calls a state, so this is a plain string, not a
+ * closed union — a project may declare states beyond the built-in eight. `ITEM_STATUSES`
+ * below is only the built-in vocabulary, for callers that need a default list (a project
+ * with no `taskFlow` behaves exactly as this list describes).
+ */
+export type ItemStatus = string;
 
 export type ItemType = 'feature' | 'bug' | 'chore' | 'spike' | 'refactor' | 'docs';
 export type Priority = 'P0' | 'P1' | 'P2' | 'P3';
@@ -143,6 +147,79 @@ export const ITEM_STATUSES: ItemStatus[] = [
 export const ITEM_TYPES: ItemType[] = ['feature', 'bug', 'chore', 'spike', 'refactor', 'docs'];
 export const PRIORITIES: Priority[] = ['P0', 'P1', 'P2', 'P3'];
 
+export interface FlowState {
+  name: string;
+  label: string;
+  board: boolean;
+  active: boolean;
+}
+
+/** One box in a definition of done. `key` is what is stored ticked; `label` is what a human reads. */
+export interface ChecklistEntry {
+  key: string;
+  label: string;
+}
+
+export interface Requirements {
+  acceptance: boolean;
+  gate: string | null;
+  checklist: ChecklistEntry[];
+  fields: string[];
+  sections: string[];
+  dependencies: boolean;
+}
+
+export interface FlowTransition {
+  from: string;
+  to: string;
+  requires: Requirements;
+  /** A headline for a refusal on this arrow, led with by `RequirementsNotMetError`. */
+  message?: string;
+}
+
+export interface Flow {
+  states: FlowState[];
+  initial: string;
+  recover: string[];
+  transitions: FlowTransition[];
+}
+
+/** One capability of one gate, on one repo, as the run store reported it. */
+export interface GateShortfall {
+  repo: string;
+  capability: string;
+  runId: string | null;
+  finishedAt: string | null;
+}
+
+/**
+ * A requirement that is not satisfied. No English lives here by design — the wording comes
+ * from `describeUnmet`/`describeUnmetList` in `packages/core/src/domain/flow.ts`. The web
+ * package cannot import core today (see `getItemFlow` below), so this shape is re-implemented
+ * in prose on this side; keep it in sync with that file by hand. For the record, that file's
+ * wording for the two section/dependency kinds is: `no 'Problem' section is written in the
+ * item body` (`no 'Problem' and 'Plan' sections are written in the item body` for several) and
+ * `depends on ACME-1, which is not done` (`, which are not done` for several).
+ */
+export type UnmetRequirement =
+  | { kind: 'acceptance'; total: number; checked: number; unchecked: number }
+  | { kind: 'gate'; gate: string; failing: GateShortfall[]; pending: GateShortfall[] }
+  | { kind: 'checklist'; total: number; ticked: number; missing: ChecklistEntry[] }
+  | { kind: 'fields'; missing: string[] }
+  | { kind: 'sections'; missing: string[] }
+  | { kind: 'dependencies'; total: number; unfinished: string[] };
+
+/** One button a UI may draw: where to, what it says, whether it works and why not. */
+export interface TransitionOffer {
+  to: string;
+  label: string;
+  ok: boolean;
+  /** Empty when `ok`. */
+  unmet: UnmetRequirement[];
+  /** `recovery` means the item's current status is not in the flow and this is a way out. */
+  via: 'arrow' | 'recovery';
+}
+
 export interface BacklogItem {
   id: string;
   projectId: string;
@@ -156,13 +233,26 @@ export interface BacklogItem {
   dependsOn: string[];
   order: number;
   branch: string | null;
+  /** Definition-of-done boxes a human has ticked: checklist key -> ISO timestamp. */
+  checklist: Record<string, string>;
   blockedReason: string | null;
+  /** What it was doing before it was blocked — where unblocking puts it back. */
+  statusBefore: ItemStatus | null;
   createdAt: string;
   updatedAt: string;
   body: string;
 }
 
 export interface BacklogItemDetail extends BacklogItem {
+  /**
+   * Every move a UI should draw, each with whether it will work and, when it will not, the
+   * unmet requirements behind it.
+   */
+  allowedTransitions: TransitionOffer[];
+  /** The item's state as its project's flow describes it, or null when it is off-flow. */
+  flowState: FlowState | null;
+  /** True when the stored status is not a state in the project's flow. */
+  offFlow: boolean;
   blockedBy: string[];
   blocking: string[];
   sections: Record<string, string>;
@@ -206,8 +296,98 @@ export interface ProviderStatus {
   detail: string;
 }
 
+export type ChatRole = 'user' | 'assistant' | 'system';
+export type ActionStatus = 'proposed' | 'confirmed' | 'rejected' | 'running' | 'executed' | 'failed';
+
+export interface ProposedAction {
+  id: string;
+  /** 'service.method' form, e.g. 'backlog.move'. */
+  name: string;
+  args: Record<string, unknown>;
+  writes: boolean;
+  /** One sentence naming exactly what will change. Shown in the confirm prompt. */
+  description: string;
+  status: ActionStatus;
+  /** JSON-encoded service return value. */
+  result: string | null;
+  error: string | null;
+  runId: string | null;
+  createdAt: string;
+  decidedAt: string | null;
+  endedAt: string | null;
+  durationMs: number | null;
+}
+
+export interface ChatMessage {
+  id: string;
+  chatId: string;
+  role: ChatRole;
+  text: string;
+  providerId: string | null;
+  model: string | null;
+  actions: ProposedAction[];
+  createdAt: string;
+  inputTokens: number;
+  outputTokens: number;
+  costUsd: number | null;
+}
+
+export interface Chat {
+  id: string;
+  title: string;
+  providerId: string;
+  model: string;
+  createdAt: string;
+  updatedAt: string;
+  inputTokens: number;
+  outputTokens: number;
+  costUsd: number | null;
+}
+
+export interface ChatDetail extends Chat {
+  messages: ChatMessage[];
+  providerLabel: string;
+  providerAvailable: boolean;
+  runIds: string[];
+  pendingActions: ProposedAction[];
+}
+
+/** Payloads for the `chat.*` events published on the shared `/api/events` SSE stream. */
+export interface ChatChangedEvent {
+  chatId: string;
+}
+export interface ChatRemovedEvent {
+  chatId: string;
+}
+export interface ChatMessageChunkEvent {
+  chatId: string;
+  messageId: string;
+  text: string;
+}
+export interface ChatActionStartedEvent {
+  chatId: string;
+  messageId: string;
+  actionId: string;
+  name: string;
+  writes: boolean;
+}
+export interface ChatActionFinishedEvent {
+  chatId: string;
+  messageId: string;
+  actionId: string;
+  name: string;
+  status: ActionStatus;
+  error: string | null;
+}
+export interface ChatTurnFinishedEvent {
+  chatId: string;
+  messageId: string;
+}
+
 export type PipelineStatus = 'running' | 'passed' | 'failed' | 'cancelled';
 export type StepStatus = 'pending' | 'running' | 'done' | 'failed' | 'cancelled';
+/** What the agent says it achieved — separate from whether its turn finished. */
+export type Outcome = 'done' | 'partial' | 'blocked' | 'unknown';
 
 export interface PipelineStep {
   id: string;
@@ -221,12 +401,21 @@ export interface PipelineStep {
   status: StepStatus;
   output: string | null;
   error: string | null;
+  outcome: Outcome;
+  unmet: string[];
+  /** What the session actually did: commands, files, skills, MCP calls. */
+  actions: Array<{ tool: string; detail: string }>;
   depth: number;
   startedAt: string;
   endedAt: string | null;
   durationMs: number | null;
   inputTokens: number;
   outputTokens: number;
+}
+
+export interface ContextFile {
+  name: string;
+  content: string;
 }
 
 export interface PipelineRun {
@@ -236,13 +425,19 @@ export interface PipelineRun {
   workflowName: string;
   providerId: string;
   itemId: string | null;
+  /** The run this one retried, when it is a second attempt. */
+  rerunOf: string | null;
   task: string;
+  /** Files attached when the run was started; every agent was given them. */
+  context: ContextFile[];
   status: PipelineStatus;
   result: string | null;
   error: string | null;
   gateStatus: 'skipped' | 'passed' | 'failed';
   gateSummary: string | null;
   itemStatus: string | null;
+  outcome: Outcome;
+  unmet: string[];
   startedAt: string;
   endedAt: string | null;
   durationMs: number | null;
@@ -261,10 +456,73 @@ export interface Artifact {
   createdAt: string;
 }
 
+export interface Question {
+  id: string;
+  runId: string;
+  stepId: string;
+  agentId: string;
+  agentName: string;
+  question: string;
+  answer: string | null;
+  /** Files handed over with the answer. */
+  attachments: ContextFile[];
+  status: 'open' | 'answered' | 'abandoned';
+  askedAt: string;
+  answeredAt: string | null;
+}
+
 export interface PipelineRunDetail extends PipelineRun {
   steps: PipelineStep[];
   artifacts: Artifact[];
+  /** What this run stopped to ask a person. */
+  questions: Question[];
 }
+
+export type ToolKind = 'mcp' | 'cli';
+export type McpTransport = 'stdio' | 'http' | 'sse';
+
+export interface Tool {
+  id: string;
+  name: string;
+  kind: ToolKind;
+  description: string;
+  /** How to drive it. Handed to every agent granted the tool. */
+  usage: string;
+  bin: string | null;
+  transport: McpTransport | null;
+  command: string | null;
+  args: string[];
+  url: string | null;
+  headers: Record<string, string>;
+  env: Record<string, string>;
+  envFrom: string[];
+  credential: string | null;
+  credentialEnv: string | null;
+  check: string | null;
+  enabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ToolStatus extends Tool {
+  problems: string[];
+  usable: boolean;
+  /** Projects this tool is attached to. */
+  projects: string[];
+}
+
+export interface ToolCheckResult {
+  id: string;
+  name: string;
+  status: 'ok' | 'failed' | 'skipped';
+  detail: string;
+}
+
+export type ToolBody = Partial<Omit<Tool, 'id' | 'createdAt' | 'updatedAt'>> & {
+  name?: string;
+  kind?: ToolKind;
+  id?: string;
+};
 
 export interface Agent {
   id: string;
@@ -276,7 +534,7 @@ export interface Agent {
   struggle: Struggle;
   delegatesTo: string[];
   outputs: string;
-  tools: { files: boolean; run: boolean };
+  tools: { files: boolean; run: boolean; mcp: string[]; cli: string[] };
   createdAt: string;
   updatedAt: string;
 }
@@ -290,7 +548,10 @@ export interface WorkflowDetail {
   id: string;
   name: string;
   description: string;
+  /** The workflow this one hands off to: its Out. In is derived from everyone else's Out. */
   handoffTo?: string | null;
+  /** Projects this workflow is attached to — where a handoff to it would land. */
+  projects: string[];
   agents: Agent[];
   entry: string | null;
   suits: string[];
@@ -479,6 +740,38 @@ export const api = {
       { method: 'DELETE' },
     ),
 
+  listTools: () => request<{ tools: ToolStatus[] }>('/api/tools'),
+
+  createTool: (body: ToolBody) =>
+    request<{ tool: Tool }>('/api/tools', { method: 'POST', body: JSON.stringify(body) }),
+
+  updateTool: (id: string, body: ToolBody & { enabled?: boolean }) =>
+    request<{ tool: Tool }>(`/api/tools/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+    }),
+
+  removeTool: (id: string) =>
+    request<void>(`/api/tools/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+
+  checkTools: (ids?: string[]) =>
+    request<{ results: ToolCheckResult[] }>('/api/tools/check', {
+      method: 'POST',
+      body: JSON.stringify(ids?.length ? { ids } : {}),
+    }),
+
+  attachTool: (projectId: string, toolId: string) =>
+    request<{ tools: string[] }>(
+      `/api/projects/${encodeURIComponent(projectId)}/tools/${encodeURIComponent(toolId)}`,
+      { method: 'PUT' },
+    ),
+
+  detachTool: (projectId: string, toolId: string) =>
+    request<{ tools: string[] }>(
+      `/api/projects/${encodeURIComponent(projectId)}/tools/${encodeURIComponent(toolId)}`,
+      { method: 'DELETE' },
+    ),
+
   listCredentials: () => request<{ credentials: Credential[] }>('/api/credentials'),
 
   createCredential: (body: {
@@ -540,6 +833,16 @@ export const api = {
       body: JSON.stringify(body),
     }),
 
+  /**
+   * Put a blocked item back where it was. Not the same as moving it by hand: the server
+   * knows which status it came from, and records it as an unblock rather than a move.
+   */
+  unblockItem: (projectId: string, itemId: string) =>
+    request<{ item: BacklogItem }>(
+      `/api/projects/${encodeURIComponent(projectId)}/items/${encodeURIComponent(itemId)}/unblock`,
+      { method: 'POST' },
+    ),
+
   transitionItem: (
     projectId: string,
     itemId: string,
@@ -555,6 +858,17 @@ export const api = {
       `/api/projects/${encodeURIComponent(projectId)}/items/${encodeURIComponent(itemId)}`,
       { method: 'DELETE' },
     ),
+
+  getItemFlow: (projectId: string) =>
+    request<{ flow: Flow }>(`/api/projects/${encodeURIComponent(projectId)}/items-flow`).then(
+      (result) => result.flow,
+    ),
+
+  tickChecklist: (projectId: string, itemId: string, body: { key: string; ticked: boolean }) =>
+    request<{ item: BacklogItemDetail }>(
+      `/api/projects/${encodeURIComponent(projectId)}/items/${encodeURIComponent(itemId)}/checklist`,
+      { method: 'POST', body: JSON.stringify(body) },
+    ).then((result) => result.item),
 
   listWorkflows: () =>
     request<{ workflows: WorkflowDetail[]; scales: { struggle: Struggle; label: string; note: string }[] }>('/api/workflows'),
@@ -603,6 +917,7 @@ export const api = {
       outputs?: string;
       struggle?: Struggle;
       delegatesTo?: string[];
+      tools?: { files?: boolean; run?: boolean; mcp?: string[]; cli?: string[] };
     },
   ) =>
     request<{ agent: Agent }>(
@@ -704,11 +1019,32 @@ export const api = {
 
   startPipeline: (
     projectId: string,
-    body: { task: string; workflowId?: string; itemId?: string },
+    body: {
+      task: string;
+      workflowId?: string;
+      itemId?: string;
+      context?: ContextFile[];
+    },
   ) =>
     request<{ run: PipelineRun }>(`/api/projects/${encodeURIComponent(projectId)}/pipelines`, {
       method: 'POST',
       body: JSON.stringify(body),
+    }),
+
+  openQuestions: (projectId?: string) =>
+    request<{ questions: Question[] }>(
+      `/api/questions${projectId ? `?project=${encodeURIComponent(projectId)}` : ''}`,
+    ),
+
+  answerQuestion: (questionId: string, answer: string, files?: ContextFile[]) =>
+    request<{ question: Question }>(`/api/questions/${encodeURIComponent(questionId)}`, {
+      method: 'POST',
+      body: JSON.stringify({ answer, files }),
+    }),
+
+  rerunPipeline: (runId: string) =>
+    request<{ run: PipelineRun }>(`/api/pipelines/${encodeURIComponent(runId)}/rerun`, {
+      method: 'POST',
     }),
 
   cancelPipeline: (runId: string) =>
@@ -753,4 +1089,48 @@ export const api = {
     request<BrowseResult>(`/api/fs/browse${path ? `?path=${encodeURIComponent(path)}` : ''}`),
 
   detect: (path: string) => request<DetectResult>(`/api/fs/detect?path=${encodeURIComponent(path)}`),
+
+  listChats: (params: { query?: string; providerId?: string; limit?: number } = {}) => {
+    const query = new URLSearchParams();
+    if (params.query) query.set('query', params.query);
+    if (params.providerId) query.set('providerId', params.providerId);
+    if (params.limit) query.set('limit', String(params.limit));
+    const qs = query.toString();
+    return request<{ chats: Chat[] }>(`/api/chats${qs ? `?${qs}` : ''}`);
+  },
+
+  createChat: (body: { providerId: string; model: string; title?: string }) =>
+    request<{ chat: Chat }>('/api/chats', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  getChat: (id: string) => request<{ chat: ChatDetail }>(`/api/chats/${encodeURIComponent(id)}`),
+
+  deleteChat: (id: string) =>
+    request<void>(`/api/chats/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+
+  setChatModel: (id: string, body: { providerId: string; model: string }) =>
+    request<{ chat: Chat }>(`/api/chats/${encodeURIComponent(id)}/model`, {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+    }),
+
+  sendChatMessage: (id: string, text: string) =>
+    request<{ message: ChatMessage }>(`/api/chats/${encodeURIComponent(id)}/messages`, {
+      method: 'POST',
+      body: JSON.stringify({ text }),
+    }),
+
+  confirmChatAction: (id: string, messageId: string, actionId: string) =>
+    request<{ message: ChatMessage }>(
+      `/api/chats/${encodeURIComponent(id)}/messages/${encodeURIComponent(messageId)}/actions/${encodeURIComponent(actionId)}/confirm`,
+      { method: 'POST' },
+    ),
+
+  rejectChatAction: (id: string, messageId: string, actionId: string) =>
+    request<{ message: ChatMessage }>(
+      `/api/chats/${encodeURIComponent(id)}/messages/${encodeURIComponent(messageId)}/actions/${encodeURIComponent(actionId)}/reject`,
+      { method: 'POST' },
+    ),
 };
