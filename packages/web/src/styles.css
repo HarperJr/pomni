@@ -1298,3 +1298,19 @@ button.link:hover { text-decoration: underline; }
 .spend-bar { height: 8px; border-radius: 999px; background: var(--accent); flex: 0 0 auto; max-width: 30%; }
 .step-actions { margin-top: 4px; font-size: 12px; }
 .step-actions > summary { cursor: pointer; }
+
+/* Полоска состояния самого инструмента. Тихая: это хром, а не содержимое. */
+.footer {
+  position: sticky;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 32px;
+  padding: 8px 0;
+  border-top: 1px solid var(--border);
+  background: var(--bg);
+  font-size: 12px;
+}
+
+.footer button { padding: 3px 14px; font-size: 12px; }

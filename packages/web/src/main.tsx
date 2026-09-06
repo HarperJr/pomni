@@ -1,4 +1,4 @@
-import { QueryClient, QueryClientProvider, useQueryClient } from '@tanstack/react-query';
+import { QueryClient, QueryClientProvider, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useState, type ReactNode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { BrowserRouter, Link, Navigate, Route, Routes, useLocation } from 'react-router-dom';
@@ -184,6 +184,48 @@ function SectionLink({ section, children }: { section: Section; children: ReactN
   );
 }
 
+/**
+ * A quiet strip for the state of the tool itself.
+ *
+ * Its first job is the reload: Pomni rebuilds its own web while you are looking at it, and
+ * until now the instruction was "press Ctrl+Shift+R" — a keyboard shortcut standing in for a
+ * missing button. It has room for whatever belongs here next.
+ */
+function Footer() {
+  const [loaded] = useState(() => document.querySelector('script[src*="assets/"]')?.getAttribute('src') ?? '');
+
+  const health = useQuery({
+    queryKey: ['health'],
+    queryFn: () => fetch('/api/health').then((response) => response.json() as Promise<{ build?: string | null }>),
+    refetchInterval: 30_000,
+  });
+
+  const build = health.data?.build ?? null;
+  const stale = Boolean(build && loaded && !loaded.includes(build));
+
+  const reload = async () => {
+    // A plain reload can be served the cached document, which is the one case that matters
+    // here. Re-fetch it first, then reload onto the fresh copy.
+    try {
+      await fetch(window.location.href, { cache: 'reload' });
+    } catch {
+      // Offline, or the server is restarting: reload anyway and let the browser say so.
+    }
+    window.location.reload();
+  };
+
+  return (
+    <div className="footer">
+      <span className="dim mono">{build ?? 'build unknown'}</span>
+      {stale && <span className="tag warn">a newer build is on the server</span>}
+      <div className="spacer" />
+      <button className={stale ? 'primary' : 'ghost'} onClick={() => void reload()}>
+        Reload
+      </button>
+    </div>
+  );
+}
+
 function Shell() {
   useServerEvents();
   const location = useLocation();
@@ -239,6 +281,8 @@ function Shell() {
         <Route path="/chat/:chatId" element={<ChatPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
+
+      <Footer />
 
       {!chatting && (
         <button

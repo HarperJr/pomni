@@ -597,6 +597,28 @@ export class PipelineService {
     let outputTokens = 0;
 
     try {
+      // Say what this agent may and may not do. An agent that discovers a refusal by
+      // being refused spends turns on it and reports the refusal as its finding — that
+      // has cost whole runs here.
+      const can = [
+        agent.tools.files ? 'read and change files' : null,
+        agent.tools.run ? 'run commands with Bash' : null,
+      ].filter(Boolean);
+      const cannot = [
+        agent.tools.files ? null : 'change files',
+        agent.tools.run ? null : 'run commands — no build, no tests, no shell',
+      ].filter(Boolean);
+
+      const abilities = [
+        '## What you can do',
+        '',
+        can.length > 0 ? `You can ${can.join(' and ')}.` : 'You can read and think; that is all.',
+        cannot.length > 0
+          ? `You cannot ${cannot.join(', or ')}. Do not try, and do not report being unable` +
+            ' to as a finding — say what you would have run and let whoever can, run it.'
+          : '',
+      ].filter(Boolean).join('\n');
+
       const briefing = toolBriefing(grants);
       const repos =
         agent.tools.files || agent.tools.run ? this.repoBriefing(workspace.repos) : null;
@@ -626,7 +648,7 @@ export class PipelineService {
       const briefed = briefing ? [system, '', briefing].join('\n') : system;
       // Every agent, orchestrator or not, says what it achieved. Without it a step that
       // explains why it could not do the job is indistinguishable from one that did it.
-      const prompt = [briefed, ...(repos ? ['', repos] : []), '', VERDICT_PROTOCOL].join(
+      const prompt = [briefed, '', abilities, ...(repos ? ['', repos] : []), '', VERDICT_PROTOCOL].join(
         '\n',
       );
 

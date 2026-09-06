@@ -348,6 +348,79 @@ describe('waves', () => {
     });
   });
 
+  it('reads a file cited with a line number as the same file cited without one', () => {
+    // Prose cites a file by line. If `src/auth.ts:42` stayed its own path it would overlap
+    // nothing, and the two items rewriting that one file would launch into the same wave.
+    const items = [
+      item({ id: 'POMN-60', order: 10, repos: ['core'], body: planSection('src/auth.ts:42') }),
+      item({ id: 'POMN-61', order: 20, repos: ['core'], body: planSection('src/auth.ts') }),
+      // The column form of the same citation, in a repo of its own so only the path can speak.
+      item({ id: 'POMN-62', order: 30, repos: ['api'], body: planSection('src/auth.ts:42:7') }),
+    ];
+
+    const plan = planOf(items, { core: true, api: true });
+
+    for (const id of ['POMN-60', 'POMN-61', 'POMN-62']) {
+      expect(plan.scopes[id]).toEqual({ kind: 'paths', paths: ['src/auth.ts'], source: 'plan' });
+    }
+    expect(waveOf(plan, 'POMN-60')).not.toBe(waveOf(plan, 'POMN-61'));
+    expect(edgeBetween(plan, 'POMN-60', 'POMN-61')?.reasons).toContainEqual({
+      kind: 'path_overlap',
+      path: 'src/auth.ts',
+      otherPath: 'src/auth.ts',
+    });
+  });
+
+  it('matches a touches entry cited by line against one written plainly', () => {
+    const items = [
+      item({ id: 'POMN-63', order: 10, repos: ['core'], touches: ['src/auth.ts:42'] }),
+      item({ id: 'POMN-64', order: 20, repos: ['core'], touches: ['src/auth.ts'] }),
+    ];
+
+    const plan = planOf(items, { core: true });
+
+    expect(plan.scopes['POMN-63']).toEqual({
+      kind: 'paths',
+      paths: ['src/auth.ts'],
+      source: 'touches',
+    });
+    expect(waveOf(plan, 'POMN-63')).not.toBe(waveOf(plan, 'POMN-64'));
+  });
+
+  it('reads an item whose only declared path climbs above the repo as touching everything', () => {
+    // `../x.ts` cannot be placed without knowing where the repo root is, so it names nothing —
+    // and an item left naming nothing is read as its whole repo, which over-conflicts rather
+    // than letting it quietly share a wave with work it may well collide with.
+    const items = [
+      item({ id: 'POMN-65', order: 10, repos: ['core'], touches: ['../x.ts'] }),
+      item({ id: 'POMN-66', order: 20, repos: ['core'], touches: ['src/billing.ts'] }),
+    ];
+
+    const plan = planOf(items, { core: true });
+
+    expect(plan.scopes['POMN-65']).toEqual({ kind: 'whole-repo' });
+    expect(waveOf(plan, 'POMN-65')).not.toBe(waveOf(plan, 'POMN-66'));
+  });
+
+  it('still plans the ready work when a cancelled prerequisite sits in a cycle of its own', () => {
+    // POMN-67 waits on a cancelled item, and behind that cancelled item is a cycle between two
+    // more cancelled ones. Cancelled work is settled, so that cycle is history: it must not cost
+    // the project its plan. The candidate is still held back — a cancelled prerequisite needs a
+    // human, not a launch — but it is reported as blocked rather than thrown over.
+    const items = [
+      item({ id: 'POMN-67', order: 10, repos: ['core'], dependsOn: ['POMN-68'], touches: ['src/auth.ts'] }),
+      item({ id: 'POMN-68', order: 20, status: 'cancelled', dependsOn: ['POMN-69'] }),
+      item({ id: 'POMN-69', order: 30, status: 'cancelled', dependsOn: ['POMN-68'] }),
+      item({ id: 'POMN-70', order: 40, repos: ['core'], touches: ['src/billing.ts'] }),
+    ];
+
+    const plan = planOf(items, { core: true });
+
+    expect(plan.blocked).toEqual([{ itemId: 'POMN-67', waitingOn: ['POMN-68'] }]);
+    expect(waveOf(plan, 'POMN-67')).toBeUndefined();
+    expect(plan.waves).toEqual([{ index: 1, itemIds: ['POMN-70'] }]);
+  });
+
   it('still plans a ready item whose finished dependencies point at each other', () => {
     // POMN-1 is ready and waits on POMN-2, which is done; POMN-2 and POMN-3 are both done and
     // name each other. The cycle is only reachable *through* finished work, and finished work is
@@ -490,6 +563,35 @@ describe('reading paths out of a Plan section', () => {
     ].join('\n');
 
     expect(extractPlanPaths(plan)).toEqual([]);
+  });
+
+  it('drops a line citation from a path but refuses a colon anywhere else', () => {
+    // `:42` and `:42:7` are how prose points at a line, and the line is not part of the file's
+    // name. A colon that is not a citation is not cut at — truncating `src/a:b.ts` to `src/a`
+    // would invent a path that then falsely overlaps a real one.
+    const plan = [
+      '1. Fix `src/auth.ts:42`, and the same bug at `src/auth.ts:42:7`.',
+      '2. Leave `src/a:b.ts` and `src/x.ts:notaline` alone.',
+      '',
+    ].join('\n');
+
+    expect(extractPlanPaths(plan)).toEqual(['src/auth.ts']);
+  });
+
+  it('still refuses a drive-lettered path once the line citation is taken off it', () => {
+    // The citation strip runs after the drive-letter test, and this is what holds it there: a
+    // `C:\...` token must not reach the path set by any route, cited or not.
+    const plan = '1. Edit `C:\\x\\y.ts` and `C:\\x\\y.ts:42` and `C:/x/y.ts:42`.\n';
+
+    expect(extractPlanPaths(plan)).toEqual([]);
+  });
+
+  it('refuses a path that still climbs above the repo, and keeps one that only dips', () => {
+    // `../packages/core/x.ts` points somewhere the domain cannot place — it does not know where
+    // any repo root sits. `a/b/../c` resolves to `a/c`, which is inside, and stays.
+    const plan = '1. Edit `../packages/core/x.ts`, then `a/b/../c`.\n';
+
+    expect(extractPlanPaths(plan)).toEqual(['a/c']);
   });
 
   it('leaves a quoted regex as prose rather than reading it as a path', () => {

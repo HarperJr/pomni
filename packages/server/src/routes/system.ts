@@ -4,9 +4,40 @@ import type { FastifyInstance } from 'fastify';
 
 const BrowseQuery = z.object({ path: z.string().optional() });
 
+/**
+ * Which web bundle this server would serve right now.
+ *
+ * Read from `index.html` rather than remembered at startup: the bundle is rebuilt while the
+ * server keeps running, and a value fixed at boot would tell you the opposite of the truth.
+ */
+async function servedBuild(): Promise<string | null> {
+  const { readFile } = await import('node:fs/promises');
+  const { fileURLToPath } = await import('node:url');
+  const { dirname, join } = await import('node:path');
+
+  const here = dirname(fileURLToPath(import.meta.url));
+  const candidates = [
+    join(here, '../../../web/dist/index.html'),
+    join(here, '../../../../web/dist/index.html'),
+  ];
+
+  for (const candidate of candidates) {
+    try {
+      const html = await readFile(candidate, 'utf8');
+      return /assets\/(index-[\w-]+\.js)/.exec(html)?.[1] ?? null;
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
+
 export async function systemRoutes(app: FastifyInstance, container: PomniContainer): Promise<void> {
   app.get('/api/health', async () => ({
     ok: true,
+    // The hashed asset name of the bundle on disk. It changes when the web is rebuilt, which
+    // is the thing a person wants to know: is the page in front of me the current one?
+    build: await servedBuild(),
     root: container.root,
     git: await container.git.isAvailable(),
     initialized: await container.workspace.isInitialized(),
