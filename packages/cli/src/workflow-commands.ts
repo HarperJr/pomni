@@ -741,6 +741,27 @@ ${item.body}`;
         return;
       }
 
+      // Which branch a run is working on, from the worktree register rather than guessed
+      // from its id: a run that could not take a worktree is working in the repo itself, and
+      // printing a branch it does not have would send someone looking for it.
+      const worktrees = await container.worktrees.list({});
+      const branchOf = new Map(worktrees.map((worktree) => [worktree.runId, worktree.branch]));
+
+      // A run in flight has no totals yet — they are summed when it ends — and that is
+      // exactly when someone wants to know what it is costing. Few runs are live, so
+      // adding up their steps here is cheap.
+      const live = await Promise.all(
+        runs
+          .filter((run) => run.status === 'running')
+          .map(async (run) => [run.id, await container.pipelines.get(run.id)] as const),
+      );
+      const soFar = new Map(
+        live.map(([id, detail]) => [
+          id,
+          detail.steps.reduce((sum, step) => sum + step.inputTokens + step.outputTokens, 0),
+        ]),
+      );
+
       console.log(
         table(
           runs.map((run) => [
@@ -748,9 +769,11 @@ ${item.body}`;
             run.status === 'passed' ? style.green(run.status) : style.red(run.status),
             run.workflowName,
             run.itemId ?? '',
-            truncate(run.task, 46),
+            branchOf.get(run.id) ?? style.dim('in repo'),
+            spent(run, soFar.get(run.id)),
+            truncate(run.task, 34),
           ]),
-          ['ID', 'STATUS', 'WORKFLOW', 'ITEM', 'TASK'],
+          ['ID', 'STATUS', 'WORKFLOW', 'ITEM', 'BRANCH', 'SPENT', 'TASK'],
         ),
       );
     });
@@ -970,6 +993,18 @@ function split(value: string | undefined): string[] | undefined {
     .split(',')
     .map((entry) => entry.trim())
     .filter((entry) => entry.length > 0);
+}
+
+/** Tokens and cost for one run, or a dash while it has spent nothing yet. */
+function spent(
+  run: { inputTokens: number; outputTokens: number; costUsd: number | null },
+  soFar?: number,
+): string {
+  const tokens = run.inputTokens + run.outputTokens || (soFar ?? 0);
+  if (tokens === 0) return style.dim('—');
+
+  const cost = run.costUsd ? ` $${run.costUsd.toFixed(2)}` : '';
+  return `${thousands(tokens)}${style.dim(cost)}`;
 }
 
 /** 1234567 -> 1 234 567. Long token counts are unreadable without it. */
