@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { DetectorRegistry } from '@pomni/adapters';
 import {
   BacklogService,
+  ChatService,
   CredentialService,
   DoctorService,
   ProjectService,
@@ -11,6 +12,7 @@ import {
   RunService,
   PipelineService,
   ProviderService,
+  ToolService,
   WorkflowService,
   WorkspaceService,
   layout,
@@ -28,6 +30,8 @@ import {
   type LlmToolSpec,
   type LogSink,
   type PomniContainer,
+  type Provider,
+  type ToolGrant,
   type ToolLoopHooks,
   type VcsInfo,
 } from '@pomni/core';
@@ -40,6 +44,7 @@ import {
   NodeFsProbe,
   NoProviderProbe,
   NoopLock,
+  SqliteChatStore,
   SqlitePipelineStore,
   SilentLogger,
   SqliteRunStore,
@@ -145,6 +150,8 @@ export class MemoryLogSink implements LogSink {
  */
 export class FakeLlm implements LlmPort {
   calls: Array<LlmRequest & { tools?: LlmToolSpec[] }> = [];
+  /** Answers handed out in order, one per call. Falls back to `reply` once empty. */
+  replies: string[] = [];
   reply = 'generated prompt';
   configured = true;
   /** Tool calls to emit, in order, before finishing. Each entry is one turn. */
@@ -152,9 +159,11 @@ export class FakeLlm implements LlmPort {
   toolResults: string[] = [];
 
   async complete(request: LlmRequest): Promise<LlmResult> {
-    this.calls.push(request);
+    // A copy: callers keep appending to the same conversation, and a recording that changes
+    // after the fact cannot show what this call was actually given.
+    this.calls.push({ ...request, messages: [...request.messages] });
     return {
-      text: this.reply,
+      text: this.replies.shift() ?? this.reply,
       stopReason: 'end_turn',
       usage: { inputTokens: 10, outputTokens: 20, cacheReadTokens: 0 },
       turns: 1,
@@ -195,15 +204,25 @@ export class FakeLlm implements LlmPort {
 
 /** Hands the same fake model back for every provider, so tests never reach a network. */
 class FakeLlmFactory implements LlmFactory {
+  /** The options the last session was built with — how a test sees what an agent was given. */
+  lastOptions: { cwd?: string; dirs?: string[]; tools?: ToolGrant[]; files?: boolean } = {};
+
   constructor(private readonly llm: FakeLlm) {}
 
-  create(): LlmPort {
+  create(
+    _provider: Provider,
+    options: { cwd?: string; dirs?: string[]; tools?: ToolGrant[]; files?: boolean } = {},
+  ): LlmPort {
+    this.lastOptions = options;
     return this.llm;
   }
 }
 
 export interface TestHarness extends PomniContainer {
   llm: FakeLlm;
+  llmFactory: FakeLlmFactory;
+  pipelineStore: SqlitePipelineStore;
+  chatStore: SqliteChatStore;
   git: FakeGit;
   executor: FakeExecutor;
   logs: MemoryLogSink;
@@ -261,8 +280,10 @@ export async function createHarness(): Promise<TestHarness> {
   // Tests are single-process: the lock adds latency without exercising anything.
   const backlog = new BacklogService(docs, projects, runStore, new NoopLock(), clock, events);
   const llm = new FakeLlm();
-  const providerService = new ProviderService(docs, new FakeLlmFactory(llm), clock, events);
+  const llmFactory = new FakeLlmFactory(llm);
+  const providerService = new ProviderService(docs, llmFactory, clock, events);
   const workflows = new WorkflowService(docs, projects, providerService, clock, events);
+  const tools = new ToolService(docs, projects, credentials, executor, clock, events, logger);
   const pipelineStore = new SqlitePipelineStore(docs.absolute(layout.database));
   const pipelines = new PipelineService(
     docs,
@@ -271,6 +292,26 @@ export async function createHarness(): Promise<TestHarness> {
     workflows,
     repos,
     providerService,
+    tools,
+    backlog,
+    runs,
+    git,
+    clock,
+    events,
+    logger,
+  );
+
+  const chatStore = new SqliteChatStore(docs.absolute(layout.database));
+  const chat = new ChatService(
+    chatStore,
+    providerService,
+    projects,
+    repos,
+    backlog,
+    workflows,
+    tools,
+    runs,
+    pipelines,
     clock,
     events,
     logger,
@@ -288,12 +329,17 @@ export async function createHarness(): Promise<TestHarness> {
     backlog,
     workflows,
     providers: providerService,
+    tools,
     pipelines,
+    chat,
     runs,
     doctor,
     detection,
     executor,
     llm,
+    llmFactory,
+    pipelineStore,
+    chatStore,
     runStore,
     logs,
     events,
@@ -303,6 +349,7 @@ export async function createHarness(): Promise<TestHarness> {
     cleanup: async () => {
       runStore.close();
       pipelineStore.close();
+      chatStore.close();
       // Windows holds handles briefly after close; retry rather than fail the suite.
       await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     },
