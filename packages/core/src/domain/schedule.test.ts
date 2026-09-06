@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { ValidationError } from './errors.js';
 import type { BacklogItem } from './item.js';
 import {
+  assertWavesDisjoint,
   extractPlanPaths,
   pathsOverlap,
   planWaves,
@@ -86,6 +87,58 @@ describe('waves', () => {
     expect(pathsOverlap('packages/core', 'packages/core/src/app/x.ts')).toBe(true);
     expect(pathsOverlap('packages/core/src/app/x.ts', 'packages/core')).toBe(true);
     expect(pathsOverlap('packages/core', 'packages/corex/y.ts')).toBe(false);
+  });
+
+  it('separates an item working in a directory from one working on a file inside it', () => {
+    // The containment rule reaching all the way through planning, not only through
+    // `pathsOverlap`: one item claims a directory, the next a file underneath it.
+    const items = [
+      item({ id: 'POMN-21', order: 10, repos: ['core'], touches: ['packages/core/src/app'] }),
+      item({
+        id: 'POMN-22',
+        order: 20,
+        repos: ['core'],
+        body: planSection('packages/core/src/app/pipeline-service.ts'),
+      }),
+      // The near miss: a sibling directory that merely shares a prefix is free to run alongside.
+      item({ id: 'POMN-23', order: 30, repos: ['core'], touches: ['packages/core/src/appx'] }),
+    ];
+
+    const plan = planOf(items, { core: true });
+
+    expect(waveOf(plan, 'POMN-21')).not.toBe(waveOf(plan, 'POMN-22'));
+    expect(waveOf(plan, 'POMN-21')).toBe(waveOf(plan, 'POMN-23'));
+    expect(edgeBetween(plan, 'POMN-21', 'POMN-22')?.reasons).toContainEqual({
+      kind: 'path_overlap',
+      path: 'packages/core/src/app',
+      otherPath: 'packages/core/src/app/pipeline-service.ts',
+    });
+    expect(edgeBetween(plan, 'POMN-21', 'POMN-23')).toBeUndefined();
+  });
+
+  it('serialises two items in a repo that cannot give each run its own worktree', () => {
+    // Same two items, planned twice against opposite isolation. Nothing but the worktree answer
+    // differs, so this is exactly the boundary the repo's isolation probe moves.
+    const items = () => [
+      item({ id: 'POMN-24', order: 10, repos: ['core'], touches: ['src/auth.ts'] }),
+      item({ id: 'POMN-25', order: 20, repos: ['core'], touches: ['src/billing.ts'] }),
+    ];
+
+    const serialised = planOf(items(), { core: false });
+    expect(serialised.waves).toEqual([
+      { index: 1, itemIds: ['POMN-24'] },
+      { index: 2, itemIds: ['POMN-25'] },
+    ]);
+    expect(edgeBetween(serialised, 'POMN-24', 'POMN-25')?.reasons).toEqual([
+      { kind: 'shared_repo', repo: 'core' },
+    ]);
+
+    // A repo missing from the map is not an unknown to guess at — it counts as not isolating.
+    expect(planOf(items(), {}).waves).toEqual(serialised.waves);
+
+    const together = planOf(items(), { core: true });
+    expect(together.waves).toEqual([{ index: 1, itemIds: ['POMN-24', 'POMN-25'] }]);
+    expect(together.conflicts).toEqual([]);
   });
 
   it('treats an item that names no paths as touching its whole repo', () => {
@@ -173,6 +226,69 @@ describe('waves', () => {
     const isolation = { api: true, web: true };
 
     expect(planOf([...items].reverse(), isolation).waves).toEqual(planOf(items, isolation).waves);
+  });
+});
+
+describe('the check made before anything is launched', () => {
+  // Plans built by hand rather than by `planWaves`, because `planWaves` cannot produce these —
+  // the point of the check is to catch a plan that reached the launcher some other way.
+
+  it('refuses a wave holding two items that conflict', () => {
+    const bad: WavePlan = {
+      waves: [{ index: 1, itemIds: ['POMN-26', 'POMN-27'] }],
+      conflicts: [
+        {
+          a: 'POMN-26',
+          b: 'POMN-27',
+          reasons: [{ kind: 'path_overlap', path: 'src/auth.ts', otherPath: 'src/auth.ts' }],
+        },
+      ],
+      blocked: [],
+      scopes: {},
+    };
+
+    expect(() => assertWavesDisjoint(bad)).toThrow(ValidationError);
+    expect(() => assertWavesDisjoint(bad)).toThrow(/POMN-26.*POMN-27.*both touch src\/auth\.ts/);
+  });
+
+  it('refuses a plan that runs a dependent before what it depends on', () => {
+    const bad: WavePlan = {
+      waves: [
+        { index: 1, itemIds: ['POMN-28'] },
+        { index: 2, itemIds: ['POMN-29'] },
+      ],
+      // POMN-28 depends on POMN-29 but sits in the earlier wave.
+      conflicts: [
+        { a: 'POMN-28', b: 'POMN-29', reasons: [{ kind: 'depends_on', from: 'POMN-28', to: 'POMN-29', via: [] }] },
+      ],
+      blocked: [],
+      scopes: {},
+    };
+
+    expect(() => assertWavesDisjoint(bad)).toThrow(/POMN-28 depends on POMN-29 but runs in wave 1/);
+  });
+
+  it('refuses a plan that both blocks an item and schedules it', () => {
+    const bad: WavePlan = {
+      waves: [{ index: 1, itemIds: ['POMN-30'] }],
+      conflicts: [],
+      blocked: [{ itemId: 'POMN-30', waitingOn: ['POMN-31'] }],
+      scopes: {},
+    };
+
+    expect(() => assertWavesDisjoint(bad)).toThrow(/POMN-30 is blocked on POMN-31/);
+  });
+
+  it('accepts a plan that planWaves actually produced', () => {
+    const plan = planOf(
+      [
+        item({ id: 'POMN-32', order: 10, repos: ['api'], dependsOn: ['POMN-33'], touches: ['a.ts'] }),
+        item({ id: 'POMN-33', order: 20, repos: ['api'], touches: ['b.ts'] }),
+      ],
+      { api: true },
+    );
+
+    expect(() => assertWavesDisjoint(plan)).not.toThrow();
   });
 });
 

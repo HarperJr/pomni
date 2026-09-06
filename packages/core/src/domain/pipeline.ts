@@ -268,6 +268,29 @@ export function contextBytes(files: ContextFile[]): number {
  * write each delegation as if the agent can see nothing else, so context reaching only the
  * top of the tree would have to be retyped into every delegation to survive — and would not.
  */
+/**
+ * One agent's instruction, with the brief the whole run shares.
+ *
+ * The protocol used to tell an orchestrator that a delegated agent can see nothing else, so
+ * every delegation repeated the entire background. It is cheaper and more reliable to hand
+ * the brief to every agent once than to have a model retype it each time — and a retyped
+ * brief drifts from the original, which a copied one cannot.
+ */
+export function withBrief(task: string, brief: string): string {
+  const trimmed = brief.trim();
+  if (!trimmed || task.includes(trimmed)) return task;
+
+  return [
+    '## What this run is about',
+    '',
+    trimmed,
+    '',
+    '## Your task',
+    '',
+    task,
+  ].join('\n');
+}
+
 export function withContext(task: string, files: ContextFile[]): string {
   if (files.length === 0) return task;
 
@@ -316,8 +339,9 @@ You do not do the work. To have something done, reply with **only** a fenced jso
 \`\`\`
 
 Several entries run in parallel, so ask for everything that does not depend on something
-else at once. Each agent sees only the task you write: not this conversation, not the
-original request, not what the others returned.
+else at once. Every agent is already given the run's brief, so write only what *this* agent
+must do and what it needs that the brief does not say. Do not restate the background. It
+cannot see this conversation or what the other agents returned.
 
 You then get their results and may delegate again.
 

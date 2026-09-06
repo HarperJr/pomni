@@ -15,6 +15,7 @@ import {
   ORCHESTRATOR_PROTOCOL,
   parseDelegations,
   summarise,
+  withBrief,
   withContext,
   type ContextFile,
   type PipelineFilter,
@@ -628,7 +629,13 @@ export class PipelineService {
       // round back is what made a lead ask the same analyst the same question four times:
       // it could not see what it had already delegated.
       const carried = [...run.context, ...(this.handedOver.get(run.id) ?? [])];
-      const history: LlmMessage[] = [{ role: 'user', content: withContext(task, carried) }];
+      // The entry agent's task *is* the brief; everyone else is given it alongside their own
+      // instruction. Without this the orchestrator had to restate the whole background in
+      // every delegation, and it did — 174kB of it across one 22-step run.
+      const forAgent = depth === 0 ? task : withBrief(task, run.task);
+      const history: LlmMessage[] = [
+        { role: 'user', content: withContext(forAgent, carried) },
+      ];
       // An exact repeat is answered from the ledger instead of being run again — a second
       // session for a question already answered costs money and returns the same thing.
       const answered = new Map<string, string>();
