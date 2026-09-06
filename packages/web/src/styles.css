@@ -692,12 +692,24 @@ svg.graph {
   gap: 6px;
   padding: 0 0 8px 2px;
   min-width: 0;
+  min-height: 20px;
 }
 
 .flow-note strong {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* Collapsed by default, so the summary line above is what a running run costs to look at;
+   the tree is a click away rather than the default. */
+.flow-tree > summary {
+  cursor: pointer;
+  padding-bottom: 4px;
+}
+
+.flow-tree[open] > summary {
+  padding-bottom: 8px;
 }
 
 .flow-steps {
@@ -982,6 +994,36 @@ details.chip .log {
   right: 12px;
   padding: 2px 10px;
   font-size: 12px;
+}
+
+/* "Running" and "Recent" divide what is happening now from what already happened; the
+   heading is omitted rather than shown empty when a section has nothing in it. */
+.section-head {
+  padding: 8px 16px 4px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-dim);
+}
+
+.show-all {
+  display: block;
+  width: 100%;
+  text-align: center;
+  padding: 8px 12px;
+  font-size: 12px;
+}
+
+/* Both controls can be live at once - more pages to load, and a way to collapse back -
+   so they sit side by side rather than one replacing the other. */
+.show-all-row {
+  display: flex;
+  gap: 8px;
+}
+
+.show-all-row .show-all {
+  flex: 1;
 }
 
 /* A project has six blocks; showing all six at once made the page a scroll rather than a

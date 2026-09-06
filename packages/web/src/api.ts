@@ -1155,8 +1155,19 @@ export const api = {
       method: 'POST',
     }),
 
-  listPipelines: (projectId: string) =>
-    request<{ runs: PipelineRun[] }>(`/api/projects/${encodeURIComponent(projectId)}/pipelines`),
+  listPipelines: (
+    projectId: string,
+    params?: { limit?: number; workflowId?: string; status?: PipelineStatus },
+  ) => {
+    const query = new URLSearchParams();
+    if (params?.limit !== undefined) query.set('limit', String(params.limit));
+    if (params?.workflowId !== undefined) query.set('workflow', params.workflowId);
+    if (params?.status !== undefined) query.set('status', params.status);
+    const qs = query.toString();
+    return request<{ runs: PipelineRun[] }>(
+      `/api/projects/${encodeURIComponent(projectId)}/pipelines${qs ? `?${qs}` : ''}`,
+    );
+  },
 
   getPipeline: (runId: string) =>
     request<{ run: PipelineRunDetail }>(`/api/pipelines/${encodeURIComponent(runId)}`),

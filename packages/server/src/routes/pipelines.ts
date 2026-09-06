@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import type { PomniContainer } from '@pomni/core';
+import { PipelineStatusSchema, type PomniContainer } from '@pomni/core';
 import type { FastifyInstance } from 'fastify';
 
 const ListQuery = z.object({
@@ -7,7 +7,9 @@ const ListQuery = z.object({
   project: z.string().optional(),
   workflow: z.string().optional(),
   item: z.string().optional(),
-  limit: z.coerce.number().optional(),
+  // Clamped by the service rather than rejected here — asking for more rows than exist
+  // is not a malformed request, it is a request for everything.
+  limit: z.coerce.number().int().positive().optional(),
 });
 
 const StartBody = z.object({
@@ -62,16 +64,20 @@ export async function pipelineRoutes(
     };
   });
 
-  app.get<{ Params: { id: string }; Querystring: { limit?: string; workflow?: string } }>(
-    '/api/projects/:id/pipelines',
-    async (request) => ({
+  app.get<{
+    Params: { id: string };
+    Querystring: { limit?: string; workflow?: string; status?: string };
+  }>('/api/projects/:id/pipelines', async (request) => {
+    const query = ListQuery.parse(request.query);
+    return {
       runs: await container.pipelines.list({
         projectId: request.params.id,
-        workflowId: request.query.workflow,
-        limit: request.query.limit ? Number(request.query.limit) : undefined,
+        workflowId: query.workflow,
+        status: query.status,
+        limit: query.limit,
       }),
-    }),
-  );
+    };
+  });
 
   app.get<{ Params: { runId: string } }>('/api/pipelines/:runId', async (request) => ({
     run: await container.pipelines.get(request.params.runId),

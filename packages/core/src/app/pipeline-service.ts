@@ -133,6 +133,10 @@ const MAX_PARALLEL = 4;
  * the seventeen-step run that cost $23 is the case this exists to stop.
  */
 const MAX_SESSIONS = 12;
+
+/** The most runs any one listing returns, and how many when nobody says. */
+const MAX_LISTED = 200;
+const DEFAULT_LISTED = 30;
 /**
  * How many times one agent may hand a problem up before it has to answer with what it has.
  *
@@ -319,8 +323,18 @@ export class PipelineService {
     };
   }
 
+  /**
+   * Runs, newest first, never more than {@link MAX_LISTED} of them.
+   *
+   * The cap belongs here rather than only on the HTTP route: the route rejected an
+   * over-large limit, which is a different thing from bounding the answer, and left the
+   * CLI and every other caller unbounded.
+   */
   async list(filter: PipelineFilter): Promise<PipelineRun[]> {
-    return this.store.listRuns(filter);
+    return this.store.listRuns({
+      ...filter,
+      limit: Math.min(filter.limit ?? DEFAULT_LISTED, MAX_LISTED),
+    });
   }
 
   /**

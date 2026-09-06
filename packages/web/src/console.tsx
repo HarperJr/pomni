@@ -1,4 +1,4 @@
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useRef, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import {
@@ -37,9 +37,14 @@ const OUTCOME_NOTE: Record<string, string> = {
   unknown: 'did not say whether it worked',
 };
 
+const RECENT_FINISHED = 5;
+const PAGE_SIZE = 30;
+const MAX_LIMIT = 200;
+
 /** Start a run, and see the ones that already happened. */
 export function PipelinePanel({ projectId }: { projectId: string }) {
   const [starting, setStarting] = useState(false);
+  const [limit, setLimit] = useState(PAGE_SIZE);
   const queryClient = useQueryClient();
 
   const rerun = useMutation({
@@ -48,8 +53,9 @@ export function PipelinePanel({ projectId }: { projectId: string }) {
   });
 
   const runs = useQuery({
-    queryKey: ['pipelines', projectId],
-    queryFn: () => api.listPipelines(projectId).then((result) => result.runs),
+    queryKey: ['pipelines', projectId, limit],
+    queryFn: () => api.listPipelines(projectId, { limit }).then((result) => result.runs),
+    placeholderData: keepPreviousData,
     refetchInterval: (query) =>
       query.state.data?.some((run) => run.status === 'running') ? 2000 : false,
   });
@@ -59,13 +65,32 @@ export function PipelinePanel({ projectId }: { projectId: string }) {
     queryFn: () => api.projectWorkflows(projectId).then((result) => result.workflows),
   });
 
+  // The poll above is the backstop; a run finishing is what actually needs to move it out of
+  // the live section right away, and that is exactly what `pipeline.finished` announces.
+  useEffect(() => {
+    const source = new EventSource('/api/events');
+    const onFinished = () => {
+      void queryClient.invalidateQueries({ queryKey: ['pipelines', projectId] });
+    };
+    source.addEventListener('pipeline.finished', onFinished as EventListener);
+    return () => source.close();
+  }, [projectId, queryClient]);
+
   const runnable = (workflows.data ?? []).filter((workflow) => workflow.runnable);
+  const allRuns = runs.data ?? [];
+  const live = allRuns.filter((run) => run.status === 'running');
+  const finished = allRuns.filter((run) => run.status !== 'running');
+  const showingAll = limit > PAGE_SIZE;
+  const visibleFinished = showingAll ? finished : finished.slice(0, RECENT_FINISHED);
+  // The server clamps at 200 and returns the same rows past that point, so once the page
+  // hits the ceiling there is nothing "more" left to ask for.
+  const mayHaveMore = allRuns.length === limit && limit < MAX_LIMIT;
 
   return (
     <div className="card">
       <div className="card-head">
         Agent runs
-        <span className="dim" style={{ fontWeight: 400 }}>{runs.data?.length ?? 0}</span>
+        <span className="dim" style={{ fontWeight: 400 }}>{allRuns.length}</span>
         <div className="spacer" />
         <button
           className="primary"
@@ -77,43 +102,57 @@ export function PipelinePanel({ projectId }: { projectId: string }) {
         </button>
       </div>
 
-      <Spend runs={runs.data ?? []} />
+      <Spend runs={allRuns} />
 
-      {(runs.data ?? []).length === 0 ? (
+      {allRuns.length === 0 ? (
         <div className="empty">
           {runnable.length === 0
             ? 'Attach a workflow whose agents all have prompts, then a task can be run through it.'
             : 'Nothing has run yet. Give the pipeline a task and watch it work.'}
         </div>
       ) : (
-        (runs.data ?? []).map((run) => (
-          <div className="run-entry" key={run.id}>
-            <Link className="row" to={`/p/${projectId}/console/${run.id}`}>
-              <div className="grow">
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
-                  <RunBadge status={run.status} />
-                  <span className="tag">{run.workflowName}</span>
-                  <span className="truncate grow">{firstLine(run.task)}</span>
-                </div>
-                <div className="dim mono truncate">{run.result ?? run.error ?? ''}</div>
-              </div>
-              <span className="dim mono">{duration(run.durationMs)}</span>
-            </Link>
-            {/* A run that stopped without finishing the job is the one you came here to
-                restart, so the button is on the row rather than a click away. */}
-            {run.status !== 'running' && (run.status !== 'passed' || run.outcome !== 'done') && (
-              <button
-                className="ghost rerun"
-                disabled={rerun.isPending}
-                onClick={() => rerun.mutate(run.id)}
-                title="Run it again, telling the agents how this attempt ended"
-              >
-                Run again
+        <>
+          {live.length > 0 && <div className="section-head">Running</div>}
+          {live.map((run) => (
+            <div className="run-entry" key={run.id}>
+              <RunRow projectId={projectId} run={run} onRerun={rerun.mutate} rerunPending={rerun.isPending} />
+              <LiveFlow runId={run.id} />
+            </div>
+          ))}
+
+          {live.length > 0 && finished.length > 0 && <div className="section-head">Recent</div>}
+
+          {visibleFinished.map((run) => (
+            <div className="run-entry" key={run.id}>
+              <RunRow projectId={projectId} run={run} onRerun={rerun.mutate} rerunPending={rerun.isPending} />
+            </div>
+          ))}
+
+          {!showingAll && finished.length > RECENT_FINISHED && (
+            <button
+              className="ghost show-all"
+              onClick={() => setLimit((current) => Math.min(current + PAGE_SIZE, MAX_LIMIT))}
+            >
+              Show all
+            </button>
+          )}
+
+          {showingAll && (
+            <div className="show-all-row">
+              {mayHaveMore && (
+                <button
+                  className="ghost show-all"
+                  onClick={() => setLimit((current) => Math.min(current + PAGE_SIZE, MAX_LIMIT))}
+                >
+                  Show all
+                </button>
+              )}
+              <button className="ghost show-all" onClick={() => setLimit(PAGE_SIZE)}>
+                Show less
               </button>
-            )}
-            {run.status === 'running' && <LiveFlow runId={run.id} />}
-          </div>
-        ))
+            </div>
+          )}
+        </>
       )}
 
       {starting && (
@@ -124,6 +163,47 @@ export function PipelinePanel({ projectId }: { projectId: string }) {
         />
       )}
     </div>
+  );
+}
+
+/** One run's row: badge, task, duration, and the retry button when it makes sense. */
+function RunRow({
+  projectId,
+  run,
+  onRerun,
+  rerunPending,
+}: {
+  projectId: string;
+  run: PipelineRun;
+  onRerun: (runId: string) => void;
+  rerunPending: boolean;
+}) {
+  return (
+    <>
+      <Link className="row" to={`/p/${projectId}/console/${run.id}`}>
+        <div className="grow">
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
+            <RunBadge status={run.status} />
+            <span className="tag">{run.workflowName}</span>
+            <span className="truncate grow">{firstLine(run.task)}</span>
+          </div>
+          <div className="dim mono truncate">{run.result ?? run.error ?? ''}</div>
+        </div>
+        <span className="dim mono">{duration(run.durationMs)}</span>
+      </Link>
+      {/* A run that stopped without finishing the job is the one you came here to
+          restart, so the button is on the row rather than a click away. */}
+      {run.status !== 'running' && (run.status !== 'passed' || run.outcome !== 'done') && (
+        <button
+          className="ghost rerun"
+          disabled={rerunPending}
+          onClick={() => onRerun(run.id)}
+          title="Run it again, telling the agents how this attempt ended"
+        >
+          Run again
+        </button>
+      )}
+    </>
   );
 }
 
@@ -196,32 +276,37 @@ function LiveFlow({ runId }: { runId: string }) {
         {live.length > 0 ? (
           <>
             <span className="dot spin" style={{ background: 'var(--warn)' }} />
-            <strong>{working}</strong>
+            <strong>{working} working</strong>
           </>
         ) : (
           <span className="dim">no agent is working - an orchestrator is deciding</span>
         )}
         <div className="spacer" />
         <span className="dim mono">
-          {done}/{steps.length} done
+          {done} of {steps.length} done
         </span>
       </div>
 
-      <div className="flow-steps" ref={scroller}>
-        {steps.map((step) => (
-          <div
-            key={step.id}
-            className={`flow-step${isLive(step) ? ' live' : ''}`}
-            style={{ paddingLeft: 6 + step.depth * 16 }}
-          >
-            <span className={`dot ${dotClass(step)}${isLive(step) ? ' spin' : ''}`} />
-            <span className="step-name">{step.agentName}</span>
-            {step.role === 'orchestrator' && <span className="tag">orch</span>}
-            <span className="dim truncate grow">{firstLine(step.task)}</span>
-            <span className="dim mono step-meta">{duration(step.durationMs)}</span>
-          </div>
-        ))}
-      </div>
+      {/* Collapsed by default and independent per run: the summary above is the answer to
+          "what is happening now", this is the answer to "show me everything", asked less often. */}
+      <details className="flow-tree">
+        <summary className="dim">Show the delegation tree</summary>
+        <div className="flow-steps" ref={scroller}>
+          {steps.map((step) => (
+            <div
+              key={step.id}
+              className={`flow-step${isLive(step) ? ' live' : ''}`}
+              style={{ paddingLeft: 6 + step.depth * 16 }}
+            >
+              <span className={`dot ${dotClass(step)}${isLive(step) ? ' spin' : ''}`} />
+              <span className="step-name">{step.agentName}</span>
+              {step.role === 'orchestrator' && <span className="tag">orch</span>}
+              <span className="dim truncate grow">{firstLine(step.task)}</span>
+              <span className="dim mono step-meta">{duration(step.durationMs)}</span>
+            </div>
+          ))}
+        </div>
+      </details>
     </div>
   );
 }
@@ -765,7 +850,7 @@ function Spend({ runs }: { runs: PipelineRun[] }) {
     </details>
   );
 }
-
+
 
 /** Shell, file, or something the agent reached for outside itself. */
 function kindOf(tool: string): string {
