@@ -152,6 +152,10 @@ GET    /api/projects/:id/items/:itemId   item + derived blockedBy/blocking + sec
 PATCH  /api/projects/:id/items/:itemId   If-Match; fields and/or the whole body
 POST   /api/projects/:id/items/:itemId/transition   { to, reason?, force? }
                                          -> 422 when a guard refuses, with the reason
+POST   /api/projects/:id/items/:itemId/transitions/preview   { body }
+                                         -> { allowedTransitions } against a hypothetical
+                                         body, same shape as GET; a read spelled POST
+                                         because it carries a body
 POST   /api/projects/:id/items/:itemId/block | /unblock
 DELETE /api/projects/:id/items/:itemId   refused while something depends on it
 POST   /api/projects/:id/items/reorder   { status, orderedIds }   board drag-drop

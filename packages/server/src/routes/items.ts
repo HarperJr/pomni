@@ -41,6 +41,10 @@ const TransitionBody = z.object({
   force: z.boolean().optional(),
 });
 
+const PreviewTransitionsBody = z.object({
+  body: z.string(),
+});
+
 const ChecklistBody = z.object({
   key: z.string().min(1),
   ticked: z.boolean(),
@@ -120,6 +124,20 @@ export async function itemRoutes(app: FastifyInstance, container: PomniContainer
         { reason: body.reason, force: body.force },
       );
       return { item };
+    },
+  );
+
+  app.post<{ Params: { id: string; itemId: string } }>(
+    '/api/projects/:id/items/:itemId/transitions/preview',
+    async (request) => {
+      const body = PreviewTransitionsBody.parse(request.body);
+      return {
+        allowedTransitions: await container.backlog.previewTransitions(
+          request.params.id,
+          request.params.itemId,
+          body.body,
+        ),
+      };
     },
   );
 

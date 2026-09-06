@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import {
   api,
@@ -123,6 +123,48 @@ function describeUnmet(unmet: UnmetRequirement): string {
       if (unmet.unfinished.length === 0) return 'the dependencies of this item have not been checked';
       const verb = unmet.unfinished.length === 1 ? 'is' : 'are';
       return `depends on ${unmet.unfinished.join(', ')}, which ${verb} not done`;
+    }
+
+    case 'spec':
+      return describeSpecGap(unmet.gap);
+  }
+}
+
+/**
+ * One `spec` gap, named — letter for letter what `describeSpecGap` in
+ * `packages/core/src/domain/flow.ts` renders. See the note on `describeUnmet` above: this is a
+ * hand-kept copy because the web package cannot import `@pomni/core`.
+ */
+function describeSpecGap(gap: Extract<UnmetRequirement, { kind: 'spec' }>['gap']): string {
+  switch (gap.reason) {
+    case 'missing':
+      return `${gap.section} is missing from the item body`;
+
+    case 'empty':
+      return `${gap.section} is empty`;
+
+    case 'placeholder':
+      return `${gap.section} is still the template placeholder`;
+
+    case 'criteria': {
+      if (gap.found === 0) return `${gap.section} lists no criteria`;
+
+      const count = gap.found === 1 ? 'one entry' : `${gap.found} entries`;
+      if (gap.usable === 0) {
+        if (gap.placeholders === 0) {
+          return gap.found === 1
+            ? `${gap.section} has one entry and it repeats the title`
+            : `${gap.section} has ${count} and every one repeats the title`;
+        }
+        if (gap.echoesTitle === 0) {
+          return gap.found === 1
+            ? `${gap.section} has one entry and it is still a placeholder`
+            : `${gap.section} has ${count} and every one is still a placeholder`;
+        }
+        return `${gap.section} has ${count} and none of them says anything the title does not`;
+      }
+
+      return `${gap.section} has ${gap.usable === 1 ? 'one criterion' : `${gap.usable} criteria`} that ${gap.usable === 1 ? 'says' : 'say'} something the title does not, and needs ${gap.needed}`;
     }
   }
 }
@@ -275,6 +317,7 @@ function TransitionRow({
   flow,
   fromStatus,
   movePending,
+  bodyDirty,
   onMove,
 }: {
   projectId: string;
@@ -284,6 +327,7 @@ function TransitionRow({
   flow: Flow | undefined;
   fromStatus: ItemStatus;
   movePending: boolean;
+  bodyDirty: boolean;
   onMove: () => void;
 }) {
   const queryClient = useQueryClient();
@@ -315,7 +359,7 @@ function TransitionRow({
         <button
           className="ghost"
           style={{ padding: '2px 9px', fontSize: 12 }}
-          disabled={!offer.ok || movePending}
+          disabled={!offer.ok || movePending || bodyDirty}
           onClick={onMove}
         >
           {offer.label}
@@ -323,8 +367,14 @@ function TransitionRow({
         {offer.via === 'recovery' && <span className="tag warn">recovery</span>}
       </div>
 
-      {!offer.ok && (
-        <div className="hint transition-reason">{offer.unmet.map(describeUnmet).join('; ')}</div>
+      {bodyDirty ? (
+        <div className="hint transition-reason">
+          the body has unsaved changes and must be saved before moving
+        </div>
+      ) : (
+        !offer.ok && (
+          <div className="hint transition-reason">{offer.unmet.map(describeUnmet).join('; ')}</div>
+        )
       )}
 
       {checklistUnmet && entries.length > 0 && (
@@ -360,7 +410,7 @@ export function ItemPage() {
 
   const item = useQuery({
     queryKey: ['item', projectId, itemId],
-    queryFn: () => api.getItem(projectId, itemId).then((result) => result.item),
+    queryFn: () => api.getItem(projectId, itemId),
   });
 
   const flow = useQuery({
@@ -368,10 +418,62 @@ export function ItemPage() {
     queryFn: () => api.getItemFlow(projectId),
   });
 
+  // The body is edited locally and saved explicitly. `savedBody` tracks the last body the
+  // server is known to hold; the draft is only overwritten by a background refetch when it
+  // still matches that last-known value, i.e. there is nothing unsaved to lose. A refetch that
+  // lands while the draft differs just moves `savedBody` forward — the draft, and its dirty
+  // state against the new baseline, are left alone.
+  const [bodyDraft, setBodyDraft] = useState('');
+  const [savedBody, setSavedBody] = useState<string | undefined>(undefined);
+  const [savedRev, setSavedRev] = useState<string | undefined>(undefined);
+  useEffect(() => {
+    const fresh = item.data?.item.body;
+    if (fresh === undefined) return;
+    if (savedBody === undefined || bodyDraft === savedBody) setBodyDraft(fresh);
+    setSavedBody(fresh);
+    setSavedRev(item.data?.rev);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [item.data?.item.body, item.data?.rev]);
+
+  const bodyDirty = savedBody !== undefined && bodyDraft !== savedBody;
+
+  // Debounced 300ms: long enough that a fast typist doesn't fire a request per keystroke,
+  // short enough that the unmet list still reads as "live" rather than stale.
+  const [debouncedBody, setDebouncedBody] = useState<string | undefined>(undefined);
+  useEffect(() => {
+    const timer = setTimeout(() => setDebouncedBody(bodyDraft), 300);
+    return () => clearTimeout(timer);
+  }, [bodyDraft]);
+
+  const preview = useQuery({
+    queryKey: ['item-transitions-preview', projectId, itemId, debouncedBody],
+    queryFn: () => api.previewTransitions(projectId, itemId, debouncedBody ?? ''),
+    enabled: savedBody !== undefined && debouncedBody !== undefined && debouncedBody !== savedBody,
+  });
+
   const invalidate = async () => {
     await queryClient.invalidateQueries({ queryKey: ['item', projectId, itemId] });
     await queryClient.invalidateQueries({ queryKey: ['items', projectId] });
   };
+
+  const [conflict, setConflict] = useState(false);
+  const [showLatest, setShowLatest] = useState(false);
+
+  const saveBody = useMutation({
+    mutationFn: () => api.updateItem(projectId, itemId, { body: bodyDraft }, savedRev),
+    onSuccess: async () => {
+      setError(null);
+      setConflict(false);
+      await invalidate();
+    },
+    onError: (caught) => {
+      if (caught instanceof ApiError && caught.status === 409 && caught.problem.code === 'stale_revision') {
+        setConflict(true);
+      } else {
+        setError(errorMessage(caught));
+      }
+    },
+  });
 
   const move = useMutation({
     mutationFn: (to: ItemStatus) => api.transitionItem(projectId, itemId, { to }),
@@ -400,7 +502,14 @@ export function ItemPage() {
   if (item.isError) return <Alert kind="error">{errorMessage(item.error)}</Alert>;
   if (!item.data) return <div className="dim">Loading…</div>;
 
-  const data = item.data;
+  const data = item.data.item;
+
+  // Only trust the preview while it is for the body currently shown, and only once it has
+  // actually come back — a request still in flight, or one that failed, falls back to the
+  // saved item's transitions rather than showing nothing or something stale.
+  const previewIsCurrent = bodyDirty && debouncedBody === bodyDraft;
+  const shownTransitions =
+    previewIsCurrent && preview.isSuccess ? preview.data.allowedTransitions : data.allowedTransitions;
 
   return (
     <>
@@ -478,10 +587,10 @@ export function ItemPage() {
         <div className="row" style={{ alignItems: 'flex-start' }}>
           <span className="dim" style={{ paddingTop: 5 }}>Move to</span>
           <div className="grow transition-list">
-            {data.allowedTransitions.length === 0 && (
+            {shownTransitions.length === 0 && (
               <span className="dim" style={{ fontSize: 12 }}>no moves are offered from here</span>
             )}
-            {data.allowedTransitions.map((offer) => (
+            {shownTransitions.map((offer) => (
               <TransitionRow
                 key={offer.to}
                 projectId={projectId}
@@ -491,6 +600,7 @@ export function ItemPage() {
                 flow={flow.data}
                 fromStatus={data.status}
                 movePending={move.isPending}
+                bodyDirty={bodyDirty}
                 onMove={() => move.mutate(offer.to)}
               />
             ))}
@@ -499,9 +609,52 @@ export function ItemPage() {
       </div>
 
       <div className="card">
-        <div className="card-head">Spec</div>
-        <pre className="log" style={{ maxHeight: 'none' }}>{data.body.trimEnd()}</pre>
+        <div className="card-head">
+          Spec
+          <div className="spacer" />
+          {bodyDirty && <span className="dim spec-dirty">unsaved changes</span>}
+          <button
+            className="primary"
+            style={{ padding: '3px 12px', fontSize: 12 }}
+            disabled={!bodyDirty || saveBody.isPending}
+            onClick={() => saveBody.mutate()}
+          >
+            {saveBody.isPending ? 'Saving…' : 'Save'}
+          </button>
+        </div>
+        {conflict && (
+          <Alert kind="error">
+            This item changed on the server since you started editing. Your draft has not been
+            touched —{' '}
+            <button
+              className="ghost"
+              onClick={async () => {
+                await item.refetch();
+                setShowLatest(true);
+              }}
+            >
+              view the current body
+            </button>{' '}
+            before deciding what to do.
+          </Alert>
+        )}
+        <textarea
+          className="mono spec-body-editor"
+          value={bodyDraft}
+          onChange={(event) => setBodyDraft(event.target.value)}
+          spellCheck={false}
+        />
       </div>
+
+      {showLatest && (
+        <Dialog
+          title="Current body on the server"
+          onClose={() => setShowLatest(false)}
+          footer={<button onClick={() => setShowLatest(false)}>Close</button>}
+        >
+          <pre className="spec-body-preview">{data.body}</pre>
+        </Dialog>
+      )}
     </>
   );
 }

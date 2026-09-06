@@ -1,4 +1,6 @@
 import { z } from 'zod';
+import { SpecRequirementSchema, specGaps } from './spec-quality.js';
+import type { SpecGap } from './spec-quality.js';
 
 /**
  * A task flow: the states a backlog item may sit in, the arrows between them, and what must
@@ -115,6 +117,17 @@ export const RequirementsSchema = z
      * italic prompt `newItemBody` writes into a fresh item does not count as written.
      */
     sections: z.array(z.string().min(1)).default([]),
+    /**
+     * The item has actually been specified, not merely filled in. Where `sections` asks whether
+     * a heading has text under it, this asks whether the text says anything: the template's
+     * italic prompt, `TBD`, and an acceptance list whose only entry is the title said again all
+     * fail it. Judged by {@link specGaps}; see `spec-quality.ts` for what counts as a
+     * non-answer, and for why none of it is a length rule.
+     *
+     * `null` — the default, and what every project written before this key existed
+     * deserialises to — means the arrow does not ask.
+     */
+    spec: SpecRequirementSchema.nullable().default(null),
     /** Every item this one `dependsOn` has finished. What "finished" means is the caller's. */
     dependencies: z.boolean().default(false),
   })
@@ -128,6 +141,7 @@ export const NO_REQUIREMENTS: Requirements = {
   checklist: [],
   fields: [],
   sections: [],
+  spec: null,
   dependencies: false,
 };
 
@@ -138,6 +152,7 @@ export function hasRequirements(requires: Requirements): boolean {
     requires.checklist.length > 0 ||
     requires.fields.length > 0 ||
     requires.sections.length > 0 ||
+    requires.spec !== null ||
     requires.dependencies
   );
 }
@@ -324,7 +339,22 @@ const BUILT_IN_GUARDS: Record<string, { requires: Requirements; message?: string
   specced: {
     requires: requiring({ sections: [BUILT_IN_SECTIONS.problem, BUILT_IN_SECTIONS.acceptance] }),
   },
-  ready: { requires: requiring({ sections: [BUILT_IN_SECTIONS.plan] }) },
+  /**
+   * `ready` is where an item stops being thought about and starts being picked up, by a person
+   * or by an agent — so it is the last moment a placeholder can be caught cheaply. Everything
+   * before it is allowed to be unfinished; that is what `backlog` is for, and no arrow out of
+   * `backlog` asks for a spec.
+   *
+   * The `specced` guard's weaker `sections` check is left as it was on purpose. It fires one
+   * arrow earlier, where "there is text under this heading" is the right question, and it can
+   * only ever refuse a subset of what this refuses — so the two never contradict.
+   */
+  ready: {
+    requires: requiring({
+      sections: [BUILT_IN_SECTIONS.plan],
+      spec: { sections: [BUILT_IN_SECTIONS.problem, BUILT_IN_SECTIONS.acceptance], minCriteria: 1 },
+    }),
+  },
   in_progress: { requires: requiring({ dependencies: true }) },
   in_review: {
     requires: requiring({ gate: 'default' }),
@@ -463,6 +493,11 @@ export interface GateRunEvidence {
 export interface Evidence {
   /** From `countAcceptance(item.body)`. */
   acceptance: { total: number; checked: number };
+  /**
+   * `item.title`. Needed only by the `spec` requirement, which cannot otherwise tell an
+   * acceptance criterion apart from the title typed a second time.
+   */
+  title: string;
   /** `item.checklist`: key -> ISO timestamp it was ticked. Presence is the tick. */
   checklist: Readonly<Record<string, string>>;
   /** Item field values, keyed by field name. Pass the item itself. */
@@ -481,6 +516,7 @@ export interface Evidence {
 /** Fails every requirement, so an unevidenced move is refused rather than waved through. */
 export const EMPTY_EVIDENCE: Evidence = {
   acceptance: { total: 0, checked: 0 },
+  title: '',
   checklist: {},
   fields: {},
   gates: [],
@@ -519,6 +555,12 @@ export type UnmetRequirement =
   | { kind: 'checklist'; total: number; ticked: number; missing: ChecklistEntry[] }
   | { kind: 'fields'; missing: string[] }
   | { kind: 'sections'; missing: string[] }
+  /**
+   * One absence in the spec, not all of them: the evaluator emits one of these per
+   * {@link SpecGap}, so that a refusal reads as a list a person can fix one line at a time and
+   * watch go green. Everything a sentence needs is inside `gap`.
+   */
+  | { kind: 'spec'; gap: SpecGap }
   // `unfinished` empty with `total` 0 is the unresolved case — nobody looked — not "none left".
   | { kind: 'dependencies'; total: number; unfinished: string[] };
 
@@ -604,6 +646,15 @@ function unmetFor(requires: Requirements, evidence: Evidence): UnmetRequirement[
   if (requires.fields.length > 0) {
     const missing = requires.fields.filter((field) => !isFieldSet(evidence.fields[field]));
     if (missing.length > 0) unmet.push({ kind: 'fields', missing });
+  }
+
+  // `spec` before `sections` on purpose. An arrow may declare both, and then the refusal is
+  // read top to bottom by someone working down the page: Problem, then Acceptance criteria,
+  // then whatever plain `sections` still asks for. `spec` names the sections that carry the
+  // thinking, so its gaps lead; the blunter "no such section" line follows.
+  if (requires.spec !== null) {
+    const gaps = specGaps({ sections: evidence.sections, title: evidence.title }, requires.spec);
+    for (const gap of gaps) unmet.push({ kind: 'spec', gap });
   }
 
   if (requires.sections.length > 0) {
@@ -725,6 +776,50 @@ function allowsClause(allowed: string[]): string {
     : `this project's flow allows: ${commaList(allowed)}`;
 }
 
+/**
+ * One spec gap, named. "spec incomplete" is not an acceptable sentence here: the whole value of
+ * this requirement is that it says *which* paragraph is a placeholder and *why* an acceptance
+ * list of one does not count, so the person reading it can go and fix that thing.
+ *
+ * The section name is printed bare, not quoted, because it is a heading in a document the
+ * reader is looking at — "Problem is still the template placeholder" is how they would say it.
+ */
+function describeSpecGap(gap: SpecGap): string {
+  switch (gap.reason) {
+    case 'missing':
+      return `${gap.section} is missing from the item body`;
+
+    case 'empty':
+      return `${gap.section} is empty`;
+
+    case 'placeholder':
+      return `${gap.section} is still the template placeholder`;
+
+    case 'criteria': {
+      if (gap.found === 0) return `${gap.section} lists no criteria`;
+
+      const count = gap.found === 1 ? 'one entry' : `${gap.found} entries`;
+      if (gap.usable === 0) {
+        // Every entry was thrown out. Say which of the two ways, when they were all the same
+        // way — a mixed list gets the sentence that covers both.
+        if (gap.placeholders === 0) {
+          return gap.found === 1
+            ? `${gap.section} has one entry and it repeats the title`
+            : `${gap.section} has ${count} and every one repeats the title`;
+        }
+        if (gap.echoesTitle === 0) {
+          return gap.found === 1
+            ? `${gap.section} has one entry and it is still a placeholder`
+            : `${gap.section} has ${count} and every one is still a placeholder`;
+        }
+        return `${gap.section} has ${count} and none of them says anything the title does not`;
+      }
+
+      return `${gap.section} has ${gap.usable === 1 ? 'one criterion' : `${gap.usable} criteria`} that ${gap.usable === 1 ? 'says' : 'say'} something the title does not, and needs ${gap.needed}`;
+    }
+  }
+}
+
 /** One unmet requirement as one line of English. */
 export function describeUnmet(unmet: UnmetRequirement): string {
   switch (unmet.kind) {
@@ -769,6 +864,9 @@ export function describeUnmet(unmet: UnmetRequirement): string {
       const noun = unmet.missing.length === 1 ? 'section is' : 'sections are';
       return `no ${names} ${noun} written in the item body`;
     }
+
+    case 'spec':
+      return describeSpecGap(unmet.gap);
 
     case 'dependencies': {
       // Nothing to name means nobody resolved them, not that none are left.

@@ -151,7 +151,7 @@ backlog ─► specced ─► ready ─► in_progress ─► in_review ─► d
 | Transition | Guard |
 | --- | --- |
 | `→ specced` | a non-placeholder `## Problem`, and at least one `- [ ]` acceptance criterion |
-| `→ ready` | a non-placeholder `## Plan` |
+| `→ ready` | a non-placeholder `## Plan`, and `## Problem` / `## Acceptance criteria` clear of template placeholders with at least one criterion that isn't just the title restated |
 | `→ in_progress` | every `dependsOn` item is `done` |
 | `→ in_review` | the project's default gate passed for the repos this item touches |
 | `→ blocked` | a reason, recorded and restored from on unblock |

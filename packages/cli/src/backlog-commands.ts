@@ -625,6 +625,9 @@ function describeRequirements(requires: Requirements): string {
   }
   if (requires.fields.length > 0) parts.push(`fields: ${requires.fields.join(', ')}`);
   if (requires.sections.length > 0) parts.push(`sections: ${requires.sections.join(', ')}`);
+  if (requires.spec) {
+    parts.push(`spec: ${requires.spec.sections.join(', ')} (min ${requires.spec.minCriteria} criteria)`);
+  }
   if (requires.dependencies) parts.push('dependencies');
   return parts.join(', ');
 }

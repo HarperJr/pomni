@@ -465,7 +465,7 @@ Guards, enforced in `BacklogService` so every surface agrees:
 | Transition | Guard |
 | --- | --- |
 | `→ specced` | a non-placeholder `## Problem` and at least one `- [ ]` criterion |
-| `→ ready` | a non-placeholder `## Plan` |
+| `→ ready` | a non-placeholder `## Plan`, plus `## Problem` and `## Acceptance criteria` clear of template placeholders, with at least one criterion that isn't just the title echoed back |
 | `→ in_progress` | every `dependsOn` item is `done` |
 | `→ in_review` | the default gate passed for this item's repos, per the run store |
 

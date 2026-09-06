@@ -31,6 +31,7 @@ import {
   type ItemStatus,
   type ItemType,
   type Priority,
+  type TransitionOffer,
   type UnmetRequirement,
 } from '../domain/item.js';
 import { layout } from '../domain/layout.js';
@@ -397,6 +398,38 @@ export class BacklogService {
     });
   }
 
+  /**
+   * What {@link get}'s `allowedTransitions` would say if the item's body were `body`.
+   *
+   * The item page calls this as prose is typed, so someone filling in a placeholder Problem
+   * watches the `spec` refusal go green without attempting the move and reading the error.
+   * Placeholder detection stays in the domain — the surfaces ask, they do not re-implement.
+   *
+   * Read-only: nothing is written, no event is emitted, and the item's rev is untouched. Only
+   * the body-derived evidence comes from the argument; gate runs, checklist, dependencies and
+   * the title are the stored item's, so a preview differs from reality only where the typed
+   * text does.
+   */
+  async previewTransitions(
+    projectId: string,
+    itemId: string,
+    body: string,
+  ): Promise<TransitionOffer[]> {
+    const item = (await this.getRef(projectId, itemId)).data;
+    const project = (await this.projects.getRef(projectId)).data;
+    const flow = flowOf(project);
+
+    const evidence = await this.evidence(
+      item,
+      project,
+      gatesLeaving(flow, item.status),
+      await this.dependencyEvidence(item),
+      body,
+    );
+
+    return transitionOffers(item, flow, evidence);
+  }
+
   /** The highest-priority `ready` item, which is what `feature next` will pick up. */
   async next(projectId: string): Promise<BacklogItem | null> {
     return pickNext(await this.list({ projectId }));
@@ -474,12 +507,17 @@ export class BacklogService {
    * about. `dependencies` is the same bargain one level up: resolving it costs a read of every
    * sibling item, so the caller passes what it has and `null` — refused, not read as a pass —
    * when the move being judged never asks.
+   *
+   * `body` overrides the item's stored prose, which is what {@link previewTransitions} judges
+   * unsaved text with. Everything not parsed out of the body is unaffected, so a preview
+   * differs from reality only where the typed text does.
    */
   private async evidence(
     item: BacklogItem,
     project: Project,
     gates: string[],
     dependencies: Evidence['dependencies'] = null,
+    body: string = item.body,
   ): Promise<Evidence> {
     const runs: GateRunEvidence[] = [];
     if (gates.length > 0) {
@@ -490,15 +528,18 @@ export class BacklogService {
     }
 
     return {
-      acceptance: countAcceptance(item.body),
+      acceptance: countAcceptance(body),
+      // The title the `spec` requirement compares acceptance criteria against. Omitting it
+      // reads as `''`, which no criterion echoes — the check would pass everything.
+      title: item.title,
       checklist: item.checklist,
       // The item itself, so `fields: [estimate, repos, branch]` reads real fields rather than
       // a hand-maintained projection that would drift the moment a field is added.
-      fields: item as Record<string, unknown>,
+      fields: { ...item, body } as Record<string, unknown>,
       gates: runs,
       // Verbatim: what counts as written is `sectionIsWritten`'s to say, and pre-trimming here
       // would let a fresh item's italic template prompt pass as prose.
-      sections: parseSections(item.body),
+      sections: parseSections(body),
       dependencies,
     };
   }

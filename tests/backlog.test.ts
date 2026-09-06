@@ -20,6 +20,9 @@ async function spec(projectId: string, itemId: string): Promise<void> {
   await harness.backlog.update(projectId, itemId, {
     body: item.body
       .replace('_Why does this matter? What is broken or missing?_', 'Support load is high.')
+      // The template's only criterion is the title typed a second time, which the `spec`
+      // requirement on `ready` refuses. A specced item has one that says something more.
+      .replace(`- [ ] ${item.title}`, '- [ ] a mailed link signs you in without a password')
       .replace('_Filled in by `pomni feature plan`, or by hand._', '1. do the thing'),
   });
 }

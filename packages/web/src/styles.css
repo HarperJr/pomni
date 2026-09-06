@@ -512,6 +512,25 @@ textarea.mono {
   font-size: 12px;
 }
 
+.spec-body-editor {
+  min-height: 420px;
+  border-radius: 0 0 var(--radius) var(--radius);
+  border: none;
+  border-top: 1px solid var(--border);
+}
+
+.spec-dirty {
+  font-size: 12px;
+}
+
+.spec-body-preview {
+  max-height: 60vh;
+  overflow: auto;
+  white-space: pre-wrap;
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
 a.button-link {
   display: inline-block;
 }

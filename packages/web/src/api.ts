@@ -167,6 +167,7 @@ export interface Requirements {
   checklist: ChecklistEntry[];
   fields: string[];
   sections: string[];
+  spec: { sections: string[]; minCriteria: number } | null;
   dependencies: boolean;
 }
 
@@ -202,13 +203,28 @@ export interface GateShortfall {
  * item body` (`no 'Problem' and 'Plan' sections are written in the item body` for several) and
  * `depends on ACME-1, which is not done` (`, which are not done` for several).
  */
+export type SpecGap =
+  | { section: string; reason: 'missing' }
+  | { section: string; reason: 'empty' }
+  | { section: string; reason: 'placeholder' }
+  | {
+      section: string;
+      reason: 'criteria';
+      found: number;
+      usable: number;
+      needed: number;
+      echoesTitle: number;
+      placeholders: number;
+    };
+
 export type UnmetRequirement =
   | { kind: 'acceptance'; total: number; checked: number; unchecked: number }
   | { kind: 'gate'; gate: string; failing: GateShortfall[]; pending: GateShortfall[] }
   | { kind: 'checklist'; total: number; ticked: number; missing: ChecklistEntry[] }
   | { kind: 'fields'; missing: string[] }
   | { kind: 'sections'; missing: string[] }
-  | { kind: 'dependencies'; total: number; unfinished: string[] };
+  | { kind: 'dependencies'; total: number; unfinished: string[] }
+  | { kind: 'spec'; gap: SpecGap };
 
 /** One button a UI may draw: where to, what it says, whether it works and why not. */
 export interface TransitionOffer {
@@ -895,6 +911,32 @@ export const api = {
   getItem: (projectId: string, itemId: string) =>
     request<{ item: BacklogItemDetail; rev: string }>(
       `/api/projects/${encodeURIComponent(projectId)}/items/${encodeURIComponent(itemId)}`,
+    ),
+
+  /**
+   * `etag` is `getItem`'s `rev`. Optional because a caller that never fetched a rev (e.g. a
+   * fresh create) has nothing to send; omitting it means a concurrent-edit conflict on this
+   * item will not be detected server-side.
+   */
+  updateItem: (
+    projectId: string,
+    itemId: string,
+    patch: { body?: string; title?: string },
+    etag?: string,
+  ) =>
+    request<{ item: BacklogItem }>(
+      `/api/projects/${encodeURIComponent(projectId)}/items/${encodeURIComponent(itemId)}`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify(patch),
+        headers: etag ? { 'If-Match': etag } : undefined,
+      },
+    ),
+
+  previewTransitions: (projectId: string, itemId: string, body: string) =>
+    request<{ allowedTransitions: TransitionOffer[] }>(
+      `/api/projects/${encodeURIComponent(projectId)}/items/${encodeURIComponent(itemId)}/transitions/preview`,
+      { method: 'POST', body: JSON.stringify({ body }) },
     ),
 
   createItem: (
