@@ -1,0 +1,315 @@
+import { createRequire } from 'node:module';
+import { mkdirSync } from 'node:fs';
+import { dirname } from 'node:path';
+import {
+  ChatMessageSchema,
+  ChatSchema,
+  type Chat,
+  type ChatFilter,
+  type ChatMessage,
+  type ChatStore,
+} from '@pomni/core';
+
+type SqlValue = string | number | null;
+
+interface SqliteStatement {
+  run(...params: SqlValue[]): unknown;
+  get(...params: SqlValue[]): unknown;
+  all(...params: SqlValue[]): unknown[];
+}
+
+interface SqliteDatabase {
+  exec(sql: string): void;
+  prepare(sql: string): SqliteStatement;
+  close(): void;
+}
+
+const { DatabaseSync } = createRequire(import.meta.url)('node:sqlite') as {
+  DatabaseSync: new (path: string) => SqliteDatabase;
+};
+
+/**
+ * Chat history.
+ *
+ * Shares the database with pipeline runs and capability runs but keeps its own tables and its
+ * own migration counter, so the three can evolve without one's schema change forcing another's.
+ *
+ * Foreign keys are enabled on this connection so `ON DELETE CASCADE` on `chat_messages.chatId`
+ * actually fires — `node:sqlite` does not turn that pragma on by default.
+ */
+export class SqliteChatStore implements ChatStore {
+  private readonly db: SqliteDatabase;
+  private readonly cache = new Map<string, SqliteStatement>();
+
+  constructor(path: string) {
+    if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true });
+    this.db = new DatabaseSync(path);
+    this.db.exec('PRAGMA journal_mode = WAL');
+    this.db.exec('PRAGMA busy_timeout = 5000');
+    this.db.exec('PRAGMA foreign_keys = ON');
+    migrate(this.db);
+  }
+
+  async createChat(chat: Chat): Promise<void> {
+    this.statement(
+      `INSERT INTO chats (id, title, providerId, model, createdAt, updatedAt,
+                          inputTokens, outputTokens, costUsd)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      chat.id,
+      chat.title,
+      chat.providerId,
+      chat.model,
+      chat.createdAt,
+      chat.updatedAt,
+      chat.inputTokens,
+      chat.outputTokens,
+      chat.costUsd,
+    );
+  }
+
+  async listChats(filter: ChatFilter = {}): Promise<Chat[]> {
+    const where: string[] = [];
+    const values: SqlValue[] = [];
+
+    if (filter.query) {
+      where.push('title LIKE ? ESCAPE \'\\\'');
+      values.push(`%${escapeLike(filter.query)}%`);
+    }
+    if (filter.providerId) {
+      where.push('providerId = ?');
+      values.push(filter.providerId);
+    }
+
+    const clause = where.length > 0 ? `WHERE ${where.join(' AND ')}` : '';
+    values.push(Math.min(filter.limit ?? 50, 200));
+
+    const rows = this.statement(
+      `SELECT * FROM chats ${clause} ORDER BY updatedAt DESC LIMIT ?`,
+    ).all(...values) as unknown as ChatRow[];
+    return rows.map(toChat);
+  }
+
+  async getChat(id: string): Promise<Chat | null> {
+    const row = this.statement('SELECT * FROM chats WHERE id = ?').get(id) as unknown as
+      | ChatRow
+      | undefined;
+    return row ? toChat(row) : null;
+  }
+
+  async updateChat(chat: Chat): Promise<void> {
+    this.statement(
+      `UPDATE chats
+         SET title = ?, providerId = ?, model = ?, updatedAt = ?,
+             inputTokens = ?, outputTokens = ?, costUsd = ?
+       WHERE id = ?`,
+    ).run(
+      chat.title,
+      chat.providerId,
+      chat.model,
+      chat.updatedAt,
+      chat.inputTokens,
+      chat.outputTokens,
+      chat.costUsd,
+      chat.id,
+    );
+  }
+
+  async deleteChat(id: string): Promise<void> {
+    this.statement('DELETE FROM chats WHERE id = ?').run(id);
+  }
+
+  async appendMessage(message: ChatMessage): Promise<void> {
+    this.statement(
+      `INSERT INTO chat_messages (id, chatId, role, text, providerId, model, actions,
+                                  createdAt, inputTokens, outputTokens, costUsd)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      message.id,
+      message.chatId,
+      message.role,
+      message.text,
+      message.providerId,
+      message.model,
+      JSON.stringify(message.actions),
+      message.createdAt,
+      message.inputTokens,
+      message.outputTokens,
+      message.costUsd,
+    );
+  }
+
+  async updateMessage(message: ChatMessage): Promise<void> {
+    this.statement(
+      `UPDATE chat_messages
+         SET role = ?, text = ?, providerId = ?, model = ?, actions = ?,
+             inputTokens = ?, outputTokens = ?, costUsd = ?
+       WHERE id = ?`,
+    ).run(
+      message.role,
+      message.text,
+      message.providerId,
+      message.model,
+      JSON.stringify(message.actions),
+      message.inputTokens,
+      message.outputTokens,
+      message.costUsd,
+      message.id,
+    );
+  }
+
+  async listMessages(chatId: string): Promise<ChatMessage[]> {
+    const rows = this.statement(
+      'SELECT * FROM chat_messages WHERE chatId = ? ORDER BY createdAt ASC',
+    ).all(chatId) as unknown as ChatMessageRow[];
+    return rows.map(toChatMessage);
+  }
+
+  async getMessage(id: string): Promise<ChatMessage | null> {
+    const row = this.statement('SELECT * FROM chat_messages WHERE id = ?').get(
+      id,
+    ) as unknown as ChatMessageRow | undefined;
+    return row ? toChatMessage(row) : null;
+  }
+
+  close(): void {
+    try {
+      this.db.close();
+    } catch {
+      // Already closed.
+    }
+  }
+
+  private statement(sql: string): SqliteStatement {
+    let statement = this.cache.get(sql);
+    if (!statement) {
+      statement = this.db.prepare(sql);
+      this.cache.set(sql, statement);
+    }
+    return statement;
+  }
+}
+
+/** Escapes `%` and `_` so a query substring is matched literally, not as a LIKE pattern. */
+function escapeLike(value: string): string {
+  return value.replace(/[\\%_]/g, (char) => `\\${char}`);
+}
+
+interface ChatRow {
+  id: string;
+  title: string;
+  providerId: string;
+  model: string;
+  createdAt: string;
+  updatedAt: string;
+  inputTokens: number;
+  outputTokens: number;
+  costUsd: number | null;
+}
+
+function toChat(row: ChatRow): Chat {
+  return ChatSchema.parse({
+    id: row.id,
+    title: row.title,
+    providerId: row.providerId,
+    model: row.model,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+    inputTokens: row.inputTokens,
+    outputTokens: row.outputTokens,
+    costUsd: row.costUsd,
+  });
+}
+
+interface ChatMessageRow {
+  id: string;
+  chatId: string;
+  role: string;
+  text: string;
+  providerId: string | null;
+  model: string | null;
+  actions: string;
+  createdAt: string;
+  inputTokens: number;
+  outputTokens: number;
+  costUsd: number | null;
+}
+
+function toChatMessage(row: ChatMessageRow): ChatMessage {
+  return ChatMessageSchema.parse({
+    id: row.id,
+    chatId: row.chatId,
+    role: row.role,
+    text: row.text,
+    providerId: row.providerId,
+    model: row.model,
+    actions: parseActions(row.actions),
+    createdAt: row.createdAt,
+    inputTokens: row.inputTokens,
+    outputTokens: row.outputTokens,
+    costUsd: row.costUsd,
+  });
+}
+
+/** Tolerant of a malformed or missing actions column; the schema still validates each entry. */
+function parseActions(raw: string | null): unknown[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+const MIGRATIONS: string[] = [
+  `CREATE TABLE IF NOT EXISTS chats (
+     id           TEXT PRIMARY KEY,
+     title        TEXT NOT NULL,
+     providerId   TEXT NOT NULL,
+     model        TEXT NOT NULL,
+     createdAt    TEXT NOT NULL,
+     updatedAt    TEXT NOT NULL,
+     inputTokens  INTEGER NOT NULL DEFAULT 0,
+     outputTokens INTEGER NOT NULL DEFAULT 0,
+     costUsd      REAL
+   );
+   CREATE INDEX IF NOT EXISTS idx_chats_updated ON chats(updatedAt DESC);
+
+   CREATE TABLE IF NOT EXISTS chat_messages (
+     id           TEXT PRIMARY KEY,
+     chatId       TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+     role         TEXT NOT NULL,
+     text         TEXT NOT NULL,
+     providerId   TEXT,
+     model        TEXT,
+     actions      TEXT NOT NULL DEFAULT '[]',
+     createdAt    TEXT NOT NULL,
+     inputTokens  INTEGER NOT NULL DEFAULT 0,
+     outputTokens INTEGER NOT NULL DEFAULT 0,
+     costUsd      REAL
+   );
+   CREATE INDEX IF NOT EXISTS idx_chat_messages_chat ON chat_messages(chatId, createdAt);`,
+];
+
+function migrate(db: SqliteDatabase): void {
+  db.exec(`CREATE TABLE IF NOT EXISTS chat_schema (version INTEGER NOT NULL)`);
+
+  const row = db.prepare('SELECT version FROM chat_schema LIMIT 1').get() as unknown as
+    | { version: number }
+    | undefined;
+  const current = row?.version ?? 0;
+
+  for (let version = current; version < MIGRATIONS.length; version += 1) {
+    db.exec('BEGIN');
+    try {
+      db.exec(MIGRATIONS[version] as string);
+      db.exec('DELETE FROM chat_schema');
+      db.exec(`INSERT INTO chat_schema (version) VALUES (${version + 1})`);
+      db.exec('COMMIT');
+    } catch (error) {
+      db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+}

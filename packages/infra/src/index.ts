@@ -1,5 +1,6 @@
 export * from './ambient.js';
 export * from './askpass.js';
+export * from './chat-store.js';
 export * from './credential-store.js';
 export * from './doc-store.js';
 export * from './event-file.js';

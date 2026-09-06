@@ -5,6 +5,7 @@ import fastifyStatic from '@fastify/static';
 import { ValidationError, type PomniContainer } from '@pomni/core';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { registerErrorHandler, sendNotFound } from './errors.js';
+import { chatRoutes } from './routes/chats.js';
 import { credentialRoutes } from './routes/credentials.js';
 import { projectRoutes } from './routes/projects.js';
 import { itemRoutes } from './routes/items.js';
@@ -12,6 +13,7 @@ import { repoRoutes } from './routes/repos.js';
 import { runRoutes } from './routes/runs.js';
 import { discoveryRoutes } from './routes/discovery.js';
 import { pipelineRoutes } from './routes/pipelines.js';
+import { toolRoutes } from './routes/tools.js';
 import { workflowRoutes } from './routes/workflows.js';
 import { systemRoutes } from './routes/system.js';
 
@@ -88,6 +90,8 @@ export async function createApp(
   await workflowRoutes(app, container);
   await discoveryRoutes(app, container);
   await pipelineRoutes(app, container);
+  await toolRoutes(app, container);
+  await chatRoutes(app, container);
 
   const webRoot = options.webRoot ?? defaultWebRoot();
   const hasWeb = await exists(join(webRoot, 'index.html'));

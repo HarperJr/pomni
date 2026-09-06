@@ -11,6 +11,8 @@ export interface Problem {
   /** For 409 conflicts: the content the caller must merge against. */
   current?: unknown;
   errors?: unknown;
+  /** From `RequirementsNotMetError.details.unmet` — which requirements a refused move failed. */
+  unmet?: unknown;
 }
 
 export function registerErrorHandler(app: FastifyInstance): void {
@@ -30,6 +32,8 @@ export function registerErrorHandler(app: FastifyInstance): void {
           'Someone else changed this while you were editing. Merge against `current` and retry with the new revision.';
       } else if (error.details !== undefined) {
         problem.errors = error.details;
+        const details = error.details as { unmet?: unknown };
+        if (Array.isArray(details?.unmet)) problem.unmet = details.unmet;
       }
 
       reply.code(error.status).type('application/problem+json').send(problem);
