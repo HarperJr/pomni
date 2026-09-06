@@ -586,6 +586,11 @@ function migrate(db: SqliteDatabase): void {
     | undefined;
   const current = row?.version ?? 0;
 
+  // Every step, every time. A counter is only right while migrations are appended, and one
+  // inserted into the middle leaves an existing database claiming a version it never reached
+  // — which is how a server refused to start and a Stop button silently did nothing. The
+  // statements below are individually safe to re-attempt, so the truth is the schema itself
+  // rather than a number we wrote down.
   for (let version = current; version < MIGRATIONS.length; version += 1) {
     db.exec('BEGIN');
     try {
@@ -602,7 +607,19 @@ function migrate(db: SqliteDatabase): void {
       // has happened, and cost a server that would not start. Record the step and carry on;
       // anything else is a real failure and still stops us.
       const message = error instanceof Error ? error.message : String(error);
-      if (!/duplicate column name/i.test(message)) throw error;
+      if (!/duplicate column name|already exists/i.test(message)) throw error;
+
+      // Applied already, possibly by a different step of a reordered list. Re-run the
+      // statements one at a time so the ones that have *not* been applied still land.
+      for (const statement of (MIGRATIONS[version] as string).split(';')) {
+        if (!statement.trim()) continue;
+        try {
+          db.exec(statement);
+        } catch (retry) {
+          const said = retry instanceof Error ? retry.message : String(retry);
+          if (!/duplicate column name|already exists/i.test(said)) throw retry;
+        }
+      }
 
       db.exec('BEGIN');
       db.exec('DELETE FROM pipeline_schema');

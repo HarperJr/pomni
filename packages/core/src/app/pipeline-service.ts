@@ -70,6 +70,15 @@ export interface StartRunResult {
 
 /** How many delegate-and-review rounds one orchestrator gets before we stop it. */
 const MAX_ROUNDS = 8;
+/**
+ * How many times one orchestrator may delegate to the same agent in a run.
+ *
+ * The ledger already refuses a *word-for-word* repeat, which a model steps around by
+ * rephrasing. One run today asked test-author four times, reviewer three, domain-designer
+ * three, and ran for 107 minutes without an answer. A cap converts that from an expensive
+ * loop into a plain refusal the orchestrator has to deal with.
+ */
+const MAX_PER_AGENT = 3;
 /** How many agents one round may run at once. */
 const MAX_PARALLEL = 4;
 /**
@@ -361,6 +370,7 @@ export class PipelineService {
         durationMs: Date.parse(this.clock.iso()) - Date.parse(run.startedAt),
       };
       await this.store.updateRun(id, closed);
+      await this.closeStranded(id);
 
       if (alive) {
         // Its agents are mid-turn in another process and cannot see the flag we would set
@@ -775,6 +785,15 @@ export class PipelineService {
                 return `### ${delegation.agent}\n\nThere is no such agent in your roster. Delegate only to the ids listed above.`;
               }
 
+              if ((useCount.get(target.id) ?? 0) >= MAX_PER_AGENT) {
+                return (
+                  `### ${target.name} (\`${target.id}\`) — no` +
+                  `\n\nYou have already asked this agent ${MAX_PER_AGENT} times. It has told` +
+                  ' you what it knows. Decide with what you have, or ask a different agent,' +
+                  ' or ask the person who started this run.'
+                );
+              }
+
               const key = `${target.id}::${delegation.task.trim().toLowerCase()}`;
               const previous = answered.get(key);
               if (previous !== undefined) {
@@ -854,7 +873,15 @@ export class PipelineService {
         });
 
         if (round === MAX_ROUNDS - 1) {
-          answer = 'This orchestrator kept delegating and ran out of rounds without answering.';
+          // Not an answer, and it must not read as one: a run that ends here has produced
+          // nothing anybody can act on, and used every round doing it.
+          answer = [
+            'This orchestrator kept delegating and ran out of rounds without answering.',
+            '',
+            '```json',
+            '{"outcome": "blocked", "unmet": ["the orchestrator never gave a final answer"]}',
+            '```',
+          ].join('\n');
         }
       }
 
@@ -1244,6 +1271,26 @@ export class PipelineService {
       runId: question.runId,
       questionId: question.id,
     });
+  }
+
+  /**
+   * Steps still claiming to run after their run is over.
+   *
+   * When the process dies the step rows are never written again, so a tree keeps showing an
+   * agent as working for hours. Nothing is running; say so.
+   */
+  private async closeStranded(runId: string): Promise<void> {
+    for (const step of await this.store.steps(runId)) {
+      if (step.status !== 'running' && step.status !== 'pending') continue;
+
+      await this.store.updateStep(step.id, {
+        ...step,
+        status: 'cancelled',
+        error: step.error ?? 'the process running this step is gone',
+        endedAt: this.clock.iso(),
+        durationMs: Date.parse(this.clock.iso()) - Date.parse(step.startedAt),
+      });
+    }
   }
 
   /** What this run spent, added up from its steps. */
