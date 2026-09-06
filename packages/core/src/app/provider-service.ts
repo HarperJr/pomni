@@ -40,6 +40,7 @@ export interface LlmFactory {
       tools?: ToolGrant[];
       files?: boolean;
       run?: boolean;
+      verify?: string[];
     },
   ): LlmPort;
 }
@@ -131,6 +132,7 @@ export class ProviderService {
       tools?: ToolGrant[];
       files?: boolean;
       run?: boolean;
+      verify?: string[];
     } = {},
   ): Promise<{ provider: Provider; port: LlmPort; model: string; tools: boolean }> {
     const provider = await this.resolve(options.provider);
@@ -152,6 +154,7 @@ export class ProviderService {
         tools: options.tools,
         files: options.files,
         run: options.run,
+        verify: options.verify,
       }),
       model: resolveModel(provider, struggle),
       tools: hasBuiltInTools(provider),

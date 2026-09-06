@@ -173,6 +173,18 @@ export function toolGrants(grants: ToolGrant[]): string[] {
 }
 
 /** The section appended to an agent's system prompt, or null when it has no tools. */
+/**
+ * The exact commands an agent may run, from what the repos say their checks are.
+ *
+ * Derived rather than listed: nobody maintains a second copy of the project's commands, and
+ * a capability whose command changes changes the permission with it.
+ */
+export function verifyGrants(commands: string[]): string[] {
+  return [...new Set(commands.map((command) => command.trim()).filter(Boolean))].map(
+    (command) => `Bash(${command})`,
+  );
+}
+
 export function toolBriefing(grants: ToolGrant[]): string | null {
   if (grants.length === 0) return null;
 

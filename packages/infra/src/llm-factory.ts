@@ -25,6 +25,7 @@ export class DefaultLlmFactory implements LlmFactory {
       tools?: ToolGrant[];
       files?: boolean;
       run?: boolean;
+      verify?: string[];
     } = {},
   ): LlmPort {
     switch (provider.kind) {
@@ -36,6 +37,7 @@ export class DefaultLlmFactory implements LlmFactory {
           tools: options.tools,
           files: options.files,
           run: options.run,
+          verify: options.verify,
           maxTurns: provider.maxTurns,
           // With no repo to work in there is nothing for the built-in tools to do, so the
           // agent's own prompt replaces Claude Code's rather than being appended to it.

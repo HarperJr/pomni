@@ -40,7 +40,7 @@ export interface CreateAgentInput {
   struggle?: Struggle;
   outputs?: string;
   delegatesTo?: string[];
-  tools?: { files?: boolean; run?: boolean; mcp?: string[]; cli?: string[] };
+  tools?: { files?: boolean; run?: boolean; verify?: boolean; mcp?: string[]; cli?: string[] };
 }
 
 export type UpdateAgentInput = Partial<CreateAgentInput>;

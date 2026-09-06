@@ -196,6 +196,8 @@ export function registerWorkflowCommands(
     .option('--files', 'let it read and write files')
     .option('--no-files', 'stop it touching files')
     .option('--run', 'let it run commands')
+    .option('--verify', "let it run the repos' declared checks, and nothing else")
+    .option('--no-verify', 'take that away')
     .option('--no-run', 'stop it running commands')
     .action(
       async (
@@ -213,6 +215,7 @@ export function registerWorkflowCommands(
           tools?: string;
           files?: boolean;
           run?: boolean;
+          verify?: boolean;
         },
       ) => {
         const container = await open();
@@ -250,6 +253,7 @@ export function registerWorkflowCommands(
           tools: {
             ...granted,
             ...(flags.files === undefined ? {} : { files: flags.files }),
+            ...(flags.verify === undefined ? {} : { verify: flags.verify }),
             // A CLI tool is run through the shell. Granting one without that is granting
             // nothing, so turn it on and say so rather than leaving a silent no-op.
             ...(flags.run === undefined ? (needsRun ? { run: true } : {}) : { run: flags.run }),

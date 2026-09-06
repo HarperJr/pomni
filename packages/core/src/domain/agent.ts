@@ -96,6 +96,12 @@ export const AgentSchema = z
       .object({
         files: z.boolean().default(false),
         run: z.boolean().default(false),
+        /**
+         * May run the repos' own declared checks — `test`, `build`, `lint`, `typecheck` —
+         * and nothing else. An agent that has to judge a change needs to build it; almost
+         * none of them needs a shell that can also delete, push or install.
+         */
+        verify: z.boolean().default(false),
         mcp: z.array(z.string()).default([]),
         cli: z.array(z.string()).default([]),
       })
@@ -121,7 +127,7 @@ export interface Agent {
   struggle: Struggle;
   delegatesTo: string[];
   outputs: string;
-  tools: { files: boolean; run: boolean; mcp: string[]; cli: string[] };
+  tools: { files: boolean; run: boolean; verify: boolean; mcp: string[]; cli: string[] };
   createdAt: string;
   updatedAt: string;
 }

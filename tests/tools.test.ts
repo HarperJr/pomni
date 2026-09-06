@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mcpConfig, toolBriefing, toolGrants } from '@pomni/core';
 import { readStream, sessionPermissions } from '@pomni/infra';
+import { verifyGrants } from '@pomni/core';
 import { createHarness, type TestHarness } from './harness.js';
 
 let harness: TestHarness;
@@ -243,5 +244,32 @@ describe('reading a streamed session', () => {
 
   it('falls back when the session printed no result line', () => {
     expect(readStream('just some text').result.result).toBe('just some text');
+  });
+});
+
+describe('verifying without a shell', () => {
+  it('turns the repos own checks into exact permissions', () => {
+    expect(verifyGrants(['npm run typecheck', 'npm test'])).toEqual([
+      'Bash(npm run typecheck)',
+      'Bash(npm test)',
+    ]);
+  });
+
+  it('says nothing when a repo declares nothing', () => {
+    expect(verifyGrants([])).toEqual([]);
+    expect(sessionPermissions({ verify: [] })).toEqual([]);
+  });
+
+  it('grants the checks and no shell', () => {
+    const permissions = sessionPermissions({ verify: ['npm test'] });
+
+    expect(permissions).toEqual(['Bash(npm test)']);
+    expect(permissions).not.toContain('Bash');
+  });
+
+  it('does not repeat them for an agent that already has a shell', () => {
+    const permissions = sessionPermissions({ run: true, verify: ['npm test'] });
+
+    expect(permissions).toEqual(['Bash']);
   });
 });

@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import {
   mcpConfig,
   toolGrants,
+  verifyGrants,
   type AgentAction,
   type LlmPort,
   type LlmRequest,
@@ -73,12 +74,15 @@ export function sessionPermissions(options: {
   allowedTools?: string[];
   files?: boolean;
   run?: boolean;
+  verify?: string[];
   tools?: ToolGrant[];
 }): string[] {
   return [
     ...(options.allowedTools ?? []),
     ...(options.files ? FILE_TOOLS : []),
     ...(options.run ? SHELL_TOOLS : []),
+    // Named commands, not a shell. Redundant when `run` is on, and harmless there.
+    ...(options.run ? [] : verifyGrants(options.verify ?? [])),
     ...toolGrants(options.tools ?? []),
   ];
 }
@@ -102,6 +106,8 @@ export interface ClaudeCodeOptions {
   files?: boolean;
   /** Whether it may run commands — the difference between writing a change and building it. */
   run?: boolean;
+  /** Exact commands it may run without a shell: the repos' own declared checks. */
+  verify?: string[];
   timeoutMs?: number;
 }
 

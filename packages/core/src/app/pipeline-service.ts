@@ -550,6 +550,14 @@ export class PipelineService {
       ...agent.tools.cli,
     ]);
 
+    // What the repos say their own checks are. An agent that may verify gets exactly
+    // these and no shell, so it can prove a change without being able to undo one.
+    const checks = workspace.repos.flatMap((repo) =>
+      Object.values(repo.capabilities)
+        .map((capability) => capability.cmd)
+        .filter((cmd): cmd is string => Boolean(cmd)),
+    );
+
     const { port, model, provider } = await this.providers.portFor(agent.struggle, {
       provider: run.providerId,
       // Only give an agent a working directory when it is allowed to touch files; an
@@ -559,6 +567,7 @@ export class PipelineService {
       tools: grants,
       files: agent.tools.files,
       run: agent.tools.run,
+      verify: agent.tools.verify || agent.tools.run ? checks : [],
     });
 
     const step: PipelineStep = {
@@ -613,10 +622,16 @@ export class PipelineService {
       const can = [
         agent.tools.files ? 'read and change files' : null,
         agent.tools.run ? 'run commands with Bash' : null,
+        !agent.tools.run && agent.tools.verify && checks.length > 0
+          ? `run exactly these checks, and nothing else: ${checks.join(', ')}`
+          : null,
       ].filter(Boolean);
       const cannot = [
         agent.tools.files ? null : 'change files',
-        agent.tools.run ? null : 'run commands — no build, no tests, no shell',
+        agent.tools.run || agent.tools.verify
+          ? null
+          : 'run commands — no build, no tests, no shell',
+        !agent.tools.run && agent.tools.verify ? 'run any other command' : null,
       ].filter(Boolean);
 
       const abilities = [
