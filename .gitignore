@@ -17,3 +17,8 @@ Thumbs.db
 # local env
 .env
 .env.local
+
+# Scratch an agent leaves behind. It has happened; a `git add -A` then commits it.
+/_*.mjs
+/_*.js
+/*.tmp
