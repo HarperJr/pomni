@@ -79,6 +79,12 @@ const MAX_ROUNDS = 8;
  * loop into a plain refusal the orchestrator has to deal with.
  */
 const MAX_PER_AGENT = 3;
+
+/** What a resumed run already knows: answers by delegation, and how often each agent ran. */
+interface Seed {
+  answered: Map<string, string>;
+  useCount: Map<string, number>;
+}
 /** How many agents one round may run at once. */
 const MAX_PARALLEL = 4;
 /**
@@ -298,6 +304,87 @@ export class PipelineService {
     });
   }
 
+  /**
+   * Carry on a run that was interrupted, without paying for what it already did.
+   *
+   * Not a second run: the same row, the same tree, the same item. Every delegation that
+   * finished is returned from its stored answer, so what gets re-run is the step that was
+   * still going when the process died — and the orchestrator's own turns, which are the
+   * cheap part.
+   *
+   * `rerun` remains the other answer: resume says carry on, rerun says try again knowing how
+   * that went.
+   */
+  async resume(runId: string): Promise<StartRunResult> {
+    const previous = await this.get(runId);
+
+    if (previous.status === 'running') {
+      throw new ValidationError('that run is still going');
+    }
+    if (previous.status === 'passed' && previous.outcome === 'done') {
+      throw new ValidationError('that run finished — use `task rerun` to do it again');
+    }
+
+    const workflow = (await this.workflows.get(previous.workflowId)) as Workflow;
+    this.workflows.assertRunnable(workflow);
+
+    const seed: Seed = { answered: new Map(), useCount: new Map() };
+    let reused = 0;
+
+    for (const step of previous.steps) {
+      // Only completed delegations. The entry orchestrator's own step is the run itself, and
+      // a step that was still running never recorded an answer worth keeping.
+      if (!step.parentStepId || step.status !== 'done' || !step.output) continue;
+
+      seed.answered.set(`${step.agentId}::${step.task.trim().toLowerCase()}`, step.output);
+      seed.useCount.set(step.agentId, (seed.useCount.get(step.agentId) ?? 0) + 1);
+      reused += 1;
+    }
+
+    // Answers a person already gave are worth more than the tokens: an answered question is
+    // returned from the ledger rather than put to them a second time.
+    for (const question of previous.questions) {
+      if (question.status !== 'answered' || !question.answer) continue;
+      seed.answered.set(`human::${question.question.trim().toLowerCase()}`, question.answer);
+    }
+
+    const usable = (await this.repos.listResolved(previous.projectId)).filter(
+      (repo) => repo.workingDirExists,
+    );
+    const taken = await this.worktrees.take(previous.projectId, previous.id, usable, {
+      pid: process.pid,
+    });
+    const workspace = this.workspace(usable, taken.dirs, undefined);
+
+    const reopened: PipelineRun = {
+      ...previous,
+      status: 'running',
+      pid: process.pid,
+      error: null,
+      endedAt: null,
+      durationMs: null,
+      outcome: 'unknown',
+      unmet: [],
+    };
+
+    await this.store.updateRun(runId, reopened);
+    this.owned.add(runId);
+    this.logger.info(`resuming ${runId}: ${reused} answered steps reused`);
+
+    this.events.emit({
+      type: 'pipeline.started',
+      runId,
+      projectId: reopened.projectId,
+      workflowId: reopened.workflowId,
+      task: reopened.task,
+    });
+
+    return {
+      run: reopened,
+      completion: this.execute(reopened, workflow, workspace, taken.dirs, usable, seed),
+    };
+  }
+
   /** Open questions across every run, newest first. What a person is being asked for. */
   async openQuestions(projectId?: string): Promise<Question[]> {
     const runs = await this.store.listRuns({ projectId, status: 'running' });
@@ -407,6 +494,8 @@ export class PipelineService {
     dirOverrides: Record<string, string>,
     /** The repos worktrees were asked for, with their own directories still on them. */
     isolated: ResolvedRepo[],
+    /** Answers this run already has, when it is being resumed rather than started. */
+    seed?: Seed,
   ): Promise<PipelineRun> {
     const { cwd } = workspace;
     const started = Date.now();
@@ -427,6 +516,7 @@ export class PipelineService {
         depth: 0,
         cwd,
         workspace,
+        seed,
         addCost: (amount) => {
           cost += amount;
         },
@@ -535,9 +625,11 @@ export class PipelineService {
     depth: number;
     cwd: string | undefined;
     workspace: { cwd: string | undefined; dirs: string[]; repos: ResolvedRepo[] };
+    seed?: Seed;
     addCost: (amount: number) => void;
   }): Promise<{ answer: string; verdict: Verdict }> {
-    const { run, workflow, agent, task, parentStepId, depth, cwd, workspace, addCost } = context;
+    const { run, workflow, agent, task, parentStepId, depth, cwd, workspace, seed, addCost } =
+      context;
     assertRunnable(agent);
 
     const orchestrating = isOrchestrator(agent);
@@ -690,8 +782,11 @@ export class PipelineService {
       ];
       // An exact repeat is answered from the ledger instead of being run again — a second
       // session for a question already answered costs money and returns the same thing.
-      const answered = new Map<string, string>();
-      const useCount = new Map<string, number>();
+      // Seeded when resuming: a delegation whose answer is already on disk is returned from
+      // here instead of opening a session for it. The orchestrator asks again and is answered
+      // instantly, which is what makes a resumed run cheap.
+      const answered = new Map<string, string>(seed?.answered ?? []);
+      const useCount = new Map<string, number>(seed?.useCount ?? []);
       let answer = '';
       let escalations = 0;
 

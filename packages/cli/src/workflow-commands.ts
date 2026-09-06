@@ -534,6 +534,27 @@ ${item.body}`;
     );
 
   task
+    .command('resume <id>')
+    .description('carry on an interrupted run, keeping what it already did')
+    .action(async (id: string) => {
+      const container = await open();
+      const { run, completion } = await container.pipelines.resume(id);
+
+      console.log(`${style.cyan('resumed')} ${style.bold(run.id)}  ${run.workflowName}`);
+      console.log(
+        style.dim(`  watch it:  http://localhost:7777/p/${run.projectId}/console/${run.id}`),
+      );
+
+      const finished = await completion;
+      console.log(
+        finished.status === 'passed'
+          ? style.green(`finished ${finished.outcome}`)
+          : style.red(`${finished.status}: ${finished.error ?? ''}`),
+      );
+      if (finished.status !== 'passed') process.exitCode = 1;
+    });
+
+  task
     .command('rerun <id>')
     .description('run a finished run again, telling the agents why the last one ended')
     .action(async (id: string) => {

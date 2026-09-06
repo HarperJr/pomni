@@ -471,3 +471,62 @@ describe('a project is more than its first repo', () => {
     expect(toAnalyst?.system).toContain('nons-kmp');
   });
 });
+
+describe('resuming an interrupted run', () => {
+  const verdict = (outcome: string) =>
+    ['```json', JSON.stringify({ outcome, unmet: [] }), '```'].join('\n');
+
+  it('reuses what finished and does not ask those agents again', async () => {
+    // A run that delegates once, gets an answer, and is then cut off mid-flight.
+    harness.llm.replies = [
+      ['```json', JSON.stringify({ delegate: [{ agent: 'analyst', task: 'size it' }] }), '```'].join('\n'),
+      'The market is large.',
+      `Done.\n\n${verdict('done')}`,
+    ];
+
+    const first = await (
+      await harness.pipelines.start({ projectId: 'acme', task: 'Should we?' })
+    ).completion;
+    expect(first.status).toBe('passed');
+
+    // Pretend it was interrupted instead: the row says cancelled, the answers remain.
+    await harness.pipelineStore.updateRun(first.id, {
+      ...first,
+      status: 'cancelled',
+      outcome: 'unknown',
+      error: 'killed',
+    });
+
+    const before = harness.llm.calls.length;
+    harness.llm.replies = [
+      ['```json', JSON.stringify({ delegate: [{ agent: 'analyst', task: 'size it' }] }), '```'].join('\n'),
+      `Done at last.\n\n${verdict('done')}`,
+    ];
+
+    const { run, completion } = await harness.pipelines.resume(first.id);
+    const finished = await completion;
+
+    // Same run, carried on.
+    expect(run.id).toBe(first.id);
+    expect(finished.status).toBe('passed');
+
+    // The analyst was not opened a second time: its answer came from the ledger.
+    const analystCalls = harness.llm.calls
+      .slice(before)
+      .filter((call) => call.system?.includes('You analyse.'));
+    expect(analystCalls).toHaveLength(0);
+
+    // And the orchestrator did receive that answer.
+    const last = harness.llm.calls[harness.llm.calls.length - 1];
+    expect(last?.messages.map((m) => m.content).join(' ')).toContain('The market is large.');
+  });
+
+  it('refuses to resume a run that finished', async () => {
+    harness.llm.replies = [`All done.\n\n${verdict('done')}`];
+    const done = await (
+      await harness.pipelines.start({ projectId: 'acme', task: 'Should we?' })
+    ).completion;
+
+    await expect(harness.pipelines.resume(done.id)).rejects.toThrow(/finished/);
+  });
+});
