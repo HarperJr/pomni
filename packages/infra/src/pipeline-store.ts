@@ -595,7 +595,19 @@ function migrate(db: SqliteDatabase): void {
       db.exec('COMMIT');
     } catch (error) {
       db.exec('ROLLBACK');
-      throw error;
+
+      // A column that is already there is not a failure. SQLite has no
+      // `ADD COLUMN IF NOT EXISTS`, and a migration inserted into the middle of this list
+      // rather than appended to it leaves an existing database one step out of step — which
+      // has happened, and cost a server that would not start. Record the step and carry on;
+      // anything else is a real failure and still stops us.
+      const message = error instanceof Error ? error.message : String(error);
+      if (!/duplicate column name/i.test(message)) throw error;
+
+      db.exec('BEGIN');
+      db.exec('DELETE FROM pipeline_schema');
+      db.exec(`INSERT INTO pipeline_schema (version) VALUES (${version + 1})`);
+      db.exec('COMMIT');
     }
   }
 }
