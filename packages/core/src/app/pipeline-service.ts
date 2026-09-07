@@ -12,11 +12,15 @@ import {
   VERDICT_PROTOCOL,
   MAX_CONTEXT_BYTES,
   MAX_CONTEXT_FILE_BYTES,
+  HANDOVER_PROTOCOL,
   ORCHESTRATOR_PROTOCOL,
   parseDelegations,
+  parseHandover,
   summarise,
   withBrief,
+  withSiblings,
   withContext,
+  type AgentReport,
   type ContextFile,
   type PipelineFilter,
   type PipelineRun,
@@ -25,10 +29,16 @@ import {
   type Question,
   type Verdict,
 } from '../domain/pipeline.js';
+import { detectProvider } from '../domain/source.js';
 import { toolBriefing } from '../domain/tool.js';
 import { ulid } from '../domain/ulid.js';
 import { chooseWorkflow, entryAgent, findAgent, rosterFor, type Workflow } from '../domain/workflow.js';
-import { worktreeEligibility, type WorktreeProbe } from '../domain/worktree.js';
+import {
+  itemBranch,
+  runBranch,
+  worktreeEligibility,
+  type WorktreeProbe,
+} from '../domain/worktree.js';
 import type { Artifact } from '../domain/pipeline.js';
 import type { Provider } from '../domain/provider.js';
 import type { ResolvedRepo } from '../domain/repo.js';
@@ -36,7 +46,9 @@ import type {
   Clock,
   DocStore,
   EventBus,
+  ForgePort,
   GitPort,
+  MergeRequestRef,
   LlmMessage,
   LlmPort,
   Logger,
@@ -68,6 +80,8 @@ export interface StartRunInput {
 export interface StartRunResult {
   run: PipelineRun;
   completion: Promise<PipelineRun>;
+  /** Steps a resume answered from the previous attempt instead of running again. */
+  reused?: number;
 }
 
 /** Where an agent works, and everything else it may read. See `workspace`. */
@@ -195,15 +209,20 @@ export class PipelineService {
     private readonly events: EventBus,
     private readonly logger: Logger,
     private readonly worktrees: WorktreeService,
+    private readonly forge: ForgePort,
   ) {}
 
   async start(input: StartRunInput): Promise<StartRunResult> {
     const task = input.task.trim();
     if (!task) throw new ValidationError('a run needs a task');
 
-    const context = normaliseContext(input.context ?? []);
-
     await this.projects.getRef(input.projectId);
+
+    // What the item says it changes, given to the agents instead of kept for the scheduler.
+    // An author who is not told which files a change is about pays to find them: on the run
+    // that produced this, one spent 2.4M input tokens looking for two the item had named.
+    const touched = input.itemId ? await this.touchedFiles(input.projectId, input.itemId) : null;
+    const context = normaliseContext([...(input.context ?? []), ...(touched ? [touched] : [])]);
 
     const attached = await this.workflows.forProject(input.projectId);
     if (attached.length === 0) {
@@ -256,9 +275,13 @@ export class PipelineService {
     // store and this run's row is written three awaits later, so on its own it is a look that
     // decides nothing: two overlapping `start()` calls both found the shared repo free and
     // both walked into it.
+    // The branch says what the work is: `feature/POMN-1/main`, not a ULID nobody can read.
+    // Resolved before the claim so a backlog read cannot happen inside the critical section.
+    const branch = await this.branchFor(input.projectId, input.itemId ?? null, runId);
+
     const { run, taken, workspace } = await this.claim(input.projectId, async () => {
       await this.assertNotInUse(input.projectId, isolated);
-      const taken = await this.worktrees.take(input.projectId, runId, isolated, { pid });
+      const taken = await this.worktrees.take(input.projectId, runId, isolated, { pid, branch });
       const workspace = this.workspace(usable, taken.dirs, input.repoId);
 
       const claimed: PipelineRun = {
@@ -346,6 +369,43 @@ export class PipelineService {
   }
 
   /**
+   * The paths an item declares, as a context file the whole run can see.
+   *
+   * A context file rather than a line assembled onto each prompt: it is then stored with the
+   * run, survives a resume, and shows in the console as something a person can read, which is
+   * the same treatment the run's other composed information already gets.
+   */
+  private async touchedFiles(projectId: string, itemId: string): Promise<ContextFile | null> {
+    const item = await this.backlog.get(projectId, itemId).catch(() => null);
+    const paths = (item?.touches ?? []).map((path) => path.trim()).filter(Boolean);
+    if (paths.length === 0) return null;
+
+    return {
+      name: TOUCHED_FILE,
+      content: [
+        'The item says this change is about these paths:',
+        '',
+        ...paths.map((path) => `- \`${path}\``),
+        '',
+        'Start there rather than searching for them. This is a starting point, not a fence:',
+        'if the work genuinely needs a file that is not listed, open it and say in your answer',
+        'which one and why.',
+        '',
+        // Measured: handing this list to the agents cut the authors 46%, and handing it to the
+        // orchestrator without this paragraph convinced it the change was big enough to scout —
+        // one scout costing more than everything the four authors saved.
+        'If you are planning this change rather than making it: this list is why you do not need',
+        'to send anyone to find out where the work is. Hand each path to the agent that owns that',
+        'part of the tree. A scout that returns this list has been paid to tell you what you were',
+        'already told.',
+        '',
+        'The list is the whole change, not your part of it. Open what your own job needs and',
+        'leave the rest to whoever owns it.',
+      ].join('\n'),
+    };
+  }
+
+  /**
    * Run a finished run again.
    *
    * Not a resume: the tree is rebuilt from the task, because a half-finished delegation tree
@@ -383,7 +443,7 @@ export class PipelineService {
    * `rerun` remains the other answer: resume says carry on, rerun says try again knowing how
    * that went.
    */
-  async resume(runId: string): Promise<StartRunResult> {
+  async resume(runId: string, note?: string): Promise<StartRunResult> {
     const previous = await this.get(runId);
 
     if (previous.status === 'running') {
@@ -403,6 +463,7 @@ export class PipelineService {
     }
 
     const seed: Seed = { answered: new Map(), useCount: new Map() };
+    const finished: Array<{ agentId: string; task: string }> = [];
     let reused = 0;
 
     for (const step of previous.steps) {
@@ -412,6 +473,7 @@ export class PipelineService {
 
       seed.answered.set(`${step.agentId}::${step.task.trim().toLowerCase()}`, step.output);
       seed.useCount.set(step.agentId, (seed.useCount.get(step.agentId) ?? 0) + 1);
+      finished.push({ agentId: step.agentId, task: step.task });
       reused += 1;
     }
 
@@ -425,13 +487,44 @@ export class PipelineService {
     const usable = (await this.repos.listResolved(previous.projectId)).filter(
       (repo) => repo.workingDirExists,
     );
-    const taken = await this.worktrees.take(previous.projectId, previous.id, usable, {
+    // Reclaimed, not taken: this run's answers were written in this run's own worktree, and
+    // replaying them anywhere else describes files that are not there.
+    const taken = await this.worktrees.reclaim(previous.projectId, previous.id, usable, {
       pid: process.pid,
+      branch: await this.branchFor(previous.projectId, previous.itemId, previous.id),
     });
+
+    if (taken.lost.length > 0 && reused > 0) {
+      // Name the branches the rows actually hold rather than deriving one: after the rename a
+      // run's branch depends on the item it was for, and telling someone to restore a branch
+      // that never existed is worse than telling them nothing.
+      const lostBranches = (await this.worktrees.list({ runId: previous.id }))
+        .filter((worktree) => taken.lost.includes(worktree.repoId))
+        .map((worktree) => worktree.branch);
+
+      throw new ValidationError(
+        `cannot resume ${runId}: ${taken.lost.join(', ')} lost the worktree this run was` +
+          ` working in, so its ${reused} finished step${reused === 1 ? '' : 's'} describe files` +
+          ' that are no longer there. Use `task rerun` to start again from the task, or restore' +
+          ` ${lostBranches.length > 0 ? `the branch ${lostBranches.join(', ')}` : 'the branch it was on'}` +
+          ' and resume once it is back.',
+      );
+    }
+
     const workspace = this.workspace(usable, taken.dirs, undefined);
 
+    // What the resume is and what changed since, as a context file: the orchestrator reads it
+    // on its first turn, and it is the same chip a person already sees on the run.
+    const carried = previous.context.filter((file) => file.name !== RESUME_FILE);
     const reopened: PipelineRun = {
       ...previous,
+      context: [
+        ...carried,
+        {
+          name: RESUME_FILE,
+          content: describeResume(finished, taken.reclaimed.length, note),
+        },
+      ],
       status: 'running',
       pid: process.pid,
       error: null,
@@ -455,6 +548,7 @@ export class PipelineService {
 
     return {
       run: reopened,
+      reused,
       completion: this.execute(reopened, workflow, workspace, taken.dirs, usable, seed),
     };
   }
@@ -836,10 +930,23 @@ export class PipelineService {
     cwd: string | undefined;
     workspace: AgentWorkspace;
     seed?: Seed;
+    /** What the agents delegated to earlier in this run already answered. */
+    siblings?: AgentReport[];
     addCost: (amount: number) => void;
   }): Promise<{ answer: string; verdict: Verdict }> {
-    const { run, workflow, agent, task, parentStepId, depth, cwd, workspace, seed, addCost } =
-      context;
+    const {
+      run,
+      workflow,
+      agent,
+      task,
+      parentStepId,
+      depth,
+      cwd,
+      workspace,
+      seed,
+      siblings,
+      addCost,
+    } = context;
 
     const orchestrating = isOrchestrator(agent);
     const roster = orchestrating ? rosterFor(workflow, agent) : [];
@@ -931,7 +1038,8 @@ export class PipelineService {
       // The entry agent's task *is* the brief; everyone else is given it alongside their own
       // instruction. Without this the orchestrator had to restate the whole background in
       // every delegation, and it did — 174kB of it across one 22-step run.
-      const forAgent = depth === 0 ? task : withBrief(task, run.task);
+      const forAgent =
+        depth === 0 ? task : withSiblings(withBrief(task, run.task), siblings ?? []);
       const history: LlmMessage[] = [
         { role: 'user', content: withContext(forAgent, carried) },
       ];
@@ -942,6 +1050,9 @@ export class PipelineService {
       // instantly, which is what makes a resumed run cheap.
       const answered = new Map<string, string>(seed?.answered ?? []);
       const useCount = new Map<string, number>(seed?.useCount ?? []);
+      // Everything this orchestrator has been told so far, in the order it was told. Passed
+      // down rather than kept, so the next delegate starts from what the last one settled.
+      const reported: AgentReport[] = [];
       let answer = '';
       let escalations = 0;
 
@@ -1093,9 +1204,18 @@ export class PipelineService {
                   depth: depth + 1,
                   cwd,
                   workspace,
+                  // A batch runs in parallel, so this is what finished before the batch began
+                  // — which is the only thing that can honestly be called already decided.
+                  siblings: [...reported],
                   addCost,
                 });
                 answered.set(key, output.answer);
+                reported.push({
+                  agentId: target.id,
+                  agentName: target.name,
+                  task: delegation.task,
+                  answer: output.answer,
+                });
                 useCount.set(target.id, (useCount.get(target.id) ?? 0) + 1);
 
                 // Flagged in the heading, where it cannot be skimmed past. An
@@ -1169,6 +1289,11 @@ export class PipelineService {
       await this.docs.write(layout.pipelineStepLog(run.id, step.id), transcript.join('\n'));
 
       const { verdict, prose } = parseVerdict(answer);
+
+      // Published before the step is even written: whatever this agent settled is now the
+      // rest of the run's to use, and the next delegation may already be waiting on it.
+      await this.publish(run, parseHandover(answer));
+
       answer = prose || answer;
 
       const done: PipelineStep = {
@@ -1296,6 +1421,14 @@ export class PipelineService {
         ? `You cannot ${cannot.join(', or ')}. Do not try, and do not report being unable` +
           ' to as a finding — say what you would have run and let whoever can, run it.'
         : '',
+      // The grant is an exact string, so a check wrapped in cd, a redirect or a pipe matches
+      // nothing and is refused. An agent that learns this by being refused spends three turns
+      // on it and then reports a review with no build behind it, which has happened here.
+      !agent.tools.run && agent.tools.verify && checks.length > 0
+        ? 'Run each check exactly as written above — on its own, with no `cd`, no redirect and' +
+          ' no pipe. Your session already starts in the repository, and a command built around' +
+          ' a check is a different command, which you may not run.'
+        : '',
     ]
       .filter(Boolean)
       .join('\n');
@@ -1314,6 +1447,8 @@ export class PipelineService {
       '',
       abilities,
       ...(repos ? ['', repos] : []),
+      '',
+      HANDOVER_PROTOCOL,
       '',
       VERDICT_PROTOCOL,
     ].join('\n');
@@ -1477,52 +1612,250 @@ export class PipelineService {
       }
     }
 
-    // A branch that is not the default one is work waiting to be proposed. Offering the
-    // merge-request link is more useful than reporting the branch name and leaving you to
-    // find the page yourself.
-    if (cwd) {
-      const link = await this.mergeRequestLink(cwd);
-      if (link) {
-        artifacts.push({
-          id: ulid(this.clock.now().getTime()),
-          runId: run.id,
-          stepId: null,
-          name: link.branch,
-          kind: 'report',
-          path: link.url,
-          change: 'merge request',
-          bytes: 0,
-          createdAt: this.clock.iso(),
-        });
-      }
-    }
-
     if (artifacts.length > 0) await this.store.putArtifacts(artifacts);
   }
 
   /**
-   * Where to open a merge request for whatever branch the work landed on.
+   * Turn what a run wrote into a commit, and — when the project says so — into a branch on
+   * the remote with a merge request waiting to be opened against it.
    *
-   * Built from the remote rather than by calling the forge: no token is needed, it works on
-   * a self-hosted instance, and the page it opens is the one a human would have navigated to.
+   * This is the step that was missing, and its absence was quiet rather than loud: every run
+   * left its work uncommitted in a gitignored directory, the branch never reached the remote,
+   * and the merge-request link the run offered pointed at a branch that did not exist.
+   *
+   * Three rules shape it. A run only ever commits in a worktree of its own — a run that had
+   * to share a repo directory is sitting on somebody else's checked-out branch, and committing
+   * there writes to a branch nobody offered. Nothing here can fail a run: the work is already
+   * done and paid for, and a push that was refused is a sentence to read, not a verdict to
+   * overturn. And a push happens only for a run that passed with a gate that did not fail,
+   * because publishing a branch is telling other people the work is ready.
+   *
+   * Returns the sentences to put on the run. Artifacts and the item's branch are written here.
    */
-  private async mergeRequestLink(cwd: string): Promise<{ branch: string; url: string } | null> {
+  private async deliver(run: PipelineRun): Promise<string[]> {
+    const notes: string[] = [];
+    
+
+    let worktrees: Awaited<ReturnType<WorktreeService['list']>>;
     try {
-      const vcs = await this.git.info(cwd);
-      if (!vcs?.currentBranch || !vcs.remote) return null;
-      if (vcs.currentBranch === vcs.defaultBranch) return null;
+      worktrees = await this.worktrees.list({ runId: run.id, status: 'active' });
+    } catch (error) {
+      this.logger.warn(`could not read the worktrees of ${run.id}`, error);
+      return notes;
+    }
+    if (worktrees.length === 0) return notes;
 
-      const base = vcs.remote.replace(/\.git$/i, '').replace(/\/+$/, '');
-      if (!/^https?:\/\//i.test(base)) return null;
+    const project = await this.projects.getRef(run.projectId).catch(() => null);
+    const policy = project?.data.policy;
+    // Committing is on by default and pushing is not. The asymmetry is the whole point: a
+    // commit on the run's own branch, inside a directory Pomni made, cannot overwrite anyone's
+    // work — the alternative to it is loose files. A push is outward-facing and stays opt-in.
+    const mayCommit = policy?.autoCommit ?? false;
+    const mayPush =
+      (policy?.autoPush ?? false) && run.status === 'passed' && run.gateStatus !== 'failed';
 
-      const branch = encodeURIComponent(vcs.currentBranch);
-      const url = base.includes('github.com')
-        ? `${base}/compare/${branch}?expand=1`
-        : `${base}/-/merge_requests/new?merge_request%5Bsource_branch%5D=${branch}`;
+    const artifacts: Artifact[] = [];
+    const branches: string[] = [];
 
-      return { branch: vcs.currentBranch, url };
-    } catch {
+    for (const worktree of worktrees) {
+      const repo = await this.repos.get(run.projectId, worktree.repoId).catch(() => null);
+      if (!repo) continue;
+
+      let changed: Array<{ path: string; change: string }>;
+      try {
+        changed = await this.git.changes(worktree.path);
+      } catch (error) {
+        notes.push(
+          `Could not read what '${repo.name}' changed, so nothing was committed: ${firstLine(error)}`,
+        );
+        continue;
+      }
+      if (changed.length === 0) continue;
+
+      if (!mayCommit) {
+        notes.push(
+          `'${repo.name}' has ${changed.length} uncommitted change${
+            changed.length === 1 ? '' : 's'
+          } on ${worktree.branch}; this project has autoCommit off, so they were left as files.`,
+        );
+        continue;
+      }
+
+      try {
+        const committed = await this.git.commit(worktree.path, {
+          message: this.commitMessage(run, changed.length),
+        });
+        if (!committed.committed) continue;
+        branches.push(worktree.branch);
+        if (committed.identityBorrowed) {
+          notes.push(
+            `git had no user.name or user.email here, so the commit on ${worktree.branch} is` +
+              ' authored as Pomni — set your own identity to have it signed as you.',
+          );
+        }
+      } catch (error) {
+        notes.push(`'${repo.name}' could not be committed on ${worktree.branch}: ${firstLine(error)}`);
+        continue;
+      }
+
+      if (!mayPush) {
+        notes.push(
+          `The work on '${repo.name}' is committed on ${worktree.branch} but not pushed` +
+            `${policy?.autoPush ? '' : ' (this project has autoPush off)'}` +
+            ` — push it with: git -C ${worktree.path} push -u origin ${worktree.branch}`,
+        );
+        continue;
+      }
+
+      try {
+        await this.git.push(worktree.path, {
+          branch: worktree.branch,
+          setUpstream: true,
+          auth: await this.repos.authForRepo(repo),
+        });
+      } catch (error) {
+        notes.push(
+          `'${repo.name}' is committed on ${worktree.branch} but the push was refused:` +
+            ` ${firstLine(error)}. The commit is safe; push it when the remote will take it.`,
+        );
+        continue;
+      }
+
+      // Only now is there something to open a merge request against. Offering the link before
+      // the push is what made it a link to a page saying the branch does not exist.
+      //
+      // A linked repo has a remote too — it is somebody's own clone of one — so the remote is
+      // read from the source when Pomni cloned it and from git itself when it did not.
+      const remote =
+        repo.source.kind === 'git' ? repo.source.url : (repo.vcs?.remote ?? null);
+      const opened =
+        (policy?.autoMergeRequest ?? false)
+          ? await this.openMergeRequest(run, repo, remote, worktree.branch, worktree.baseBranch)
+          : null;
+      const url = opened?.url ?? mergeRequestUrl(remote, worktree.branch);
+
+      if (opened) {
+        notes.push(
+          `${opened.created ? 'Opened' : 'Found'} a merge request for '${repo.name}' on` +
+            ` ${worktree.branch}: ${opened.url}`,
+        );
+      }
+
+      artifacts.push({
+        id: ulid(this.clock.now().getTime()),
+        runId: run.id,
+        stepId: null,
+        name: worktree.branch,
+        kind: 'report',
+        path: url,
+        change: url ? 'merge request' : 'pushed',
+        bytes: 0,
+        createdAt: this.clock.iso(),
+      });
+    }
+
+    if (artifacts.length > 0) {
+      await this.store.putArtifacts(artifacts).catch((error) => {
+        this.logger.warn(`could not record the delivery artifacts for ${run.id}`, error);
+      });
+    }
+
+    // The item points at where its work is. One branch is the ordinary case; a run across two
+    // repos genuinely has two, and naming both beats naming whichever came back first.
+    if (run.itemId && branches.length > 0) {
+      await this.backlog
+        .update(run.projectId, run.itemId, { branch: [...new Set(branches)].join(', ') })
+        .catch((error) => {
+          this.logger.warn(`could not record the branch on ${run.itemId}`, error);
+        });
+    }
+
+    return notes;
+  }
+
+  /**
+   * Ask the forge to open the merge request, with the item as its description.
+   *
+   * Never throws and never fails a run. The item's own Problem and Acceptance criteria are what
+   * a reviewer wants first, and they are already written — retyping them into a form is how the
+   * description ends up being a sentence long and different every time.
+   */
+  private async openMergeRequest(
+    run: PipelineRun,
+    repo: ResolvedRepo,
+    remote: string | null,
+    branch: string,
+    baseBranch: string | null,
+  ): Promise<MergeRequestRef | null> {
+    if (!remote) return null;
+
+    const item = run.itemId
+      ? await this.backlog.get(run.projectId, run.itemId).catch(() => null)
+      : null;
+
+    const title = item ? `${item.id}: ${item.title}` : run.task.split('\n')[0]?.trim() || run.id;
+    const sections = item?.sections ?? {};
+    const description = [
+      ...(sections.Problem ? ['## Problem', '', sections.Problem.trim(), ''] : []),
+      ...(sections['Acceptance criteria']
+        ? ['## Acceptance criteria', '', sections['Acceptance criteria'].trim(), '']
+        : []),
+      `Opened by the '${run.workflowName}' workflow — Pomni run \`${run.id}\`.`,
+    ].join('\n');
+
+    try {
+      return await this.forge.openMergeRequest({
+        remote,
+        // A cloned repo was told which forge hosts it; a linked one has to be read off the url.
+        provider: repo.source.kind === 'git' ? repo.source.provider : detectProvider(remote),
+        auth: await this.repos.authForRepo(repo),
+        sourceBranch: branch,
+        targetBranch:
+          baseBranch ?? (repo.source.kind === 'git' ? (repo.source.ref ?? null) : null),
+        title,
+        description,
+      });
+    } catch (error) {
+      this.logger.warn(`could not open a merge request for ${branch}`, error);
       return null;
+    }
+  }
+
+  /** What the commit says it is. The item id first, because that is what a log is read for. */
+  private commitMessage(run: PipelineRun, fileCount: number): string {
+    const subject = run.itemId
+      ? `${run.itemId}: ${run.task.split('\n')[0]?.trim() ?? 'agent run'}`
+      : run.task.split('\n')[0]?.trim() || 'agent run';
+
+    return [
+      subject.length > 72 ? `${subject.slice(0, 69)}...` : subject,
+      '',
+      `${fileCount} file${fileCount === 1 ? '' : 's'} changed by the '${run.workflowName}' workflow.`,
+      '',
+      `Pomni-Run: ${run.id}`,
+      ...(run.itemId ? [`Pomni-Item: ${run.itemId}`] : []),
+    ].join('\n');
+  }
+
+  /**
+   * The branch a run's work goes on, named after the item it delivers.
+   *
+   * Falls back to naming the run whenever the item cannot be read — a run without one, or a
+   * backlog read that failed. A run that cannot name itself after its item still needs a
+   * branch, and refusing to start over a name would be the wrong trade.
+   */
+  private async branchFor(
+    projectId: string,
+    itemId: string | null,
+    runId: string,
+  ): Promise<string> {
+    if (!itemId) return runBranch(runId);
+    try {
+      const item = await this.backlog.get(projectId, itemId);
+      return itemBranch(item.type, item.id);
+    } catch (error) {
+      this.logger.debug(`could not read ${itemId} to name a branch`, error);
+      return runBranch(runId);
     }
   }
 
@@ -1612,6 +1945,29 @@ export class PipelineService {
       'Decide it yourself on the best evidence you have, and say plainly in your final',
       'answer which question went unanswered and what you assumed.',
     ].join(' ');
+  }
+
+  /**
+   * Put what an agent decided where every agent after it can see it.
+   *
+   * The same shelf a person's attachments land on, deliberately: an agent settling the shape
+   * of a record and a person attaching a spec are the same kind of fact to whoever is asked
+   * next, and one channel means one place to look when something arrives wrong.
+   */
+  private async publish(run: PipelineRun, files: ContextFile[]): Promise<void> {
+    if (files.length === 0) return;
+
+    const existing = this.handedOver.get(run.id) ?? [];
+    // Last writer wins on a name: an agent correcting itself should replace what it said,
+    // not leave two versions for the next agent to choose between.
+    const kept = existing.filter((file) => !files.some((added) => added.name === file.name));
+    this.handedOver.set(run.id, [...kept, ...files]);
+
+    const stored = await this.store.getRun(run.id);
+    if (!stored) return;
+
+    const others = stored.context.filter((file) => !files.some((added) => added.name === file.name));
+    await this.store.updateRun(run.id, { ...stored, context: [...others, ...files] });
   }
 
   /**
@@ -1867,6 +2223,12 @@ export class PipelineService {
    * feature, so everything this run could not give you about its directories reads as one list.
    */
   private async releaseWorktrees(run: PipelineRun): Promise<PipelineRun> {
+    // Before the release, never after: a worktree that has been given back is a directory
+    // that no longer exists, and there is nothing left to commit out of it. This is also the
+    // one seam every arm reaches — passed, failed and thrown — so a run that ended badly gets
+    // its work committed too, which is exactly the run whose work is easiest to lose.
+    const delivered = await this.deliver(run);
+
     let kept: Array<{ repoId: string; path: string; reason: string | null }> = [];
 
     try {
@@ -1887,7 +2249,7 @@ export class PipelineService {
     const updated: PipelineRun = {
       ...stored,
       pid: null,
-      unmet: [...stored.unmet, ...notes],
+      unmet: [...stored.unmet, ...delivered, ...notes],
     };
 
     try {
@@ -1967,6 +2329,80 @@ function normaliseContext(files: ContextFile[]): ContextFile[] {
   return normalised;
 }
 
+/** The name the item's own file list always has, so a rerun replaces it rather than stacking. */
+const TOUCHED_FILE = 'touched-files.md';
+
+/** The name a resume's own summary always has, so a second resume replaces the first. */
+const RESUME_FILE = 'resumed.md';
+
+/**
+ * What a resumed run is carrying, in the words the orchestrator needs on its first turn.
+ *
+ * Without this it re-reads a plan it has already carried out and cannot tell which parts are
+ * already on disk, which is the expensive half of what a resume is meant to avoid.
+ */
+function describeResume(
+  finished: Array<{ agentId: string; task: string }>,
+  reclaimed: number,
+  note?: string,
+): string {
+  const lines = [
+    '# This run was resumed',
+    '',
+    `${finished.length} step${finished.length === 1 ? '' : 's'} from the earlier attempt` +
+      ` ${finished.length === 1 ? 'is' : 'are'} already finished and already paid for.`,
+  ];
+
+  if (reclaimed > 0) {
+    lines.push(
+      '',
+      `The work is where it was left: ${reclaimed} repo${reclaimed === 1 ? '' : 's'} came back` +
+        ' with the same worktree, so files an agent has already written are on disk. Look at' +
+        ' what is there before writing it again.',
+    );
+  }
+
+  // The ledger is keyed on the delegation text, so a reworded repeat is a miss and the agent
+  // runs — and is charged — a second time. Observed live: a resumed orchestrator helpfully
+  // added "this run has been resumed" to the task and paid for the answer it already had.
+  // Nothing but the exact words can be reused, so the exact words are what it is given.
+  const quoted: string[] = [];
+  let budget = MAX_REUSE_BYTES;
+
+  for (const step of finished) {
+    const entry = `- \`${step.agentId}\` — ask for exactly this:
+
+  > ${step.task.trim()}`;
+    const size = Buffer.byteLength(entry, 'utf8');
+    if (size > budget) continue;
+    budget -= size;
+    quoted.push(entry);
+  }
+
+  if (quoted.length > 0) {
+    lines.push(
+      '',
+      '## What you can have for free',
+      '',
+      'Delegating one of these again, worded exactly as written, returns the answer it already',
+      'gave without opening a session. Change so much as a word and it runs again, and costs',
+      'again. Do not add a note about this run having been resumed to the task — that is a',
+      'reword, and it is the most expensive kind.',
+      '',
+      ...quoted,
+    );
+  }
+
+  if (note?.trim()) {
+    lines.push('', '## What changed since it stopped', '', note.trim());
+  }
+
+  return lines.join('\n');
+}
+
+/** How much of the prompt the reusable-task list may take. */
+const MAX_REUSE_BYTES = 4000;
+
 /** The name the carried-forward summary always has, so a third attempt replaces the second. */
 const ATTEMPT_FILE = 'previous-attempt.md';
 
@@ -2012,4 +2448,29 @@ function describeAttempt(run: PipelineRunDetail): string {
     ' say so plainly rather than working around it silently.',
   );
   return lines.join('');
+}
+
+/**
+ * Where a person opens a merge request for a branch that is now on the remote.
+ *
+ * Built from the remote url rather than by calling the forge: no token is needed, it works
+ * against a self-hosted instance, and the page it opens is the one they would have navigated
+ * to themselves. Null for an ssh remote or a host with no known shape — a wrong link is worse
+ * than none, because it is followed.
+ */
+function mergeRequestUrl(remote: string | null, branch: string): string | null {
+  if (!remote) return null;
+  const base = remote.replace(/\.git$/i, '').replace(/\/+$/, '');
+  if (!/^https?:\/\//i.test(base)) return null;
+
+  const encoded = encodeURIComponent(branch);
+  return base.includes('github.com')
+    ? `${base}/compare/${encoded}?expand=1`
+    : `${base}/-/merge_requests/new?merge_request%5Bsource_branch%5D=${encoded}`;
+}
+
+/** git's own first line is what a person needs; the rest of a git failure is noise. */
+function firstLine(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.split('\n')[0]?.trim() || message;
 }

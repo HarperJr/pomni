@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import {
   BOARD_COLUMNS,
+  ItemTypeSchema,
   assertWavesDisjoint,
   describeConflict,
   describeUnmetList,
@@ -34,7 +35,7 @@ export function registerBacklogCommands(
     .command('add <title...>')
     .description('capture a new item')
     .option('-p, --project <id>', 'project')
-    .option('-t, --type <type>', 'feature | bug | chore | spike | refactor | docs')
+    .option('-t, --type <type>', ItemTypeSchema.options.join(' | '))
     .option('--priority <priority>', 'P0 | P1 | P2 | P3')
     .option('-e, --estimate <size>', 'XS | S | M | L | XL')
     .option('-r, --repos <ids>', 'comma-separated repos this item touches')

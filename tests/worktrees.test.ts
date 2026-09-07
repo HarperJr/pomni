@@ -8,8 +8,10 @@ import {
   RepoSchema,
   assertPomniOwned,
   isPomniOwned,
-  ORPHAN_GRACE_MS,
+  isRunBranch,
   isolatesRuns,
+  itemBranch,
+  itemIdFromBranch,
   runBranch,
   runIdFromBranch,
   worktreeEligibility,
@@ -22,6 +24,9 @@ import {
 import { createHarness, makeNodeRepo, type TestHarness } from './harness.js';
 
 let harness: TestHarness;
+
+/** A real ULID: the run-only branch shape only matches 26 characters of Crockford base32. */
+const RUN_ULID = '01M1XW7C6760ET09HMM7H81A80';
 
 /** One orchestrator that is allowed to touch files, so it is told where the repos are. */
 async function seed(): Promise<void> {
@@ -185,6 +190,10 @@ describe('the gate', () => {
 describe('a worktree with uncommitted work in it', () => {
   it('is kept rather than deleted, and the run says where it is', async () => {
     const repo = await attachRepo('web', { track: true, worktrees: 'always' });
+    // With committing off, a run's output stays as files — which is the only way a worktree
+    // is still dirty when it is given back, and so the only way git still refuses to remove
+    // it. That refusal is the mechanism this test is about, and it has not changed.
+    await harness.projects.update('acme', { policy: { autoCommit: false } });
 
     harness.llm.replies = [askHuman('hold'), 'Done.'];
     const { run, completion } = await harness.pipelines.start({
@@ -215,6 +224,163 @@ describe('a worktree with uncommitted work in it', () => {
     expect(finished.unmet.join('\n')).toContain(path);
     expect(finished.result).not.toContain(path);
     expect(existsSync(repo.dir)).toBe(true);
+    // And it says why it is there rather than only that it is: the project turned committing
+    // off, so what would have been a commit is a directory instead.
+    expect(finished.unmet.join('\n')).toContain('autoCommit off');
+  });
+
+  it('is committed on the run branch, so the work outlives the directory', async () => {
+    await attachRepo('web', { track: true, worktrees: 'always' });
+
+    harness.llm.replies = [askHuman('hold'), 'Done.'];
+    const { run, completion } = await harness.pipelines.start({
+      projectId: 'acme',
+      task: 'Write something',
+    });
+    const [questionId] = await waitForQuestions(1);
+
+    const [held] = await harness.worktrees.list({ runId: run.id });
+    const path = held?.path as string;
+    const branch = held?.branch as string;
+    await writeFile(join(path, 'delivered.ts'), 'export const whole = true;\n');
+
+    await harness.pipelines.answer(questionId as string, 'Carry on.');
+    const finished = await completion;
+
+    // One commit, carrying the run id, so a commit can be traced back to what made it.
+    expect(harness.git.commits).toHaveLength(1);
+    expect(harness.git.commits[0]?.message).toContain(run.id);
+
+    // Committed, so the tree is clean, so git no longer refuses — the directory comes away
+    // and the work is on the branch instead of in a folder nobody can review.
+    expect(existsSync(path)).toBe(false);
+    expect(await harness.worktrees.list({ runId: run.id })).toEqual([]);
+
+    // Nothing was pushed: the project did not ask for that, and the run says so rather than
+    // offering a merge-request link to a branch the remote has never heard of.
+    expect(harness.git.pushes).toEqual([]);
+    expect(finished.unmet.join('\n')).toContain(`committed on ${branch} but not pushed`);
+    const artifacts = (await harness.pipelines.get(run.id)).artifacts;
+    expect(artifacts.some((artifact) => artifact.change === 'merge request')).toBe(false);
+  });
+
+  it('pushes the branch when the project asks, and only then offers the merge request', async () => {
+    await attachRepo('web', { track: true, worktrees: 'always' });
+    await harness.projects.update('acme', { policy: { autoPush: true } });
+
+    harness.llm.replies = [askHuman('hold'), 'Done.'];
+    const { run, completion } = await harness.pipelines.start({
+      projectId: 'acme',
+      task: 'Write something',
+    });
+    const [questionId] = await waitForQuestions(1);
+
+    const [held] = await harness.worktrees.list({ runId: run.id });
+    await writeFile(join(held?.path as string, 'delivered.ts'), 'export const whole = true;\n');
+    const branch = held?.branch as string;
+
+    await harness.pipelines.answer(questionId as string, 'Carry on.');
+    await completion;
+
+    expect(harness.git.pushes).toEqual([
+      { dir: held?.path, branch, remote: 'origin' },
+    ]);
+
+    const artifacts = (await harness.pipelines.get(run.id)).artifacts;
+    expect(artifacts.some((artifact) => artifact.name === branch)).toBe(true);
+  });
+
+  it('opens the merge request with the item as its description', async () => {
+    await attachRepo('web', { track: true, worktrees: 'always' });
+    await harness.projects.update('acme', {
+      policy: { autoPush: true, autoMergeRequest: true },
+    });
+    const item = await harness.backlog.create('acme', { title: 'Rewrite the checkout' });
+    await harness.backlog.update('acme', item.id, {
+      body: '## Problem\n\nThe checkout drops the cart.\n\n## Acceptance criteria\n\n- [ ] It does not.\n',
+    });
+    harness.forge.answer = { url: 'https://forge.test/mr/7', created: true, number: 7 };
+
+    harness.llm.replies = [askHuman('hold'), 'Done.'];
+    const { run, completion } = await harness.pipelines.start({
+      projectId: 'acme',
+      task: 'Rewrite the checkout',
+      itemId: item.id,
+    });
+    const [questionId] = await waitForQuestions(1);
+
+    const [held] = await harness.worktrees.list({ runId: run.id });
+    await writeFile(join(held?.path as string, 'delivered.ts'), 'export const whole = true;\n');
+
+    await harness.pipelines.answer(questionId as string, 'Carry on.');
+    const finished = await completion;
+
+    // What a reviewer wants first is what the item already says — not a sentence retyped into
+    // a form, different every time.
+    const [asked] = harness.forge.asked;
+    expect(asked?.sourceBranch).toBe(`feature/${item.id}/main`);
+    expect(asked?.title).toContain(item.id);
+    expect(asked?.description).toContain('The checkout drops the cart.');
+    expect(asked?.description).toContain(run.id);
+
+    const artifacts = (await harness.pipelines.get(run.id)).artifacts;
+    expect(artifacts.map((artifact) => artifact.path)).toContain('https://forge.test/mr/7');
+    expect(finished.unmet.join('\n')).toContain('https://forge.test/mr/7');
+  });
+
+  it('falls back to the link when the forge refuses, without failing the run', async () => {
+    await attachRepo('web', { track: true, worktrees: 'always' });
+    await harness.projects.update('acme', {
+      policy: { autoPush: true, autoMergeRequest: true },
+    });
+    harness.forge.failNext = 'the token has no api scope';
+
+    harness.llm.replies = [askHuman('hold'), 'Done.'];
+    const { run, completion } = await harness.pipelines.start({
+      projectId: 'acme',
+      task: 'Write something',
+    });
+    const [questionId] = await waitForQuestions(1);
+
+    const [held] = await harness.worktrees.list({ runId: run.id });
+    await writeFile(join(held?.path as string, 'delivered.ts'), 'export const whole = true;\n');
+
+    await harness.pipelines.answer(questionId as string, 'Carry on.');
+    const finished = await completion;
+
+    // Nothing about opening a merge request may fail a run that produced working code.
+    expect(finished.status).toBe('passed');
+    expect(harness.git.pushes).toHaveLength(1);
+    expect((await harness.pipelines.get(run.id)).artifacts.some((a) => a.name === held?.branch)).toBe(
+      true,
+    );
+  });
+
+  it('keeps a run alive when the push is refused, and says which branch to push', async () => {
+    await attachRepo('web', { track: true, worktrees: 'always' });
+    await harness.projects.update('acme', { policy: { autoPush: true } });
+    harness.git.failNextPush = 'the remote refused: protected branch';
+
+    harness.llm.replies = [askHuman('hold'), 'Done.'];
+    const { run, completion } = await harness.pipelines.start({
+      projectId: 'acme',
+      task: 'Write something',
+    });
+    const [questionId] = await waitForQuestions(1);
+
+    const [held] = await harness.worktrees.list({ runId: run.id });
+    await writeFile(join(held?.path as string, 'delivered.ts'), 'export const whole = true;\n');
+    const branch = held?.branch as string;
+
+    await harness.pipelines.answer(questionId as string, 'Carry on.');
+    const finished = await completion;
+
+    // The commit is the durable part. A push that the remote would not take is a sentence to
+    // read, not a reason to call finished work a failed run.
+    expect(finished.status).toBe('passed');
+    expect(harness.git.commits).toHaveLength(1);
+    expect(finished.unmet.join('\n')).toContain(branch);
+    expect(finished.unmet.join('\n')).toContain('protected branch');
   });
 
   it('removes a clean worktree and deletes its row', async () => {
@@ -378,11 +544,42 @@ describe('eligibility, in the order it is decided', () => {
     expect(detached).toMatchObject({ eligible: true, baseRef: 'deadbeef', baseBranch: null });
   });
 
-  it('names the branch after the run, and reads the run back out of it', () => {
-    expect(runBranch('01JABCDE')).toBe('pomni/run/01JABCDE');
-    expect(runIdFromBranch('pomni/run/01JABCDE')).toBe('01JABCDE');
+  it('names a branch after the item it delivers, and the type it is', () => {
+    expect(itemBranch('feature', 'POMN-1')).toBe('feature/POMN-1/main');
+    // The one place the two vocabularies differ: a backlog has bugs, a branch list has fixes.
+    expect(itemBranch('bug', 'POMN-43')).toBe('fix/POMN-43/main');
+    expect(itemBranch('release', 'ACME-9')).toBe('release/ACME-9/main');
+    expect(itemBranch('feature', 'POMN-1', '6760et09')).toBe('feature/POMN-1/6760et09');
+    // A type nobody declared still has to produce a valid ref.
+    expect(itemBranch('nonsense', 'POMN-1')).toBe('chore/POMN-1/main');
+    expect(itemIdFromBranch('fix/POMN-43/main')).toBe('POMN-43');
+    expect(itemIdFromBranch('feature/some-work')).toBeNull();
+  });
+
+  it('names a run with no item after the run, and reads the run back out of it', () => {
+    expect(runBranch(RUN_ULID)).toBe(`chore/run-${RUN_ULID}/main`);
+    expect(runIdFromBranch(`chore/run-${RUN_ULID}/main`)).toBe(RUN_ULID);
     expect(runIdFromBranch('main')).toBeNull();
-    expect(runIdFromBranch('pomni/run/')).toBeNull();
+    expect(runIdFromBranch('feature/POMN-1/main')).toBeNull();
+  });
+
+  it('still recognises the branches it cut before the rename', () => {
+    // This predicate guards `git branch -d` and `worktree prune`. Branches in the old shape
+    // exist on disk, and forgetting them would take away Pomni's right to clean up after
+    // itself — so the old prefix is understood forever.
+    expect(isRunBranch(`pomni/run/${RUN_ULID}`)).toBe(true);
+    expect(runIdFromBranch(`pomni/run/${RUN_ULID}`)).toBe(RUN_ULID);
+    expect(isRunBranch('feature/POMN-1/main')).toBe(true);
+    expect(isRunBranch(`chore/run-${RUN_ULID}/main`)).toBe(true);
+  });
+
+  it('does not claim a branch a person wrote by hand', () => {
+    // All three segments together are the signature. Matching `feature/*` would hand Pomni
+    // authority to delete branches it never made.
+    expect(isRunBranch('feature/checkout-rewrite')).toBe(false);
+    expect(isRunBranch('main')).toBe(false);
+    expect(isRunBranch('fix/POMN-43')).toBe(false);
+    expect(isRunBranch('release/2026-09-07')).toBe(false);
   });
 });
 

@@ -22,11 +22,16 @@ import {
   WorktreeService,
   layout,
   type CloneOptions,
+  type CommitResult,
   type ExecRequest,
   type ExecResult,
   type Executor,
+  type FastForwardResult,
+  type ForgePort,
   type GitAuth,
   type GitPort,
+  type MergeRequestRef,
+  type OpenMergeRequestInput,
   type LlmFactory,
   type LlmPort,
   type LlmRequest,
@@ -114,7 +119,10 @@ export class FakeGit implements GitPort {
   authSeen: Array<GitAuth | undefined> = [];
 
   /** Directories a test has declared to be git repositories, keyed by `dirKey`. */
-  private readonly tracked = new Map<string, { branch: string | null; head: string }>();
+  private readonly tracked = new Map<
+    string,
+    { branch: string | null; head: string; remote: string | null }
+  >();
   /** Live worktrees, keyed by `dirKey` of their own path. */
   private readonly worktrees = new Map<string, FakeWorktreeEntry>();
 
@@ -128,10 +136,16 @@ export class FakeGit implements GitPort {
    * `package.json`, so without this a linked repo is correctly reported as "not a git
    * repository" — which is the fallback case, not the isolated one.
    */
-  trackRepo(dir: string, info: { branch?: string | null; head?: string } = {}): string {
+  trackRepo(
+    dir: string,
+    info: { branch?: string | null; head?: string; remote?: string | null } = {},
+  ): string {
     this.tracked.set(dirKey(dir), {
       branch: info.branch === undefined ? 'main' : info.branch,
       head: info.head ?? 'abc123',
+      // A checkout someone linked is still a clone of something. Modelling it without an
+      // origin made every merge-request path unreachable in tests for the wrong reason.
+      remote: info.remote === undefined ? 'https://forge.test/acme/web.git' : info.remote,
     });
     return dir;
   }
@@ -183,7 +197,7 @@ export class FakeGit implements GitPort {
         isRepo: true,
         currentBranch: declared.branch,
         defaultBranch: 'main',
-        remote: null,
+        remote: declared.remote,
         head: declared.head,
         dirty: false,
       };
@@ -320,6 +334,82 @@ export class FakeGit implements GitPort {
       if (!(await exists(entry.path))) this.worktrees.delete(key);
     }
   }
+
+  // -------------------------------------------------------------------------
+  // Delivery
+  // -------------------------------------------------------------------------
+
+  /** Branches a test has declared to exist, beyond the ones worktrees are on. */
+  readonly declaredBranches = new Set<string>();
+  commits: Array<{ dir: string; message: string }> = [];
+  pushes: Array<{ dir: string; branch: string; remote: string }> = [];
+  failNextCommit: string | null = null;
+  failNextPush: string | null = null;
+  /** What `fastForward` answers. Left null, it reports the branch as already current. */
+  fastForwardResult: FastForwardResult | null = null;
+
+  async branchExists(dir: string, branch: string): Promise<boolean> {
+    if (this.declaredBranches.has(branch)) return true;
+    const repoKey = dirKey(dir);
+    for (const entry of this.worktrees.values()) {
+      if (entry.repoKey === repoKey && entry.branch === branch) return true;
+      // A worktree is asked about its own directory as often as about the repo it came from.
+      if (dirKey(entry.path) === repoKey && entry.branch === branch) return true;
+    }
+    return false;
+  }
+
+  /**
+   * Commits by re-baselining the worktree: after this the directory no longer differs by
+   * anything, which is precisely what makes `removeWorktree` stop refusing it.
+   */
+  async commit(dir: string, options: { message: string }): Promise<CommitResult> {
+    if (this.failNextCommit) {
+      const message = this.failNextCommit;
+      this.failNextCommit = null;
+      throw new GitError(`git commit failed: ${message}`);
+    }
+
+    if ((await this.changes(dir)).length === 0) {
+      return { committed: false, head: (await this.info(dir))?.head ?? null };
+    }
+
+    const entry = this.worktrees.get(dirKey(dir));
+    if (entry) {
+      entry.base = await snapshot(dir);
+      entry.head = `commit${this.commits.length + 1}`;
+    }
+    this.commits.push({ dir, message: options.message });
+    return { committed: true, head: entry?.head ?? 'committed' };
+  }
+
+  async push(
+    dir: string,
+    options: { branch: string; remote?: string; setUpstream?: boolean; auth?: GitAuth },
+  ): Promise<void> {
+    this.authSeen.push(options.auth);
+    if (this.failNextPush) {
+      const message = this.failNextPush;
+      this.failNextPush = null;
+      throw new GitError(`git push failed: ${message}`);
+    }
+    this.pushes.push({ dir, branch: options.branch, remote: options.remote ?? 'origin' });
+    this.declaredBranches.add(options.branch);
+  }
+
+  async fastForward(dir: string, options: { branch?: string } = {}): Promise<FastForwardResult> {
+    if (this.fastForwardResult) return this.fastForwardResult;
+    const info = await this.info(dir);
+    const branch = options.branch ?? info?.currentBranch ?? null;
+    return {
+      status: 'current',
+      branch,
+      upstream: branch ? `origin/${branch}` : null,
+      from: info?.head ?? null,
+      to: info?.head ?? null,
+      detail: `'${branch}' is already at origin/${branch}`,
+    };
+  }
 }
 
 async function exists(path: string): Promise<boolean> {
@@ -328,6 +418,27 @@ async function exists(path: string): Promise<boolean> {
     return true;
   } catch {
     return false;
+  }
+}
+
+/**
+ * A forge that records what it was asked to open. Answers null until a test says otherwise,
+ * which is the ordinary case — no token, or a project that did not ask for merge requests.
+ */
+export class FakeForge implements ForgePort {
+  asked: OpenMergeRequestInput[] = [];
+  /** What to answer. Null models a forge that could not be reached or does not know this host. */
+  answer: MergeRequestRef | null = null;
+  failNext: string | null = null;
+
+  async openMergeRequest(input: OpenMergeRequestInput): Promise<MergeRequestRef | null> {
+    this.asked.push(input);
+    if (this.failNext) {
+      const message = this.failNext;
+      this.failNext = null;
+      throw new Error(message);
+    }
+    return this.answer;
   }
 }
 
@@ -513,6 +624,7 @@ export interface TestHarness<G extends GitPort = FakeGit> extends PomniContainer
   chatStore: SqliteChatStore;
   git: G;
   executor: FakeExecutor;
+  forge: FakeForge;
   logs: MemoryLogSink;
   clock: FixedClock;
   dir: string;
@@ -545,6 +657,7 @@ export async function createHarness<G extends GitPort = FakeGit>(
 
   const executor = new FakeExecutor();
   const logs = new MemoryLogSink();
+  const forge = new FakeForge();
   const runStore = new SqliteRunStore(docs.absolute(layout.database));
 
   const workspace = new WorkspaceService(docs, fs);
@@ -623,6 +736,7 @@ export async function createHarness<G extends GitPort = FakeGit>(
     events,
     logger,
     worktrees,
+    forge,
   );
 
   const chatStore = new SqliteChatStore(docs.absolute(layout.database));
@@ -663,6 +777,7 @@ export async function createHarness<G extends GitPort = FakeGit>(
     doctor,
     detection,
     executor,
+    forge,
     llm,
     llmFactory,
     pipelineStore,

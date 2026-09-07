@@ -110,6 +110,10 @@ export class ProjectService {
       ...ref.data,
       ...(patch.name !== undefined ? { name: patch.name.trim() } : {}),
       ...(patch.description !== undefined ? { description: patch.description } : {}),
+      // Only future items get the new key. `counters.nextItem` is deliberately left alone:
+      // restarting the numbering would let a new NEW-1 exist beside an old OLD-1 that a
+      // branch and a commit message already point at.
+      ...(patch.itemPrefix !== undefined ? { itemPrefix: patch.itemPrefix } : {}),
       // Assigned whole, never merged: a graph merged per-key by index is a graph nobody
       // wrote. `null` is a value here — it clears the project back to the built-in flow —
       // so presence of the key, not truthiness, decides.

@@ -8,6 +8,7 @@ import {
   isRunBranch,
   isolatesRuns,
   runBranch,
+  slotForRun,
   worktreeEligibility,
   worktreeState,
   type Worktree,
@@ -34,6 +35,14 @@ export interface TakenWorktrees {
   dirs: Record<string, string>;
   /** Repos that are sharing their directory with everyone else, and why. */
   fallbacks: Array<{ repoId: string; name: string; reason: string }>;
+}
+
+/** What a resumed run got back: its own trees where they survived, and what did not. */
+export interface ReclaimedWorktrees extends TakenWorktrees {
+  /** Repos now working in the very tree their earlier steps wrote to. */
+  reclaimed: string[];
+  /** Repos that had a tree for this run and no longer do. Replaying into these is unsound. */
+  lost: string[];
 }
 
 export interface WorktreeInspection {
@@ -85,7 +94,7 @@ export class WorktreeService {
     projectId: string,
     runId: string,
     repos: ResolvedRepo[],
-    options: { pid?: number } = {},
+    options: { pid?: number; branch?: string } = {},
   ): Promise<TakenWorktrees> {
     const dirs: Record<string, string> = {};
     const fallbacks: TakenWorktrees['fallbacks'] = [];
@@ -93,7 +102,9 @@ export class WorktreeService {
 
     // Asked once for the whole call: it is a property of the git on this machine, not of a repo.
     const gitSupportsWorktrees = await this.git.supportsWorktrees().catch(() => false);
-    const branch = runBranch(runId);
+    // The caller names the branch so it can say what the work is — `feature/POMN-1/main`.
+    // Without one, the run names itself, which is all a run with no backlog item can do.
+    const preferred = options.branch ?? runBranch(runId);
 
     for (const repo of repos) {
       const probe = await this.probe(repo, gitSupportsWorktrees);
@@ -110,6 +121,15 @@ export class WorktreeService {
       try {
         // `git worktree add` makes the leaf; the repo slot above it is ours to create.
         await this.docs.ensureDir(layout.worktreeRepo(projectId, repo.id));
+
+        // A readable branch name can already be taken — by a live run on the same item, or by
+        // one whose worktree was removed while its branch survived because it was unmerged.
+        // Falling straight back to the shared directory there would cost the run its isolation
+        // for the sake of a name, so the slot moves aside instead.
+        const branch = (await this.git.branchExists(repo.workingDir, preferred).catch(() => false))
+          ? withSlot(preferred, slotForRun(runId))
+          : preferred;
+
         const { head } = await this.git.addWorktree(repo.workingDir, {
           path,
           branch,
@@ -152,6 +172,83 @@ export class WorktreeService {
     }
 
     return { dirs, fallbacks };
+  }
+
+  /**
+   * Put a run back in the tree it was working in.
+   *
+   * A resume is not a second run: the answers being replayed describe files that were written
+   * in this run's own worktree, on this run's own branch. {@link take} cannot deliver that —
+   * it only ever creates, so on the second attempt the path and the branch both already exist,
+   * `git worktree add -b` fails, and the catch quietly hands back the shared repo directory.
+   * The run then carries on against master while its work sits somewhere else, which is the
+   * one outcome worse than not resuming at all.
+   *
+   * Three cases, in the order they are worth trying: the directory is still there and still
+   * registered; the directory is gone but the branch survives, so it can be attached again;
+   * or neither, and this repo never had a worktree, so it is cut fresh.
+   */
+  async reclaim(
+    projectId: string,
+    runId: string,
+    repos: ResolvedRepo[],
+    options: { pid?: number; branch?: string } = {},
+  ): Promise<ReclaimedWorktrees> {
+    const dirs: Record<string, string> = {};
+    const fallbacks: TakenWorktrees['fallbacks'] = [];
+    const reclaimed: string[] = [];
+    // Repos whose earlier tree could not be restored. Told apart from an ordinary fallback
+    // because this one means replayed answers no longer describe the files on disk.
+    const lost: string[] = [];
+    if (repos.length === 0) return { dirs, fallbacks, reclaimed, lost };
+
+    for (const repo of repos) {
+      const row = await this.store.forRun(runId, repo.id);
+
+      // Never had one — a repo added since, or one that fell back last time. Cutting a fresh
+      // worktree is right here: there is no earlier work in it to lose.
+      if (!row) {
+        const cut = await this.take(projectId, runId, [repo], options);
+        dirs[repo.id] = cut.dirs[repo.id] ?? repo.workingDir;
+        fallbacks.push(...cut.fallbacks);
+        continue;
+      }
+
+      if (await this.fs.exists(row.path)) {
+        dirs[repo.id] = row.path;
+        reclaimed.push(repo.id);
+        if (row.status !== 'active') {
+          await this.store.update(row.id, { ...row, status: 'active', keptReason: null });
+        }
+        continue;
+      }
+
+      // The directory was removed but the branch is the run's own and is never force-deleted,
+      // so the work is still reachable. Recreate the tree on it rather than from the base ref,
+      // which would silently start the resumed run from a commit before its own changes.
+      try {
+        await this.docs.ensureDir(layout.worktreeRepo(projectId, repo.id));
+        // git still holds an admin entry for the directory that is gone, and it is that entry,
+        // not the branch, that would refuse the checkout as 'already used by a worktree'.
+        await this.git.pruneWorktrees(repo.workingDir);
+        await this.git.attachWorktree(repo.workingDir, { path: row.path, branch: row.branch });
+        dirs[repo.id] = row.path;
+        reclaimed.push(repo.id);
+        if (row.status !== 'active') {
+          await this.store.update(row.id, { ...row, status: 'active', keptReason: null });
+        }
+      } catch (error) {
+        const reason =
+          `'${repo.name}': the worktree for this run is gone and could not be put back ` +
+          `(${firstLine(error)}) — its branch is ${row.branch}`;
+        this.logger.warn(reason);
+        dirs[repo.id] = repo.workingDir;
+        fallbacks.push({ repoId: repo.id, name: repo.name, reason });
+        lost.push(repo.id);
+      }
+    }
+
+    return { dirs, fallbacks, reclaimed, lost };
   }
 
   /**
@@ -535,6 +632,16 @@ function describe(worktree: Worktree, state: WorktreeState): string {
     case 'missing':
       return `${worktree.path} is gone but its record survives (run ${worktree.runId}) — 'pomni worktree prune' clears it and git's stale entry.`;
   }
+}
+
+/**
+ * Swap the last segment of a branch name — its slot. A name with no slot to swap gets one
+ * appended, which keeps this total rather than making the caller check the shape first.
+ */
+function withSlot(branch: string, slot: string): string {
+  const parts = branch.split('/');
+  if (parts.length < 3) return `${branch}/${slot}`;
+  return [...parts.slice(0, -1), slot].join('/');
 }
 
 /** git's own first line is what a person needs; the rest of a git failure is noise. */

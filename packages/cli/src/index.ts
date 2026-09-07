@@ -110,6 +110,64 @@ export async function main(argv: string[]): Promise<void> {
     });
 
   project
+    .command('edit <id>')
+    .description('change a project: its name, description, or the key its items are numbered under')
+    .option('-n, --name <name>', 'display name')
+    .option('-d, --description <text>', 'short description')
+    .option('--item-prefix <key>', 'key for future item ids and branch names, e.g. POMN')
+    .option('--auto-commit', 'a run commits what it wrote on its own branch')
+    .option('--no-auto-commit', 'a run leaves its work as uncommitted files')
+    .option('--auto-push', "a run pushes its branch, so there is something to open an MR against")
+    .option('--no-auto-push', 'a run keeps its branch local')
+    .option('--auto-mr', "a pushed branch also gets a merge request opened through the forge")
+    .option('--no-auto-mr', 'a pushed branch is left for someone to open a merge request for')
+    .action(
+      async (
+        id: string,
+        options: {
+          name?: string;
+          description?: string;
+          itemPrefix?: string;
+          autoCommit?: boolean;
+          autoPush?: boolean;
+          autoMr?: boolean;
+        },
+      ) => {
+        const container = await open();
+        const before = await container.projects.getRef(id);
+        const policy = {
+          ...(options.autoCommit !== undefined ? { autoCommit: options.autoCommit } : {}),
+          ...(options.autoPush !== undefined ? { autoPush: options.autoPush } : {}),
+          ...(options.autoMr !== undefined ? { autoMergeRequest: options.autoMr } : {}),
+        };
+        const updated = await container.projects.update(id, {
+          ...(options.name !== undefined ? { name: options.name } : {}),
+          ...(options.description !== undefined ? { description: options.description } : {}),
+          ...(options.itemPrefix !== undefined ? { itemPrefix: options.itemPrefix } : {}),
+          ...(Object.keys(policy).length > 0 ? { policy } : {}),
+        });
+        console.log(`${style.green('updated')} project ${style.bold(updated.id)}  ${updated.name}`);
+        if (Object.keys(policy).length > 0) {
+          console.log(
+            style.dim(
+              `  a run now ${updated.policy.autoCommit ? 'commits' : 'does not commit'} its work, ` +
+                `${updated.policy.autoPush ? 'pushes' : 'does not push'} the branch and ` +
+                `${updated.policy.autoMergeRequest ? 'opens' : 'does not open'} a merge request`,
+            ),
+          );
+        }
+        if (updated.itemPrefix !== before.data.itemPrefix) {
+          console.log(
+            style.dim(
+              `  items are now numbered ${updated.itemPrefix}-${updated.counters.nextItem} onwards; ` +
+                `${before.data.itemPrefix} ids already written keep their names`,
+            ),
+          );
+        }
+      },
+    );
+
+  project
     .command('list')
     .alias('ls')
     .description('list projects')
@@ -322,6 +380,14 @@ export async function main(argv: string[]): Promise<void> {
       const synced = await container.repos.sync(projectId, repoId);
       console.log(`${style.green('synced')} ${projectId}/${repoId}  ${statusLabel(synced.status)}`);
       if (synced.stack) console.log(style.dim(`  ${synced.stack.detected.join(', ')}`));
+      // What the base branch did is the reason to run this at all: a run cuts its worktree
+      // from that branch, so "fetched" and "moved" are different news.
+      if (synced.advanced) {
+        const refused =
+          synced.advanced.status === 'diverged' || synced.advanced.status === 'dirty';
+        const label = refused ? style.yellow('  not advanced') : style.dim('  ');
+        console.log(`${label}${refused ? ' — ' : ''}${synced.advanced.detail}`);
+      }
     });
 
   repo

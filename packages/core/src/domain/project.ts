@@ -10,8 +10,25 @@ import type { Repo } from './repo.js';
  */
 
 export const ProjectPolicySchema = z.object({
-  autoCommit: z.boolean().default(false),
+  /**
+   * Whether a run commits what it wrote, on its own branch, before giving its worktree back.
+   *
+   * On by default, and `autoPush` beside it is not, which is the asymmetry that matters. A
+   * commit lands on a branch this run created, inside a directory Pomni made: it cannot
+   * overwrite anyone's work, and the only alternative to it is loose files in a gitignored
+   * directory that nothing downstream can review, merge or even name. A push is outward-facing
+   * — it tells other people the work is ready — so it stays something a project opts into.
+   */
+  autoCommit: z.boolean().default(true),
   autoPush: z.boolean().default(false),
+  /**
+   * Whether a pushed branch also gets a merge request opened for it, through the forge's API.
+   *
+   * Separate from `autoPush` because it needs something more: a credential with API scope, not
+   * only git access. When it is off, or the forge cannot be reached, the run still offers the
+   * url a person opens themselves — the link is the fallback, not the failure.
+   */
+  autoMergeRequest: z.boolean().default(false),
   requireGreenGate: z.boolean().default(true),
   maxTurns: z.number().int().positive().default(200),
   maxCostUsd: z.number().positive().default(5),
@@ -98,6 +115,22 @@ export interface ProjectDetail extends Project {
 export const ProjectPatchSchema = z.object({
   name: z.string().min(1).optional(),
   description: z.string().optional(),
+  /**
+   * The key future items are numbered under, and the middle segment of every branch name.
+   *
+   * Changing it never renumbers the items already written: their ids are in commit messages,
+   * branch names and prose, and rewriting them would break every one of those references to
+   * make the backlog look tidy. Upper-cased and letters-only, because it has to survive being
+   * put in a git ref.
+   */
+  itemPrefix: z
+    .string()
+    .trim()
+    .min(1)
+    .max(10)
+    .regex(/^[A-Za-z][A-Za-z0-9]*$/, 'an item prefix is letters and digits, starting with a letter')
+    .transform((value) => value.toUpperCase())
+    .optional(),
   gates: ProjectGatesSchema.partial().optional(),
   /**
    * Replaced wholesale, never merged. A flow is a graph: merging arrays of states and arrows

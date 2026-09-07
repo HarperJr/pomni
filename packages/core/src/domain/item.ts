@@ -48,7 +48,15 @@ export type ItemStatus = CoreItemStatus | (string & {});
 
 export const ItemStatusSchema = z.string().min(1);
 
-export const ItemTypeSchema = z.enum(['feature', 'bug', 'chore', 'spike', 'refactor', 'docs']);
+export const ItemTypeSchema = z.enum([
+  'feature',
+  'bug',
+  'chore',
+  'spike',
+  'refactor',
+  'docs',
+  'release',
+]);
 export type ItemType = z.infer<typeof ItemTypeSchema>;
 
 export const PrioritySchema = z.enum(['P0', 'P1', 'P2', 'P3']);
