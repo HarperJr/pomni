@@ -121,6 +121,10 @@ export async function main(argv: string[]): Promise<void> {
     .option('--no-auto-push', 'a run keeps its branch local')
     .option('--auto-mr', "a pushed branch also gets a merge request opened through the forge")
     .option('--no-auto-mr', 'a pushed branch is left for someone to open a merge request for')
+    .option('--max-cost <usd>', 'stop a run once its accumulated cost passes this many dollars')
+    .option('--no-max-cost', 'remove the cost ceiling — a run may spend without limit')
+    .option('--max-turns <n>', 'stop a run once its agent steps reach this many, across the whole run')
+    .option('--no-max-turns', 'remove the turn ceiling — a run may take as many steps as it needs')
     .action(
       async (
         id: string,
@@ -131,14 +135,39 @@ export async function main(argv: string[]): Promise<void> {
           autoCommit?: boolean;
           autoPush?: boolean;
           autoMr?: boolean;
+          maxCost?: string | false;
+          maxTurns?: string | false;
         },
       ) => {
         const container = await open();
         const before = await container.projects.getRef(id);
+
+        let maxCostUsd: number | undefined;
+        if (options.maxCost !== undefined && options.maxCost !== false) {
+          maxCostUsd = Number(options.maxCost);
+          if (!Number.isFinite(maxCostUsd) || maxCostUsd <= 0) {
+            console.error(style.red(`--max-cost must be a positive number, got ${options.maxCost}`));
+            process.exitCode = 1;
+            return;
+          }
+        }
+
+        let maxTurns: number | undefined;
+        if (options.maxTurns !== undefined && options.maxTurns !== false) {
+          maxTurns = Number(options.maxTurns);
+          if (!Number.isInteger(maxTurns) || maxTurns <= 0) {
+            console.error(style.red(`--max-turns must be a positive integer, got ${options.maxTurns}`));
+            process.exitCode = 1;
+            return;
+          }
+        }
+
         const policy = {
           ...(options.autoCommit !== undefined ? { autoCommit: options.autoCommit } : {}),
           ...(options.autoPush !== undefined ? { autoPush: options.autoPush } : {}),
           ...(options.autoMr !== undefined ? { autoMergeRequest: options.autoMr } : {}),
+          ...(options.maxCost !== undefined ? { maxCostUsd } : {}),
+          ...(options.maxTurns !== undefined ? { maxTurns } : {}),
         };
         const updated = await container.projects.update(id, {
           ...(options.name !== undefined ? { name: options.name } : {}),
@@ -153,6 +182,17 @@ export async function main(argv: string[]): Promise<void> {
               `  a run now ${updated.policy.autoCommit ? 'commits' : 'does not commit'} its work, ` +
                 `${updated.policy.autoPush ? 'pushes' : 'does not push'} the branch and ` +
                 `${updated.policy.autoMergeRequest ? 'opens' : 'does not open'} a merge request`,
+            ),
+          );
+        }
+        if (options.maxCost !== undefined || options.maxTurns !== undefined) {
+          console.log(
+            style.dim(
+              `  a run now stops past ${
+                updated.policy.maxCostUsd !== undefined ? `$${updated.policy.maxCostUsd}` : 'no cost limit'
+              } or ${
+                updated.policy.maxTurns !== undefined ? `${updated.policy.maxTurns} turns` : 'no turn limit'
+              }`,
             ),
           );
         }
