@@ -2,6 +2,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   MAX_SIBLING_BYTES,
+  PipelineRunSchema,
   parseHandover,
   withSiblings,
 } from '@pomni/core';
@@ -138,36 +139,27 @@ describe('a run whose process died', () => {
   it('can be closed out by another process', async () => {
     // What the store looks like after a session is killed mid-run: still `running`, with
     // nothing left anywhere to receive a signal.
-    const orphan = {
+    // Through the schema, not spelled out. Written by hand this literal fell behind
+    // `inputTokens`/`outputTokens` once and `branch` a second time, each caught only because
+    // the test project type-checks now. Defaults are the schema's job.
+    const orphan = PipelineRunSchema.parse({
       id: 'orphaned-run',
       projectId: 'acme',
       workflowId: 'discovery',
       workflowName: 'Discovery',
       providerId: 'claude-code',
-      itemId: null,
-      rerunOf: null,
       task: 'something from a session that is gone',
-      context: [],
-      outcome: 'unknown' as const,
-      unmet: [],
-      status: 'running' as const,
-      // The pid of the session that died. It is still written down; nothing is behind it.
-      pid: 999_999,
+      status: 'running',
+      itemId: null,
       result: null,
       error: null,
-      gateStatus: 'skipped' as const,
-      gateSummary: null,
-      itemStatus: null,
-      startedAt: new Date(Date.now() - 60_000).toISOString(),
+      costUsd: null,
       endedAt: null,
       durationMs: null,
-      // Through the schema, so the literal does not have to restate every field a run gains.
-      // Spelling this record out by hand is what let it fall behind `inputTokens` and
-      // `outputTokens` without anything noticing.
-      inputTokens: 0,
-      outputTokens: 0,
-      costUsd: null,
-    };
+      // The pid of the session that died. It is still written down; nothing is behind it.
+      pid: 999_999,
+      startedAt: new Date(Date.now() - 60_000).toISOString(),
+    });
     await harness.pipelineStore.insertRun(orphan);
 
     const closed = await harness.pipelines.cancel(orphan.id);

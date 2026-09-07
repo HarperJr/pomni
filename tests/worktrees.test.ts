@@ -256,6 +256,11 @@ describe('a worktree with uncommitted work in it', () => {
     expect(existsSync(path)).toBe(false);
     expect(await harness.worktrees.list({ runId: run.id })).toEqual([]);
 
+    // On the run itself, so it survives the directory. Before this the listing derived the
+    // branch from the worktree row, which a clean release deletes — so a run lost the branch
+    // it delivered on at the exact moment the branch became the only thing that mattered.
+    expect((await harness.pipelines.get(run.id)).branch).toBe(branch);
+
     // Nothing was pushed: the project did not ask for that, and the run says so rather than
     // offering a merge-request link to a branch the remote has never heard of.
     expect(harness.git.pushes).toEqual([]);

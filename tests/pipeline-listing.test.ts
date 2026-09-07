@@ -1,6 +1,6 @@
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import type { PipelineRun } from '@pomni/core';
+import { PipelineRunSchema, type PipelineRun } from '@pomni/core';
 import { createApp } from '@pomni/server';
 import { createHarness, type TestHarness } from './harness.js';
 
@@ -11,33 +11,33 @@ import { createHarness, type TestHarness } from './harness.js';
  * past 200, and that the two filters the block uses are the ones the route reads.
  */
 
-/** A run that exists only to be counted. Ids sort lexicographically; the store orders by id. */
+/**
+ * A run that exists only to be counted. Ids sort lexicographically; the store orders by id.
+ *
+ * Through the schema, and cast by nothing. The `as PipelineRun` this used to end with let the
+ * literal fall silently behind the record — the store then tried to bind an `undefined` and
+ * every test in the file died on "cannot be bound to SQLite parameter 23", which says nothing
+ * about what was actually missing.
+ */
 function seedRun(index: number, overrides: Partial<PipelineRun> = {}): PipelineRun {
-  return {
+  return PipelineRunSchema.parse({
     id: `run-${String(index).padStart(4, '0')}`,
     projectId: 'acme',
     workflowId: 'discovery',
     workflowName: 'Discovery',
     providerId: 'claude-code',
-    itemId: null,
-    rerunOf: null,
     task: `task ${index}`,
-    context: [],
     outcome: 'done',
-    unmet: [],
     status: 'passed',
-    pid: null,
+    itemId: null,
     result: null,
     error: null,
-    gateStatus: 'skipped',
-    gateSummary: null,
-    itemStatus: null,
+    costUsd: null,
     startedAt: new Date(1_700_000_000_000 + index * 1000).toISOString(),
     endedAt: new Date(1_700_000_000_000 + index * 1000 + 500).toISOString(),
     durationMs: 500,
-    costUsd: null,
     ...overrides,
-  } as PipelineRun;
+  });
 }
 
 describe('listing a project’s pipeline runs', () => {

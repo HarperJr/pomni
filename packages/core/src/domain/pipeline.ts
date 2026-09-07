@@ -94,6 +94,19 @@ export const PipelineRunSchema = z.object({
   itemId: z.string().nullable(),
   /** The run this one is a second attempt at, so a retry is traceable to what it retried. */
   rerunOf: z.string().nullable().default(null),
+  /**
+   * The branch, or branches, this run's work was committed on.
+   *
+   * On the run rather than derived from its worktree rows. A row exists if and only if its
+   * directory does — that is the design — so the moment a run started delivering cleanly, the
+   * directory went away and the branch went with it. The listing then fell back to saying
+   * `in repo`, which is not merely absent but wrong: it claims the run worked in the shared
+   * repo directory, the one thing that did not happen.
+   *
+   * Null means "not recorded" — a run from before this field, or one that committed nothing.
+   * It never means the run worked in the repo directory; `unmet` says that in words.
+   */
+  branch: z.string().nullable().default(null),
   task: z.string(),
   status: PipelineStatusSchema,
   /**
