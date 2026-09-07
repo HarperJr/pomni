@@ -75,7 +75,7 @@ describe('listing a project’s pipeline runs', () => {
 
     expect(runs).toHaveLength(30);
     // Newest first: the block shows the most recent history, not the oldest.
-    expect(runs[0].id).toBe('run-0044');
+    expect(runs[0]?.id).toBe('run-0044');
     expect(runs.at(-1)?.id).toBe('run-0015');
   });
 
@@ -94,7 +94,7 @@ describe('listing a project’s pipeline runs', () => {
 
     // The store clamps; nothing the browser sends can make one response render 240 rows.
     expect(runs).toHaveLength(200);
-    expect(runs[0].id).toBe('run-0239');
+    expect(runs[0]?.id).toBe('run-0239');
   });
 
   it('caps at 200 exactly at the boundary the browser stops raising the limit', async () => {

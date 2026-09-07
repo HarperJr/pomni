@@ -513,7 +513,7 @@ describe('eligibility, in the order it is decided', () => {
   });
 
   it('isolates a cloned repo under auto', () => {
-    const cloned = repo({ source: { kind: 'git', url: 'https://example.test/o/r.git' }, status: 'ready' });
+    const cloned = repo({ source: { kind: 'git', url: 'https://example.test/o/r.git', provider: 'generic' as const }, status: 'ready' });
     expect(isolatesRuns(cloned, probe())).toBe(true);
   });
 

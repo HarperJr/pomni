@@ -212,6 +212,62 @@ describe('a run with an agent that may only search', () => {
     expect(harness.llmFactory.lastOptions.cwd).toBeUndefined();
     expect(harness.llm.calls[0]?.system).toContain('search the web and fetch a page');
   });
+
+  // The literal above is the whole point of this one: `CreateAgentInput.tools` used to be a
+  // hand-written copy of the schema's shape, so writing `web: true` was a type error and the
+  // only way through was a cast. It is derived now, and the test suite is type-checked, so the
+  // two cannot drift apart again without something going red.
+  it('grants every ability the agent schema has, with no cast', async () => {
+    await harness.workflows.create({ name: 'Full' });
+    const agent = await harness.workflows.addAgent('full', {
+      name: 'Everything',
+      spec: 'Does it all.',
+      prompt: 'You do everything.',
+      tools: { files: true, run: true, verify: true, web: true, mcp: [], cli: [] },
+    });
+
+    expect(agent.tools).toMatchObject({ files: true, run: true, verify: true, web: true });
+  });
+
+  it('refuses an agent edit that was written against a rev someone has moved past', async () => {
+    await harness.workflows.create({ name: 'Racy' });
+    const agent = await harness.workflows.addAgent('racy', {
+      name: 'Scout',
+      spec: 'Scouts.',
+      prompt: 'You scout.',
+    });
+
+    // What an editor loaded, minutes ago.
+    const stale = (await harness.workflows.getRef('racy')).rev;
+
+    // Meanwhile, from the CLI: this agent may now search the web.
+    await harness.workflows.updateAgent('racy', agent.id, { tools: { web: true } });
+
+    // The stale form submits `tools` whole, as a form does — without the precondition it would
+    // put back the tools the page loaded with, silently undoing the grant.
+    await expect(
+      harness.workflows.updateAgent(
+        'racy',
+        agent.id,
+        { tools: { files: false, run: false, verify: false, web: false, mcp: [], cli: [] } },
+        stale,
+      ),
+    ).rejects.toMatchObject({ code: 'stale_revision' });
+
+    expect((await harness.workflows.get('racy')).agents[0]?.tools.web).toBe(true);
+  });
+
+  it('still lets a caller that knows no rev edit an agent, as the CLI does', async () => {
+    await harness.workflows.create({ name: 'Plain' });
+    const agent = await harness.workflows.addAgent('plain', {
+      name: 'Scout',
+      spec: 'Scouts.',
+      prompt: 'You scout.',
+    });
+
+    const updated = await harness.workflows.updateAgent('plain', agent.id, { tools: { web: true } });
+    expect(updated.tools.web).toBe(true);
+  });
 });
 
 describe('what a session is permitted', () => {

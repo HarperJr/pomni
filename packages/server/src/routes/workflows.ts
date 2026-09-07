@@ -119,6 +119,7 @@ export async function workflowRoutes(
           request.params.id,
           request.params.agentId,
           body,
+          normalizeEtag(request.headers['if-match']),
         ),
       };
     },

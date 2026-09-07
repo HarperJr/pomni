@@ -1,0 +1,20 @@
+{
+  // The test suite, type-checked.
+  //
+  // Not a project reference: a reference has to be `composite`, and a composite project emits.
+  // The tests emit nothing, so they get their own config run as an extra step — the same shape
+  // `packages/web` already uses. What matters is that they are checked at all: `tsconfig.json`
+  // references only the packages, so for as long as this file did not exist `npm run typecheck`
+  // reported success while never once looking at `tests/`. The gap that hid `CreateAgentInput`
+  // drifting from the schema was visible in tests/harness.ts the whole time.
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "composite": false,
+    "declaration": false,
+    "declarationMap": false,
+    "sourceMap": false,
+    "types": ["node"]
+  },
+  "include": ["tests/**/*.ts"]
+}
