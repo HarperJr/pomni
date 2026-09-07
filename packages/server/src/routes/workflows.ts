@@ -57,6 +57,7 @@ const AgentBody = z.object({
     .object({
       files: z.boolean().optional(),
       run: z.boolean().optional(),
+      web: z.boolean().optional(),
       mcp: z.array(z.string()).optional(),
       cli: z.array(z.string()).optional(),
     })
@@ -118,6 +119,7 @@ export async function workflowRoutes(
           request.params.id,
           request.params.agentId,
           body,
+          normalizeEtag(request.headers['if-match']),
         ),
       };
     },

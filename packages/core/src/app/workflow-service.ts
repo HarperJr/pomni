@@ -45,7 +45,15 @@ export interface CreateAgentInput {
   provider?: string | null;
   outputs?: string;
   delegatesTo?: string[];
-  tools?: { files?: boolean; run?: boolean; verify?: boolean; mcp?: string[]; cli?: string[] };
+  /**
+   * Derived from the agent itself, never restated.
+   *
+   * This used to be a hand-written copy of the same shape, and it drifted the moment `web` was
+   * added to the schema: every caller writing a fresh tools literal got TS2353 and had to reach
+   * for a cast to grant an ability the domain already had. A copy of a type is a second place
+   * to remember, and the one that gets forgotten.
+   */
+  tools?: Partial<Agent['tools']>;
 }
 
 export type UpdateAgentInput = Partial<CreateAgentInput>;
@@ -219,10 +227,22 @@ export class WorkflowService {
     return agent;
   }
 
+  /**
+   * `ifMatch` is the rev the caller believes it is editing.
+   *
+   * Omitting it keeps the old behaviour — the write is checked only against the rev this call
+   * just read, which stops two simultaneous writes but not a stale one. That is enough for the
+   * CLI, which reads and writes in the same breath. It is not enough for an editor a person
+   * left open: it holds a rev from minutes ago, and `tools` is submitted whole, so saving a
+   * name from that form put back the tools as they were when the form loaded — silently
+   * undoing a `web` granted from the CLI in between. Every sibling route already takes the
+   * header; only this one did not.
+   */
   async updateAgent(
     workflowId: string,
     agentId: string,
     patch: UpdateAgentInput,
+    ifMatch?: string,
   ): Promise<Agent> {
     const ref = await this.getRef(workflowId);
     const current = findAgent(ref.data, agentId);
@@ -244,7 +264,7 @@ export class WorkflowService {
       updatedAt: this.clock.iso(),
     });
 
-    await this.replaceAgent(ref, updated);
+    await this.replaceAgent(ref, updated, ifMatch);
     return updated;
   }
 
@@ -487,13 +507,16 @@ export class WorkflowService {
     entryAgent(workflow);
   }
 
-  private async replaceAgent(ref: DocRef<Workflow>, agent: Agent): Promise<void> {
+  private async replaceAgent(ref: DocRef<Workflow>, agent: Agent, ifMatch?: string): Promise<void> {
     const next = WorkflowSchema.parse({
       ...ref.data,
       agents: ref.data.agents.map((other) => (other.id === agent.id ? agent : other)),
       updatedAt: this.clock.iso(),
     });
-    await this.save(next, ref.rev);
+    // The caller's rev when it has one, this call's own otherwise — the same shape `update`
+    // uses, so a caller that knows what it was editing is held to it and one that does not
+    // behaves exactly as before.
+    await this.save(next, ifMatch ?? ref.rev);
   }
 
   private async save(workflow: Workflow, ifMatch: string): Promise<Workflow> {

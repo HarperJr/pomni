@@ -1124,6 +1124,8 @@ details.chip .log {
 .tag.action-shell { border-color: var(--accent); color: var(--accent); }
 .tag.action-write { border-color: var(--warn); color: var(--warn); }
 .tag.action-reach { border-color: var(--border-strong); }
+/* The one kind of action that leaves the machine. Worth telling apart at a glance. */
+.tag.action-web { border-color: var(--danger); color: var(--danger); }
 
 /* -- chat ------------------------------------------------------------------ */
 

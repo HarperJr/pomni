@@ -187,7 +187,7 @@ describe.skipIf(!HAS_GIT)('real git', () => {
     const path = taken[0] as string;
     // A branch a person can read, and one that says what kind of change this is. `bug` is the
     // backlog's word for it; `fix` is the branch list's.
-    const branch = (await harness.worktrees.list({ runId: run.id }))[0]?.branch;
+    const branch = (await harness.worktrees.list({ runId: run.id }))[0]?.branch as string;
     expect(branch).toBe(`fix/${item.id}/main`);
     expect((await git(path, 'rev-parse', '--abbrev-ref', 'HEAD')).stdout.trim()).toBe(branch);
 

@@ -21,7 +21,7 @@
   },
   "scripts": {
     "build": "tsc --build",
-    "typecheck": "tsc --build --force && tsc -p packages/web --noEmit",
+    "typecheck": "tsc --build --force && tsc -p packages/web --noEmit && tsc -p tsconfig.tests.json",
     "test": "vitest run",
     "test:watch": "vitest",
     "build:web": "npm run build --workspace @pomni/web",

@@ -291,6 +291,45 @@ export class FakeGit implements GitPort {
   }
 
   /**
+   * The same directory, back on a branch it already has — what a resumed run needs.
+   *
+   * Missing entirely until the test suite was first type-checked: the resume tests run against
+   * real git, so nothing at runtime ever asked the fake for it, and `implements GitPort` was
+   * never verified by a build. A fake that is quietly narrower than its port is a fake that
+   * agrees with whatever the implementation does.
+   *
+   * No `-b` and no "already checked out" check, matching the real verb: the branch is the
+   * run's own and exists, and re-creating it is the bug this method was added to avoid.
+   */
+  async attachWorktree(
+    repoDir: string,
+    options: { path: string; branch: string },
+  ): Promise<{ head: string }> {
+    if (!this.worktreeSupport) {
+      throw new GitError("git worktree add failed: unknown subcommand 'worktree'");
+    }
+    if (this.worktrees.has(dirKey(options.path))) {
+      throw new GitError(`git worktree add failed: '${options.path}' already exists`);
+    }
+
+    await mkdir(options.path, { recursive: true });
+    await cp(repoDir, options.path, {
+      recursive: true,
+      filter: (source) => !/[\\/](\.git|node_modules)([\\/]|$)/.test(source),
+    });
+
+    const head = (await this.info(repoDir))?.head ?? 'abc123';
+    this.worktrees.set(dirKey(options.path), {
+      repoKey: dirKey(repoDir),
+      path: options.path,
+      branch: options.branch,
+      head,
+      base: await snapshot(options.path),
+    });
+    return { head };
+  }
+
+  /**
    * Never forces, exactly as the port says. A worktree with uncommitted work in it is refused,
    * which is the mechanism the whole feature rests on.
    */
@@ -586,6 +625,9 @@ export interface SessionOptions {
   dirs?: string[];
   tools?: ToolGrant[];
   files?: boolean;
+  run?: boolean;
+  web?: boolean;
+  verify?: string[];
 }
 
 /**

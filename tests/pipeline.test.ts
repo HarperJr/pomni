@@ -161,6 +161,11 @@ describe('a run whose process died', () => {
       startedAt: new Date(Date.now() - 60_000).toISOString(),
       endedAt: null,
       durationMs: null,
+      // Through the schema, so the literal does not have to restate every field a run gains.
+      // Spelling this record out by hand is what let it fall behind `inputTokens` and
+      // `outputTokens` without anything noticing.
+      inputTokens: 0,
+      outputTokens: 0,
       costUsd: null,
     };
     await harness.pipelineStore.insertRun(orphan);

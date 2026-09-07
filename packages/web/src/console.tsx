@@ -959,8 +959,19 @@ function Spend({ runs }: { runs: PipelineRun[] }) {
 
 
 /** Shell, file, or something the agent reached for outside itself. */
+/**
+ * Which colour an action gets in the log.
+ *
+ * `web` is its own kind rather than folded into `reach`, and neither is it a `read`. Reading a
+ * file in the repo and fetching a page off the internet are not the same act — one stays on the
+ * machine and the other does not — and the domain already treats them as separate abilities:
+ * `agent.tools.web` is granted apart from `files`, `run` and `mcp`. Rendering a fetch as a file
+ * read hid, in the one view built to show what an agent actually did, the one action that left
+ * the machine.
+ */
 function kindOf(tool: string): string {
   if (tool === 'Bash') return 'shell';
+  if (['WebSearch', 'WebFetch'].includes(tool)) return 'web';
   if (tool.startsWith('mcp__') || tool === 'Skill') return 'reach';
   if (['Write', 'Edit', 'MultiEdit', 'NotebookEdit'].includes(tool)) return 'write';
   return 'read';
