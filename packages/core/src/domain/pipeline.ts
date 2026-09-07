@@ -303,6 +303,149 @@ export function withBrief(task: string, brief: string): string {
   ].join('\n');
 }
 
+/**
+ * Files an agent published for the rest of the run.
+ *
+ * The digest carries what an agent said; this carries what it wants the others to *have* —
+ * the field names it settled, the signature it chose, the shape it decided on. Fenced rather
+ * than JSON because the content is usually code, and code inside a JSON string arrives
+ * mangled or not at all.
+ *
+ *     ```handover field-names.md
+ *     turns, cacheReadTokens, freshInputTokens
+ *     ```
+ */
+export function parseHandover(text: string): ContextFile[] {
+  const files: ContextFile[] = [];
+  const pattern = /^[ \t]*```handover[ \t]+(\S+)[ \t]*$/gm;
+
+  for (;;) {
+    const opened = pattern.exec(text);
+    if (!opened) break;
+
+    const from = opened.index + opened[0].length + 1;
+    const closed = text.indexOf('```', from);
+    if (closed === -1) continue;
+
+    const name = (opened[1] ?? '').trim();
+    const content = text.slice(from, closed).trimEnd();
+    if (!name || !content.trim()) continue;
+
+    files.push({ name, content });
+    pattern.lastIndex = closed;
+  }
+
+  return files;
+}
+
+/** Told to every agent, because any of them may have something the next one needs. */
+export const HANDOVER_PROTOCOL = `## Handing something to the agents after you
+
+If you settle something the rest of this change depends on — the names of fields, a signature,
+the shape of a stored record — publish it, and every agent asked for anything after you gets it
+without having to find it:
+
+\`\`\`handover the-name.md
+what you decided, in as few lines as it takes
+\`\`\`
+
+Only what others must match. Not your reasoning, not a summary of your work — that is what your
+answer is for.`;
+
+/** One agent's answer, as the next agent needs to receive it. */
+export interface AgentReport {
+  agentId: string;
+  agentName: string;
+  task: string;
+  answer: string;
+}
+
+/** How much of a delegate's prompt the other agents' findings may take. */
+export const MAX_SIBLING_BYTES = 3000;
+/** How much of any one answer is carried. Enough for a decision, not for a transcript. */
+export const MAX_SIBLING_ANSWER_BYTES = 700;
+/** How many are carried at all: a run of twenty must not put nineteen in the twentieth. */
+export const MAX_SIBLING_REPORTS = 6;
+
+/**
+ * What the agents before this one already established.
+ *
+ * Six agents changing one feature across six layers used to derive the same field names from
+ * the same spec, separately, each paying to read the store and the service to find out what
+ * was actually written. The orchestrator was holding every one of those answers and handing
+ * them to nobody.
+ *
+ * Newest first and hard-bounded, because this is added to every delegate's prompt and a
+ * digest that grows with the run would cost more than the rediscovery it replaces.
+ */
+export function withSiblings(task: string, reports: AgentReport[]): string {
+  if (reports.length === 0) return task;
+
+  const blocks: string[] = [];
+  let budget = MAX_SIBLING_BYTES;
+
+  for (const report of reports.slice(-MAX_SIBLING_REPORTS).reverse()) {
+    const answer = clipBytes(report.answer.trim(), MAX_SIBLING_ANSWER_BYTES);
+    if (!answer) continue;
+
+    const block = [
+      `### ${report.agentName} — asked for: ${summarise(report.task, 120)}`,
+      '',
+      answer,
+    ].join('\n');
+
+    const size = Buffer.byteLength(block, 'utf8');
+    if (size > budget) break;
+    budget -= size;
+    blocks.push(block);
+  }
+
+  if (blocks.length === 0) return task;
+
+  return [
+    task,
+    '',
+    '## What the other agents have already decided',
+    '',
+    'These ran before you, on this same change. Their decisions hold: use the names, fields and',
+    'signatures they chose rather than picking your own, and do not go looking for what is',
+    'already written here. If one of them is wrong, say so in your answer instead of quietly',
+    'doing something different.',
+    '',
+    ...blocks,
+  ].join('\n');
+}
+
+/** Whole lines up to a byte budget: half a sentence reads as a mistake rather than a limit. */
+function clipBytes(text: string, bytes: number): string {
+  if (Buffer.byteLength(text, 'utf8') <= bytes) return text;
+
+  const kept: string[] = [];
+  let size = 0;
+
+  for (const line of text.split(/\r?\n/)) {
+    size += Buffer.byteLength(line, 'utf8') + 1;
+    if (size > bytes) break;
+    kept.push(line);
+  }
+
+  // One long paragraph has no line to cut on, and returning nothing would drop the whole
+  // report — the agent that wrote the most useful answer would be the one nobody heard.
+  if (kept.length === 0) return `${cutBytes(text, bytes)}\n\n(trimmed)`;
+
+  return `${kept.join('\n')}\n\n(trimmed)`;
+}
+
+/** A hard cut on a byte budget, without splitting a character in half. */
+function cutBytes(text: string, bytes: number): string {
+  const buffer = Buffer.from(text, 'utf8');
+  if (buffer.length <= bytes) return text;
+
+  return new TextDecoder('utf-8', { fatal: false })
+    .decode(buffer.subarray(0, bytes))
+    .replace(/\uFFFD$/, '');
+}
+
 export function withContext(task: string, files: ContextFile[]): string {
   if (files.length === 0) return task;
 

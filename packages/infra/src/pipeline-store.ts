@@ -81,10 +81,13 @@ export class SqlitePipelineStore implements PipelineStore {
 
   async updateRun(id: string, run: PipelineRun): Promise<void> {
     this.statement(
+      // `context` is here because a resume adds a file to it — the note saying what changed
+      // and what is already done. Left out, that file reached the agents in memory and was
+      // gone from the row, so a person reloading the page saw a run with no explanation.
       `UPDATE pipeline_runs
          SET status = ?, pid = ?, result = ?, error = ?, gate_status = ?, gate_summary = ?,
              item_status = ?, outcome = ?, unmet = ?, ended_at = ?, duration_ms = ?,
-             input_tokens = ?, output_tokens = ?, cost_usd = ?
+             input_tokens = ?, output_tokens = ?, cost_usd = ?, context = ?
        WHERE id = ?`,
     ).run(
       run.status,
@@ -101,6 +104,7 @@ export class SqlitePipelineStore implements PipelineStore {
       run.inputTokens,
       run.outputTokens,
       run.costUsd,
+      JSON.stringify(run.context),
       id,
     );
   }

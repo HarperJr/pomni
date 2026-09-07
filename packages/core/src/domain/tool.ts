@@ -180,10 +180,19 @@ export function toolGrants(grants: ToolGrant[]): string[] {
  * a capability whose command changes changes the permission with it.
  */
 export function verifyGrants(commands: string[]): string[] {
-  return [...new Set(commands.map((command) => command.trim()).filter(Boolean))].map(
-    (command) => `Bash(${command})`,
-  );
+  const wanted = [...new Set(commands.map((command) => command.trim()).filter(Boolean))];
+  return wanted.flatMap((command) => SHELL_TOOLS.map((shell) => `${shell}(${command})`));
 }
+
+/**
+ * The shells a session may be handed.
+ *
+ * Windows sessions get a PowerShell tool as well as Bash, and an agent refused on one simply
+ * tries the other. Granting only `Bash(npm run typecheck)` meant a verify-only agent's second
+ * attempt was refused for a reason its prompt had never mentioned; naming both is what makes
+ * "you may run exactly these checks" true whichever shell it reaches for.
+ */
+export const SHELL_TOOLS = ['Bash', 'PowerShell'] as const;
 
 export function toolBriefing(grants: ToolGrant[]): string | null {
   if (grants.length === 0) return null;

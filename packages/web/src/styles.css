@@ -669,7 +669,20 @@ svg.graph {
 
 .step-name { font-weight: 600; margin-right: 6px; }
 .step-task { font-size: 12px; margin-top: 2px; }
-.step-meta { flex-shrink: 0; }
+/* Время и трата — столбиком: строка агента и так длинная. */
+.step-meta {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+.step-spend { font-size: 11px; color: var(--text-dim); white-space: nowrap; }
+
+/* Что починили руками — строкой рядом с задачей, а не в отдельном диалоге. */
+.resume-note { margin-top: 10px; gap: 10px; }
+.resume-note input { font-size: 13px; }
 
 .dot.step-running, .dot.step-pending { background: var(--warn); }
 .dot.step-done { background: var(--ok); }
@@ -1094,7 +1107,19 @@ details.chip .log {
   gap: 8px;
   margin-top: 4px;
   font-size: 12px;
+  flex-wrap: wrap;
 }
+
+/* Команда, которую не пустили. Её видно и не разворачивая список. */
+.action.denied { color: var(--danger); }
+.action-note {
+  width: 100%;
+  padding-left: 2px;
+  font-size: 11px;
+  color: var(--danger);
+}
+
+.tag.refused { border-color: var(--danger); color: var(--danger); }
 
 .tag.action-shell { border-color: var(--accent); color: var(--accent); }
 .tag.action-write { border-color: var(--warn); color: var(--warn); }

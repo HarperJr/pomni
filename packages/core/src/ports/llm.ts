@@ -62,6 +62,17 @@ export interface AgentAction {
   tool: string;
   /** The part worth reading: the command, the path, the skill. */
   detail: string;
+  /**
+   * How the call ended.
+   *
+   * Only the calls were recorded before this, so a refused `npm run typecheck` was logged
+   * exactly like one that ran and passed — the action list read as work done. A refusal is
+   * the most important thing a session can tell us about its own grants, and it was the one
+   * thing we threw away.
+   */
+  outcome?: 'ok' | 'refused' | 'failed';
+  /** What went wrong, when something did: the first line of the refusal or the error. */
+  note?: string;
 }
 
 export interface LlmResult {
