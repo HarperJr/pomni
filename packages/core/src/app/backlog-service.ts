@@ -223,7 +223,18 @@ export class BacklogService {
     const item = ref.data;
     const from = item.status;
 
-    if (from === to) return item;
+    // Moving to the status you are already in is nothing — except into `blocked`, which is the
+    // one state that carries a reason. A second run that fails for a new reason was silently
+    // discarded here: POMN-54 went on showing "you've hit your session limit" from hours
+    // earlier while the truth had become "the agents reported the work as partial", and its
+    // log had no trace that a second run had happened at all. A stale reason is worse than no
+    // reason, because it is read as current.
+    if (from === to) {
+      if (to !== RESERVED_BLOCKED || !options.reason || options.reason === item.blockedReason) {
+        return item;
+      }
+      return this.reblock(projectId, ref, options.reason);
+    }
 
     // Resolved per call, never cached across calls: the flow can be edited underneath us.
     const project = (await this.projects.getRef(projectId)).data;
@@ -345,6 +356,32 @@ export class BacklogService {
   }
 
   /** Restore whatever the item was doing before it was blocked. */
+  /**
+   * Record a new reason on an item that is already blocked.
+   *
+   * Deliberately not a transition: nothing moves, so no arrow is consulted and no requirement
+   * is proved. `statusBefore` is left exactly as it was — it remembers where this item was
+   * working before it first stopped, and overwriting it with `blocked` would make `unblock`
+   * put the item back into `blocked`.
+   */
+  private async reblock(
+    projectId: string,
+    ref: DocRef<BacklogItem>,
+    reason: string,
+  ): Promise<BacklogItem> {
+    const now = this.clock.iso();
+    const next = BacklogItemSchema.parse({
+      ...ref.data,
+      blockedReason: reason,
+      updatedAt: now,
+      body: appendLog(ref.data.body, `still blocked — ${reason}`, now.slice(0, 10)),
+    });
+
+    await this.docs.write(layout.backlogItem(projectId, ref.data.id), next, { ifMatch: ref.rev });
+    this.events.emit({ type: 'item.changed', projectId, itemId: ref.data.id });
+    return next;
+  }
+
   async unblock(projectId: string, itemId: string): Promise<BacklogItem> {
     const { data } = await this.getRef(projectId, itemId);
     if (data.status !== RESERVED_BLOCKED) {

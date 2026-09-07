@@ -205,9 +205,33 @@ export class WorktreeService {
     for (const repo of repos) {
       const row = await this.store.forRun(runId, repo.id);
 
-      // Never had one — a repo added since, or one that fell back last time. Cutting a fresh
-      // worktree is right here: there is no earlier work in it to lose.
+      // No row. That used to mean "this repo never had a worktree", and cutting a fresh one
+      // was safe because there was no earlier work to lose. It stopped meaning that the moment
+      // a run began committing: a clean release deletes the row, so a run whose first pass
+      // committed and was tidied up looks exactly like a run that never had a tree at all.
+      //
+      // The branch is the durable record now, not the row. Ask git before concluding there is
+      // nothing to come back to — otherwise the resume silently restarts from the base and the
+      // first pass's commits are stranded on a branch nobody will look at again.
       if (!row) {
+        const earlier = options.branch;
+        if (earlier && (await this.git.branchExists(repo.workingDir, earlier).catch(() => false))) {
+          try {
+            await this.docs.ensureDir(layout.worktreeRepo(projectId, repo.id));
+            await this.git.pruneWorktrees(repo.workingDir);
+            const path = this.docs.absolute(layout.worktree(projectId, repo.id, runId));
+            await this.git.attachWorktree(repo.workingDir, { path, branch: earlier });
+            await this.record(projectId, repo, runId, path, earlier, options.pid);
+            dirs[repo.id] = path;
+            reclaimed.push(repo.id);
+            continue;
+          } catch (error) {
+            this.logger.warn(
+              `'${repo.name}': ${earlier} exists but could not be checked out again (${firstLine(error)})`,
+            );
+          }
+        }
+
         const cut = await this.take(projectId, runId, [repo], options);
         dirs[repo.id] = cut.dirs[repo.id] ?? repo.workingDir;
         fallbacks.push(...cut.fallbacks);
@@ -268,6 +292,36 @@ export class WorktreeService {
       released.push(await this.releaseOne(worktree));
     }
     return released;
+  }
+
+  /** Write down a worktree this service just put back, so the next reclaim finds its row. */
+  private async record(
+    projectId: string,
+    repo: ResolvedRepo,
+    runId: string,
+    path: string,
+    branch: string,
+    pid: number | undefined,
+  ): Promise<void> {
+    const info = await this.git.info(path).catch(() => null);
+    const worktree: Worktree = {
+      id: ulid(this.clock.now().getTime()),
+      projectId,
+      repoId: repo.id,
+      runId,
+      path,
+      branch,
+      baseBranch: info?.defaultBranch ?? null,
+      baseCommit: info?.head ?? null,
+      ownerPid: pid ?? null,
+      status: 'active',
+      keptReason: null,
+      createdAt: this.clock.iso(),
+      endedAt: null,
+    };
+
+    await this.store.insert(worktree);
+    this.events.emit({ type: 'worktree.taken', projectId, repoId: repo.id, runId, path });
   }
 
   async list(filter: WorktreeFilter): Promise<Worktree[]> {

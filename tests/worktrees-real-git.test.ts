@@ -278,6 +278,34 @@ describe.skipIf(!HAS_GIT)('putting a resumed run back where it was', () => {
     expect(existsSync(join(path, 'committed.ts'))).toBe(true);
   });
 
+  it('goes back to the branch when the row is gone, not to the base', async () => {
+    const repo = await seed();
+    const repos = await harness.repos.listResolved('acme');
+    const runId = '01M1RESUMENOROW000000000DD';
+    const branch = 'fix/ACME-9/main';
+
+    const taken = await harness.worktrees.take('acme', runId, repos, { branch });
+    const path = taken.dirs[repo.id] as string;
+    await writeFile(join(path, 'first-pass.ts'), 'export const kept = true;\n');
+    await git(path, 'add', '-A');
+    await git(path, 'commit', '-m', 'the first pass');
+
+    // A clean release: the work is committed, so git lets the directory go and the row is
+    // deleted with it. This is what a failed-then-committed run leaves behind now, and it
+    // used to be indistinguishable from a repo that never had a worktree at all.
+    await harness.worktrees.release(runId);
+    expect(await harness.worktrees.list({ runId })).toEqual([]);
+
+    const back = await harness.worktrees.reclaim('acme', runId, repos, { branch });
+
+    expect(back.reclaimed).toEqual([repo.id]);
+    expect(back.fallbacks).toEqual([]);
+    // The first pass's commit is here. Cut from the base it would not be, and the resume would
+    // have replayed its answers against files that were not there.
+    expect(existsSync(join(back.dirs[repo.id] as string, 'first-pass.ts'))).toBe(true);
+    expect((await harness.worktrees.list({ runId }))[0]?.branch).toBe(branch);
+  });
+
   it('says which repo lost its tree instead of quietly using the shared one', async () => {
     const repo = await seed();
     const repos = await harness.repos.listResolved('acme');

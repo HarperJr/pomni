@@ -422,3 +422,43 @@ describe('http api', () => {
     await app.close();
   });
 });
+
+describe('blocking an item that is already blocked', () => {
+  it('records the new reason and says so in the log, instead of keeping the old one', async () => {
+    const item = await harness.backlog.create('acme', { title: 'x' });
+    await harness.backlog.block('acme', item.id, 'you have hit your session limit');
+
+    const again = await harness.backlog.transition('acme', item.id, 'blocked', {
+      reason: 'the agents reported the work as partial',
+    });
+
+    // A stale reason is worse than no reason, because it is read as current. POMN-54 showed
+    // a session limit from hours earlier while the truth had become something else entirely.
+    expect(again.blockedReason).toBe('the agents reported the work as partial');
+    expect(again.body).toContain('still blocked — the agents reported the work as partial');
+    // And the first reason is still in the log — this adds a line, it does not rewrite one.
+    expect(again.body).toContain('you have hit your session limit');
+  });
+
+  it('leaves statusBefore alone, so unblock still knows where the item was working', async () => {
+    const item = await harness.backlog.create('acme', { title: 'x' });
+    await harness.backlog.transition('acme', item.id, 'specced', { force: true });
+    await harness.backlog.block('acme', item.id, 'first');
+    await harness.backlog.transition('acme', item.id, 'blocked', { reason: 'second' });
+
+    // Overwriting statusBefore with 'blocked' would make unblock put the item back into
+    // blocked, which is the one place it must never land.
+    expect((await harness.backlog.unblock('acme', item.id)).status).toBe('specced');
+  });
+
+  it('is still a no-op when nothing about the block has changed', async () => {
+    const item = await harness.backlog.create('acme', { title: 'x' });
+    const blocked = await harness.backlog.block('acme', item.id, 'the same reason');
+
+    const again = await harness.backlog.transition('acme', item.id, 'blocked', {
+      reason: 'the same reason',
+    });
+    expect(again.body).toBe(blocked.body);
+    expect(again.updatedAt).toBe(blocked.updatedAt);
+  });
+});
