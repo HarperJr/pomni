@@ -1,3 +1,4 @@
+import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
@@ -442,5 +443,36 @@ describe('http api', () => {
     expect(stale.json().current).toBeTruthy();
 
     await app.close();
+  });
+});
+
+describe('a counter that has been rewound underneath', () => {
+  it('never reissues an id that is already on disk, and says what it found', async () => {
+    const first = await harness.backlog.create('acme', { title: 'one' });
+    const second = await harness.backlog.create('acme', { title: 'two' });
+    expect([first.id, second.id]).toEqual(['ACME-1', 'ACME-2']);
+
+    // What a `git checkout` of an older branch does: `.pomni/` is tracked in the repository
+    // Pomni manages, so the counter goes backwards, silently and consistently with the files
+    // beside it. Written here directly because that is precisely what git does — no service
+    // is involved and no event is emitted.
+    const yaml = join(harness.dir, '.pomni', ...layout.project('acme').split('/'));
+    await writeFile(yaml, (await readFile(yaml, 'utf8')).replace(/nextItem: \d+/, 'nextItem: 1'));
+
+    const third = await harness.backlog.create('acme', { title: 'three' });
+
+    // Not ACME-1. An id is issued once; reusing a live one is how two specs end up fighting
+    // over one filename.
+    expect(third.id).toBe('ACME-3');
+    expect((await harness.backlog.get('acme', 'ACME-1')).title).toBe('one');
+    expect((await harness.projects.getRef('acme')).data.counters.nextItem).toBe(4);
+  });
+
+  it('leaves the counter alone when it is ahead of the files, which is normal', async () => {
+    await harness.backlog.create('acme', { title: 'one' });
+    // A deleted item does not renumber the ones after it: the gap is the point.
+    await harness.backlog.remove('acme', 'ACME-1');
+
+    expect((await harness.backlog.create('acme', { title: 'two' })).id).toBe('ACME-2');
   });
 });

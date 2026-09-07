@@ -775,6 +775,7 @@ export async function createHarness<G extends GitPort = FakeGit>(
     clock,
     events,
     worktrees,
+    logger,
   );
   const llm = new FakeLlm();
   const llmFactory = new FakeLlmFactory(llm);
