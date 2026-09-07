@@ -81,8 +81,11 @@ export function spawnArgs(args: string[], platform: NodeJS.Platform = process.pl
   return platform === 'win32' ? args.map(quoteForShell) : args;
 }
 
+/** The web, for an agent allowed to reach past its training data and its working directory. */
+const WEB_TOOLS = ['WebSearch', 'WebFetch'];
+
 /** Tools a pure-text task has no use for, and which only invite the session to wander. */
-const TEXT_ONLY_DISALLOWED = [
+const TEXT_ONLY_DISALLOWED_BASE = [
   'Bash',
   'Read',
   'Write',
@@ -93,6 +96,19 @@ const TEXT_ONLY_DISALLOWED = [
   'WebSearch',
   'Task',
 ];
+
+/**
+ * What a text-only session (no working directory) is refused, given what it was granted.
+ *
+ * `web` is the one grant that makes sense without a working directory, so it is the one
+ * exception: with it on, `WebFetch` and `WebSearch` come off the disallowed list instead of
+ * staying forbidden alongside file and shell access.
+ */
+export function textOnlyDisallowed(options: { web?: boolean }): string[] {
+  return options.web
+    ? TEXT_ONLY_DISALLOWED_BASE.filter((tool) => tool !== 'WebFetch' && tool !== 'WebSearch')
+    : TEXT_ONLY_DISALLOWED_BASE;
+}
 
 /**
  * Everything the session may do without being asked, in one list.
@@ -106,6 +122,7 @@ export function sessionPermissions(options: {
   files?: boolean;
   run?: boolean;
   verify?: string[];
+  web?: boolean;
   tools?: ToolGrant[];
 }): string[] {
   return [
@@ -114,6 +131,7 @@ export function sessionPermissions(options: {
     ...(options.run ? SHELLS : []),
     // Named commands, not a shell. Redundant when `run` is on, and harmless there.
     ...(options.run ? [] : verifyGrants(options.verify ?? [])),
+    ...(options.web ? WEB_TOOLS : []),
     ...toolGrants(options.tools ?? []),
   ];
 }
@@ -139,6 +157,8 @@ export interface ClaudeCodeOptions {
   run?: boolean;
   /** Exact commands it may run without a shell: the repos' own declared checks. */
   verify?: string[];
+  /** Whether it may search and fetch the web, independent of having a working directory. */
+  web?: boolean;
   timeoutMs?: number;
 }
 
@@ -237,7 +257,7 @@ export class ClaudeCodeLlm implements LlmPort {
 
     // No working directory means there is nothing to read or change, so keep the session
     // purely generative rather than letting it explore the sandbox.
-    if (!this.options.cwd) args.push('--disallowedTools', ...TEXT_ONLY_DISALLOWED);
+    if (!this.options.cwd) args.push('--disallowedTools', ...textOnlyDisallowed(this.options));
 
     try {
       const raw = await this.run(args, request.signal, undefined, prompt);

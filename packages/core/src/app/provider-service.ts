@@ -40,6 +40,7 @@ export interface LlmFactory {
       tools?: ToolGrant[];
       files?: boolean;
       run?: boolean;
+      web?: boolean;
       verify?: string[];
     },
   ): LlmPort;
@@ -143,6 +144,7 @@ export class ProviderService {
       tools?: ToolGrant[];
       files?: boolean;
       run?: boolean;
+      web?: boolean;
       verify?: string[];
     } = {},
   ): Promise<{ provider: Provider; port: LlmPort; model: string; tools: boolean }> {
@@ -159,6 +161,7 @@ export class ProviderService {
       tools: {
         files: options.files ?? false,
         run: options.run ?? false,
+        web: options.web ?? false,
         verify: (options.verify?.length ?? 0) > 0,
         mcp: options.tools?.map((grant) => grant.tool.id) ?? [],
         cli: [],
@@ -178,6 +181,7 @@ export class ProviderService {
         tools: options.tools,
         files: options.files,
         run: options.run,
+        web: options.web,
         verify: options.verify,
       }),
       model: resolveModel(provider, struggle),

@@ -102,8 +102,8 @@ export const AgentSchema = z
     /** What this agent is expected to produce. Shown to the orchestrator when delegating. */
     outputs: z.string().default(''),
     /**
-     * What this agent may use. `files` and `run` are the built-in abilities; `mcp` and `cli`
-     * name tools from the registry, which must also be attached to the project.
+     * What this agent may use. `files`, `run`, `verify` and `web` are the built-in abilities;
+     * `mcp` and `cli` name tools from the registry, which must also be attached to the project.
      */
     tools: z
       .object({
@@ -115,6 +115,13 @@ export const AgentSchema = z
          * none of them needs a shell that can also delete, push or install.
          */
         verify: z.boolean().default(false),
+        /**
+         * May search the web and fetch a page. Orthogonal to `files` and `run`: an agent
+         * with no working directory can still hold this one, and holding it grants nothing
+         * on disk. A risk analyst weighing a dependency needs to read the internet and
+         * needs nothing else.
+         */
+        web: z.boolean().default(false),
         mcp: z.array(z.string()).default([]),
         cli: z.array(z.string()).default([]),
       })
@@ -150,7 +157,14 @@ export interface Agent {
   provider: string | null;
   delegatesTo: string[];
   outputs: string;
-  tools: { files: boolean; run: boolean; verify: boolean; mcp: string[]; cli: string[] };
+  tools: {
+    files: boolean;
+    run: boolean;
+    verify: boolean;
+    web: boolean;
+    mcp: string[];
+    cli: string[];
+  };
   createdAt: string;
   updatedAt: string;
 }
@@ -162,8 +176,8 @@ export function isOrchestrator(agent: Agent): boolean {
 /**
  * Whether this agent needs a provider that brings its own tool loop.
  *
- * True for any grant at all, not only the named registry tools: `files`, `run` and `verify`
- * are abilities a plain chat endpoint cannot perform either. Pair it with `hasBuiltInTools`
+ * True for any grant at all, not only the named registry tools: `files`, `run`, `verify` and
+ * `web` are abilities a plain chat endpoint cannot perform either. Pair it with `hasBuiltInTools`
  * from `provider.ts` and refuse the run before the first model call — an agent told it can
  * edit files, on a backend that cannot, spends a session discovering that and reports the
  * discovery as its work.
@@ -171,8 +185,8 @@ export function isOrchestrator(agent: Agent): boolean {
  * The rule lives here so the run check, the CLI and the editor all ask the same question.
  */
 export function needsBuiltInTools(agent: Pick<Agent, 'tools'>): boolean {
-  const { files, run, verify, mcp, cli } = agent.tools;
-  return files || run || verify || mcp.length > 0 || cli.length > 0;
+  const { files, run, verify, web, mcp, cli } = agent.tools;
+  return files || run || verify || web || mcp.length > 0 || cli.length > 0;
 }
 
 /** The prompt is stale when the spec changed after the prompt was generated. */

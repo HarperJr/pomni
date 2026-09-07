@@ -626,7 +626,7 @@ export interface Agent {
   provider: string | null;
   delegatesTo: string[];
   outputs: string;
-  tools: { files: boolean; run: boolean; mcp: string[]; cli: string[] };
+  tools: { files: boolean; run: boolean; web: boolean; mcp: string[]; cli: string[] };
   createdAt: string;
   updatedAt: string;
 }
@@ -1071,7 +1071,7 @@ export const api = {
       struggle?: Struggle;
       provider?: string | null;
       delegatesTo?: string[];
-      tools?: { files?: boolean; run?: boolean; mcp?: string[]; cli?: string[] };
+      tools?: { files?: boolean; run?: boolean; web?: boolean; mcp?: string[]; cli?: string[] };
     },
   ) =>
     request<{ agent: Agent }>(

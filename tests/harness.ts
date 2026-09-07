@@ -586,6 +586,9 @@ export interface SessionOptions {
   dirs?: string[];
   tools?: ToolGrant[];
   files?: boolean;
+  run?: boolean;
+  web?: boolean;
+  verify?: string[];
 }
 
 /**

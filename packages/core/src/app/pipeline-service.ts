@@ -1394,6 +1394,9 @@ export class PipelineService {
       tools: grants,
       files: agent.tools.files,
       run: agent.tools.run,
+      // Deliberately not part of the `cwd`/`dirs` gate above: an agent that may search but
+      // may not touch files stays text-only and still gets its search tools.
+      web: agent.tools.web,
       verify: agent.tools.verify || agent.tools.run ? checks : [],
     });
 
@@ -1403,12 +1406,14 @@ export class PipelineService {
     const can = [
       agent.tools.files ? 'read and change files' : null,
       agent.tools.run ? 'run commands with Bash' : null,
+      agent.tools.web ? 'search the web and fetch a page' : null,
       !agent.tools.run && agent.tools.verify && checks.length > 0
         ? `run exactly these checks, and nothing else: ${checks.join(', ')}`
         : null,
     ].filter(Boolean);
     const cannot = [
       agent.tools.files ? null : 'change files',
+      agent.tools.web ? null : 'search the web or fetch a page',
       agent.tools.run || agent.tools.verify ? null : 'run commands — no build, no tests, no shell',
       !agent.tools.run && agent.tools.verify ? 'run any other command' : null,
     ].filter(Boolean);

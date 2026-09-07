@@ -550,6 +550,7 @@ function AgentEditor({
   const [granted, setGranted] = useState<string[]>([...agent.tools.mcp, ...agent.tools.cli]);
   const [files, setFiles] = useState(agent.tools.files);
   const [run, setRun] = useState(agent.tools.run);
+  const [web, setWeb] = useState(agent.tools.web);
   const [error, setError] = useState<string | null>(null);
   const promptRef = useRef<HTMLTextAreaElement | null>(null);
   const queryClient = useQueryClient();
@@ -564,7 +565,7 @@ function AgentEditor({
     queryFn: () => api.listProviders(),
   });
 
-  const needsClaudeCode = files || run || granted.length > 0;
+  const needsClaudeCode = files || run || web || granted.length > 0;
   const runDefaultId = providers.data?.default ?? null;
   const runDefault = (providers.data?.providers ?? []).find((item) => item.id === runDefaultId);
   const selectedProvider = provider
@@ -590,6 +591,7 @@ function AgentEditor({
           run: run || (registry.data ?? []).some(
             (tool) => granted.includes(tool.id) && tool.kind === 'cli',
           ),
+          web,
           mcp: (registry.data ?? [])
             .filter((tool) => granted.includes(tool.id) && tool.kind === 'mcp')
             .map((tool) => tool.id),
@@ -723,7 +725,7 @@ function AgentEditor({
             })()
           : 'Pick a provider to see which model each level resolves to.'}
         {needsClaudeCode &&
-          ' This agent reads/writes files or runs commands, so it can only run on a claude-code provider.'}
+          ' This agent reads/writes files, runs commands, or searches the web, so it can only run on a claude-code provider.'}
       </div>
 
       <label>
@@ -746,6 +748,9 @@ function AgentEditor({
           </button>
           <button className={`tag toggle${run ? ' on' : ''}`} onClick={() => setRun(!run)}>
             {run ? '✓ ' : '+ '}run commands
+          </button>
+          <button className={`tag toggle${web ? ' on' : ''}`} onClick={() => setWeb(!web)}>
+            {web ? '✓ ' : '+ '}search the web
           </button>
           {(registry.data ?? []).map((tool) => {
             const on = granted.includes(tool.id);

@@ -1,8 +1,14 @@
 import { spawnSync } from 'node:child_process';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mcpConfig, toolBriefing, toolGrants } from '@pomni/core';
-import { quoteForShell, readStream, sessionPermissions, spawnArgs } from '@pomni/infra';
-import { verifyGrants } from '@pomni/core';
+import {
+  quoteForShell,
+  readStream,
+  sessionPermissions,
+  spawnArgs,
+  textOnlyDisallowed,
+} from '@pomni/infra';
+import { verifyGrants, AgentSchema } from '@pomni/core';
 import { createHarness, type TestHarness } from './harness.js';
 
 let harness: TestHarness;
@@ -179,6 +185,35 @@ describe('a run with tools', () => {
   });
 });
 
+describe('a run with an agent that may only search', () => {
+  // Deliberately not part of the `cwd`/`dirs` gate: `web` is orthogonal to `files` and `run`,
+  // so an agent that may search but may not touch files or a shell stays text-only.
+  it('grants the web and no working directory, and tells the agent it can search', async () => {
+    await harness.workflows.create({ name: 'Research' });
+    await harness.workflows.addAgent('research', {
+      name: 'Scout',
+      role: 'orchestrator',
+      spec: 'Scouts.',
+      prompt: 'You scout.',
+      tools: { web: true, files: false, run: false },
+    });
+    await harness.workflows.addAgent('research', {
+      name: 'Reviewer',
+      spec: 'Reviews.',
+      prompt: 'You review.',
+    });
+    await harness.workflows.attach('acme', 'research');
+    harness.llm.replies = ['Found it.'];
+
+    await (await harness.pipelines.start({ projectId: 'acme', task: 'Check the library' }))
+      .completion;
+
+    expect(harness.llmFactory.lastOptions.web).toBe(true);
+    expect(harness.llmFactory.lastOptions.cwd).toBeUndefined();
+    expect(harness.llm.calls[0]?.system).toContain('search the web and fetch a page');
+  });
+});
+
 describe('what a session is permitted', () => {
   // Headless Claude Code denies anything that would prompt, and Write prompts. An agent
   // allowed to change files but not given the name ends up read-only: it plans the change,
@@ -203,6 +238,71 @@ describe('what a session is permitted', () => {
     expect(permissions[0]).toBe('Bash(git *)');
     expect(permissions).toContain('Write');
     expect(permissions).toContain('Bash(figma-cli:*)');
+  });
+
+  // A risk analyst weighing a dependency, or a scout checking whether an API still works the
+  // way the code assumes, needs the web named — the same way `files` needs Write named.
+  it('approves the web only for an agent allowed to reach it', () => {
+    expect(sessionPermissions({ web: true })).toEqual(['WebSearch', 'WebFetch']);
+    expect(sessionPermissions({ web: false })).toEqual([]);
+    expect(sessionPermissions({})).toEqual([]);
+  });
+
+  it('composes the web grant with files and run rather than replacing them', () => {
+    const permissions = sessionPermissions({
+      allowedTools: ['Bash(git *)'],
+      files: true,
+      run: true,
+      web: true,
+    });
+
+    expect(permissions[0]).toBe('Bash(git *)');
+    expect(permissions).toContain('Write');
+    expect(permissions).toContain('Bash');
+    expect(permissions).toContain('WebSearch');
+    expect(permissions).toContain('WebFetch');
+  });
+
+  it('keeps every other restriction on a text-only session, web or not', () => {
+    const withoutWeb = textOnlyDisallowed({});
+    expect(withoutWeb).toEqual(
+      expect.arrayContaining([
+        'Bash',
+        'Read',
+        'Write',
+        'Edit',
+        'Glob',
+        'Grep',
+        'Task',
+        'WebFetch',
+        'WebSearch',
+      ]),
+    );
+
+    const withWeb = textOnlyDisallowed({ web: true });
+    expect(withWeb).not.toContain('WebFetch');
+    expect(withWeb).not.toContain('WebSearch');
+    // Granting the web takes nothing else off the disallowed list: a text-only agent with
+    // `web` may search, and still may not read files or run commands.
+    expect(withWeb).toEqual(
+      expect.arrayContaining(['Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep', 'Task']),
+    );
+    expect(withWeb).toHaveLength(withoutWeb.length - 2);
+  });
+
+  it('defaults a pre-existing agent, parsed with no web key, to no web access', () => {
+    const now = new Date().toISOString();
+    const agent = AgentSchema.parse({
+      id: 'a1',
+      name: 'Scout',
+      spec: 'Scouts.',
+      prompt: 'You scout.',
+      tools: { files: true },
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    expect(agent.tools.web).toBe(false);
   });
 });
 
