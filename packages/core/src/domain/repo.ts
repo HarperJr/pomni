@@ -77,7 +77,17 @@ export const RepoSchema = z.object({
   worktrees: WorktreePolicySchema.default('auto'),
   vcs: VcsInfoSchema.nullable().default(null),
   lastError: z.string().nullable().default(null),
-  /** When the working copy was last fetched and re-detected. Null until the first sync. */
+  /**
+   * When a sync last found something worth recording — a moved `head`, a new `status`, a
+   * different `stack.detected` or `capabilities`. Null until the first sync.
+   *
+   * Not "when the repo was last synced": a sync that observes nothing substantive writes
+   * nothing at all, so a repo on a quiet branch synced every day keeps the `lastSyncedAt`
+   * of the last sync that found a change. Read it as freshness of the record, never as
+   * proof that nobody has looked since. The reason the write is skipped is that Pomni's own
+   * repo record is a tracked file in the repo Pomni manages, and rewriting it on every
+   * inspection dirties the tree and gets the next `git checkout` refused.
+   */
   lastSyncedAt: z.string().nullable().default(null),
   addedAt: z.string(),
   updatedAt: z.string(),
