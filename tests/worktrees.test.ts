@@ -290,6 +290,57 @@ describe('a worktree with uncommitted work in it', () => {
     expect(artifacts.some((artifact) => artifact.name === branch)).toBe(true);
   });
 
+  it('brings the base into the worktree before grading it', async () => {
+    await attachRepo('web', { track: true, worktrees: 'always' });
+
+    harness.llm.replies = [askHuman('hold'), 'Done.'];
+    const { run, completion } = await harness.pipelines.start({
+      projectId: 'acme',
+      task: 'Write something',
+    });
+    const [questionId] = await waitForQuestions(1);
+
+    const [held] = await harness.worktrees.list({ runId: run.id });
+    await writeFile(join(held?.path as string, 'delivered.ts'), 'export const whole = true;\n');
+
+    await harness.pipelines.answer(questionId as string, 'Carry on.');
+    await completion;
+
+    // The gate has always asked "does this branch pass?". The question a merge asks is
+    // "does it pass merged onto its target", and nothing used to ask it.
+    expect(harness.git.merges).toEqual([{ dir: held?.path, ref: held?.baseBranch }]);
+  });
+
+  it('refuses review for work that will not merge, however green it is alone', async () => {
+    await attachRepo('web', { track: true, worktrees: 'always' });
+    const item = await harness.backlog.create('acme', { title: 'Rewrite the checkout' });
+
+    harness.git.mergeResult = {
+      status: 'conflict',
+      conflicts: ['packages/core/src/app/pipeline-service.ts'],
+      detail: 'conflicts with main in 1 file (packages/core/src/app/pipeline-service.ts)',
+    };
+
+    harness.llm.replies = [askHuman('hold'), 'Done.'];
+    const { run, completion } = await harness.pipelines.start({
+      projectId: 'acme',
+      task: 'Rewrite the checkout',
+      itemId: item.id,
+    });
+    const [questionId] = await waitForQuestions(1);
+
+    const [held] = await harness.worktrees.list({ runId: run.id });
+    await writeFile(join(held?.path as string, 'delivered.ts'), 'export const whole = true;\n');
+
+    await harness.pipelines.answer(questionId as string, 'Carry on.');
+    const finished = await completion;
+
+    // A reviewer sent to a branch that cannot land is being sent to read the wrong thing.
+    expect((await harness.backlog.get('acme', item.id)).status).not.toBe('in_review');
+    expect(finished.unmet.join('\n')).toContain('pipeline-service.ts');
+    expect(finished.unmet.join('\n')).toContain('needs a person before it can land');
+  });
+
   it('opens the merge request with the item as its description', async () => {
     await attachRepo('web', { track: true, worktrees: 'always' });
     await harness.projects.update('acme', {

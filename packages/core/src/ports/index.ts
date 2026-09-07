@@ -125,6 +125,21 @@ export interface FastForwardResult {
   detail: string;
 }
 
+/**
+ * What merging the base into a run's branch found.
+ *
+ * `already` means the branch was up to date and nothing moved — the common case, and the one
+ * where the gate that follows is answering the same question either way. `conflict` is a fact
+ * about the two branches, never an error: it says the work needs a person before it can land,
+ * which is exactly what a reviewer needs to be told before they read it.
+ */
+export interface MergeResult {
+  status: 'merged' | 'already' | 'conflict' | 'unavailable';
+  /** Files git could not reconcile. Empty unless `status` is `conflict`. */
+  conflicts: string[];
+  detail: string;
+}
+
 export interface CommitResult {
   /** False when the tree was clean — an empty commit is never made. */
   committed: boolean;
@@ -146,6 +161,14 @@ export interface GitPort {
   changes(dir: string): Promise<Array<{ path: string; change: string }>>;
   /** True when `refs/heads/<branch>` exists in this repository. */
   branchExists(dir: string, branch: string): Promise<boolean>;
+  /**
+   * Merge `ref` into whatever `dir` has checked out, so the gate can be run on the result.
+   *
+   * Never leaves a half-merged tree: a conflict is aborted before returning, because the
+   * caller's next move is to run a build here and a tree full of conflict markers would fail
+   * it for the wrong reason. Never throws — every outcome is a `MergeResult` to report.
+   */
+  mergeInto(dir: string, ref: string): Promise<MergeResult>;
   /**
    * Stage everything and commit it. Returns `committed: false` on a clean tree rather than
    * making an empty commit — an empty commit is a claim that a run did work when it did not.

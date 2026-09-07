@@ -31,6 +31,7 @@ import {
   type GitAuth,
   type GitPort,
   type MergeRequestRef,
+  type MergeResult,
   type OpenMergeRequestInput,
   type LlmFactory,
   type LlmPort,
@@ -386,6 +387,24 @@ export class FakeGit implements GitPort {
   failNextPush: string | null = null;
   /** What `fastForward` answers. Left null, it reports the branch as already current. */
   fastForwardResult: FastForwardResult | null = null;
+
+  /**
+   * What merging the base into a worktree finds. `already` by default, which is true of every
+   * test whose base does not move; a test that wants the interesting case scripts it.
+   */
+  mergeResult: MergeResult | null = null;
+  merges: Array<{ dir: string; ref: string }> = [];
+
+  async mergeInto(dir: string, ref: string): Promise<MergeResult> {
+    this.merges.push({ dir, ref });
+    return (
+      this.mergeResult ?? {
+        status: 'already',
+        conflicts: [],
+        detail: `already up to date with ${ref}`,
+      }
+    );
+  }
 
   async branchExists(dir: string, branch: string): Promise<boolean> {
     if (this.declaredBranches.has(branch)) return true;
