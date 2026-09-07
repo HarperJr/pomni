@@ -42,19 +42,26 @@ function seedRun(index: number, overrides: Partial<PipelineRun> = {}): PipelineR
 
 describe('listing a project’s pipeline runs', () => {
   let harness: TestHarness;
+  let app: Awaited<ReturnType<typeof createApp>>;
 
   beforeEach(async () => {
     harness = await createHarness();
+    // One app per test, not one per request. Building it per call meant thirty fastify
+    // instances were created and none was ever closed, so each one outlived the harness that
+    // owned its stores — which is where `database is not open` came from, and a good part of
+    // where the time went.
+    app = await createApp(harness, { webRoot: join(harness.dir, 'no-web') });
   });
 
   afterEach(async () => {
+    // Closed before the harness, never after: the harness closes the databases this app is
+    // still holding, and an app shut down afterwards is an app shut down against a dead store.
+    await app.close();
     await harness.cleanup();
   });
 
-  const app = () => createApp(harness, { webRoot: join(harness.dir, 'no-web') });
-
   const listed = async (query: string): Promise<PipelineRun[]> => {
-    const response = await (await app()).inject({
+    const response = await app.inject({
       method: 'GET',
       url: `/api/projects/acme/pipelines${query}`,
     });

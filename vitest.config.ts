@@ -18,5 +18,21 @@ export default defineConfig({
     environment: 'node',
     testTimeout: 30_000,
     hookTimeout: 30_000,
+    /**
+     * A bounded pool, because these tests are not CPU-bound.
+     *
+     * Vitest defaults to one worker per core, and this machine has 24. Almost every suite here
+     * drives real work — `mkdtemp`, four SQLite databases per harness, directory copies, and in
+     * places a real `git` — so 24 workers is 24 processes contending for one disk, not 24
+     * processes computing. It stayed under the limit until three branches merged, each having
+     * added slow integration suites that were green on their own; together they pushed the set
+     * over, and 44 tests died on the 30-second timeout without a single failed assertion.
+     *
+     * Serially the same suite is green in 873s. The timeouts are deliberately left where they
+     * are: raising them would let oversubscription grow back silently, which is how this was
+     * missed the first time. The pool size is the thing that was wrong.
+     */
+    maxWorkers: 4,
+    minWorkers: 1,
   },
 });
