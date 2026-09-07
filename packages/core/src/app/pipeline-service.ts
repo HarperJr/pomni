@@ -40,6 +40,7 @@ import {
   type WorktreeProbe,
 } from '../domain/worktree.js';
 import type { Artifact } from '../domain/pipeline.js';
+import type { ProjectPolicy } from '../domain/project.js';
 import type { Provider } from '../domain/provider.js';
 import type { ResolvedRepo } from '../domain/repo.js';
 import type {
@@ -135,6 +136,28 @@ const MAX_PER_AGENT = 2;
 interface Seed {
   answered: Map<string, string>;
   useCount: Map<string, number>;
+}
+
+/**
+ * What a run has spent so far, against what its project allows.
+ *
+ * One object for the whole run, passed down the delegation tree rather than kept per agent:
+ * `policy.maxTurns` is a limit on the run, which is precisely what makes it a different thing
+ * from `Provider.maxTurns` — that one bounds a single agent's session and is enforced by the
+ * provider. A tree of agents each staying under its own ceiling is how $5.87 was spent against
+ * a $5 project budget with nothing to point at.
+ *
+ * A resume starts a fresh one at zero. The steps it reuses were paid for by the earlier
+ * attempt and are answered from disk without opening a session, so charging them again would
+ * stop a resumed run for money it is not spending — and the stop messages tell a person to
+ * raise the ceiling and resume, which that would make impossible.
+ */
+interface RunBudget {
+  cost: number;
+  /** Agent steps started, all agents together. */
+  steps: number;
+  /** The sentence explaining the stop, once one has happened. Null while the run may go on. */
+  stopped: string | null;
 }
 /** How many agents one round may run at once. */
 const MAX_PARALLEL = 4;
@@ -803,7 +826,7 @@ export class PipelineService {
   ): Promise<PipelineRun> {
     const { cwd } = workspace;
     const started = Date.now();
-    let cost = 0;
+    const budget: RunBudget = { cost: 0, steps: 0, stopped: null };
     /** Assigned by whichever arm ends the run; the finally releases against it. */
     let settled: PipelineRun | undefined;
 
@@ -821,8 +844,9 @@ export class PipelineService {
         cwd,
         workspace,
         seed,
+        budget,
         addCost: (amount) => {
-          cost += amount;
+          budget.cost += amount;
         },
       });
 
@@ -830,28 +854,39 @@ export class PipelineService {
       // no more than "the model returned prose", which is how a run ended green while its
       // own transcript explained the work had not been done.
       const verdict = result.verdict;
+      // A run that ran out of budget did not finish the work, whatever its last agent said
+      // about the part it did reach. The stop outranks the verdict for that reason.
+      const stopped = budget.stopped;
 
       let finished: PipelineRun = {
         ...run,
         status: this.cancelled.has(run.id)
           ? 'cancelled'
-          : verdict.outcome === 'blocked'
+          : stopped || verdict.outcome === 'blocked'
             ? 'failed'
             : 'passed',
-        error: verdict.outcome === 'blocked' ? verdict.unmet.join('; ') || 'blocked' : null,
+        error: stopped ?? (verdict.outcome === 'blocked' ? verdict.unmet.join('; ') || 'blocked' : null),
         pid: null,
-        outcome: verdict.outcome,
+        outcome: stopped ? 'blocked' : verdict.outcome,
         // The agents' unmet list, after whatever the run already could not give itself —
         // a repo it had to share is as much a shortfall as a job it did not finish.
-        unmet: [...run.unmet, ...verdict.unmet],
+        unmet: [...run.unmet, ...verdict.unmet, ...(stopped ? [stopped] : [])],
         result: result.answer,
         endedAt: this.clock.iso(),
         durationMs: Date.now() - started,
         ...(await this.tally(run.id)),
-        costUsd: cost || null,
+        // The figure actually reached, not the ceiling: what the money went on is the thing
+        // a person deciding whether to raise the limit needs to see.
+        costUsd: budget.cost || null,
       };
 
       await this.captureArtifacts(finished, cwd);
+
+      // The gate below only runs for a passed run, so a budget stop would otherwise leave its
+      // item sitting in `in_progress` with nothing working on it.
+      if (stopped && finished.itemId) {
+        finished = { ...finished, itemStatus: await this.moveItem(finished, 'blocked', stopped) };
+      }
 
       // The gate is what turns "the agents finished" into "the change works". Without it a
       // pipeline can only report its own opinion of itself.
@@ -891,7 +926,7 @@ export class PipelineService {
         endedAt: this.clock.iso(),
         durationMs: Date.now() - started,
         ...(await this.tally(run.id)),
-        costUsd: cost || null,
+        costUsd: budget.cost || null,
       };
 
       if (failed.itemId) {
@@ -932,6 +967,8 @@ export class PipelineService {
     seed?: Seed;
     /** What the agents delegated to earlier in this run already answered. */
     siblings?: AgentReport[];
+    /** The whole run's spend and step count. Shared, not per agent. */
+    budget: RunBudget;
     addCost: (amount: number) => void;
   }): Promise<{ answer: string; verdict: Verdict }> {
     const {
@@ -945,6 +982,7 @@ export class PipelineService {
       workspace,
       seed,
       siblings,
+      budget,
       addCost,
     } = context;
 
@@ -1021,6 +1059,19 @@ export class PipelineService {
       task,
     });
 
+    // Counted here, where a step actually begins, so every agent in the tree adds to the same
+    // total. Reported straight afterwards on the step's own output channel: a budget nobody
+    // can watch approaching is only ever discovered by being over it.
+    budget.steps += 1;
+    const spend = await this.budgetLine(run, budget);
+    this.events.emit({
+      type: 'pipeline.step.output',
+      runId: run.id,
+      stepId: step.id,
+      chunk: spend,
+    });
+    this.logger.info(spend);
+
     const startedAt = Date.now();
     const actions: PipelineStep['actions'] = [];
     const transcript: string[] = [`# Task\n\n${task}`];
@@ -1063,6 +1114,15 @@ export class PipelineService {
       ) {
         if (this.cancelled.has(run.id)) {
           answer = answer || 'The run was cancelled before this agent finished.';
+          break;
+        }
+
+        // Between rounds, never inside one: the turn about to be paid for is the one we can
+        // still decline. An orchestrator that keeps reviewing its own work is the shape that
+        // runs the bill up without ever opening another session, so the cost has to be
+        // re-checked here and not only where a delegation is decided.
+        if (await this.budgetStop(run, budget)) {
+          answer = stoppedAnswer(budget.stopped as string);
           break;
         }
 
@@ -1161,6 +1221,14 @@ export class PipelineService {
                 return `### ${delegation.agent}\n\nThere is no such agent in your roster. Delegate only to the ids listed above.`;
               }
 
+              // The same question the caps below answer — may this run open another session —
+              // asked of the project's money and turns first. A step already in flight is
+              // never touched: what is refused here has not started and has cost nothing.
+              const refusal = await this.budgetStop(run, budget, 1);
+              if (refusal) {
+                return `### ${target.name} (\`${target.id}\`) — no\n\n${refusal}`;
+              }
+
               const opened = [...useCount.values()].reduce((sum, n) => sum + n, 0);
               if (opened >= MAX_SESSIONS) {
                 return (
@@ -1207,6 +1275,7 @@ export class PipelineService {
                   // A batch runs in parallel, so this is what finished before the batch began
                   // — which is the only thing that can honestly be called already decided.
                   siblings: [...reported],
+                  budget,
                   addCost,
                 });
                 answered.set(key, output.answer);
@@ -1246,6 +1315,14 @@ export class PipelineService {
           );
 
           results.push(...settled);
+        }
+
+        // The batch is what a round costs, and it is only fully paid for now. Answering the
+        // orchestrator with these results would buy it another turn on money the project has
+        // said it does not have.
+        if (await this.budgetStop(run, budget)) {
+          answer = stoppedAnswer(budget.stopped as string);
+          break;
         }
 
         const ledger = [...useCount.entries()]
@@ -1347,6 +1424,73 @@ export class PipelineService {
 
       throw error;
     }
+  }
+
+  /**
+   * The project's budgets, as they are *right now*.
+   *
+   * Read again at every check rather than snapshotted when the run started, which is what
+   * makes `pomni project edit --max-cost` take effect on a run already going: a person who
+   * decides the work is worth another two dollars should not have to stop and resume it. The
+   * same call `deliver` makes for the delivery flags, and it fails soft for the same reason —
+   * a project that cannot be read is not a reason to kill work in flight.
+   */
+  private async policyNow(projectId: string): Promise<ProjectPolicy | null> {
+    const project = await this.projects.getRef(projectId).catch(() => null);
+    return project?.data.policy ?? null;
+  }
+
+  /**
+   * Whether this run may go on, and the sentence explaining it if not.
+   *
+   * `upcoming` is how many steps the caller is about to start — one where a delegation is
+   * being dispatched, none where the check is between rounds of a step already running. That
+   * distinction is the whole of "it stops between steps": a step admitted by this check runs
+   * to completion and its cost lands through `addCost` before anything stops.
+   *
+   * Both limits are guarded on being present. The schema defaults them today, but a policy
+   * with no ceiling has to mean no ceiling rather than zero, which would refuse every run.
+   */
+  private async budgetStop(
+    run: PipelineRun,
+    budget: RunBudget,
+    upcoming = 0,
+  ): Promise<string | null> {
+    if (budget.stopped) return budget.stopped;
+
+    const policy = await this.policyNow(run.projectId);
+    if (!policy) return null;
+
+    if (policy.maxCostUsd !== undefined && budget.cost >= policy.maxCostUsd) {
+      budget.stopped =
+        `this run has spent $${budget.cost.toFixed(2)} of the $${policy.maxCostUsd.toFixed(2)}` +
+        ' its project allows (policy.maxCostUsd), so it stopped before the next step. What it' +
+        " had already done is committed. Raise the ceiling with 'pomni project edit --max-cost" +
+        " <usd>' and resume the run, or leave it here.";
+      return budget.stopped;
+    }
+
+    const step = budget.steps + upcoming;
+    if (policy.maxTurns !== undefined && step > policy.maxTurns) {
+      budget.stopped =
+        `this run reached step ${step} of the ${policy.maxTurns} its project allows` +
+        ' (policy.maxTurns), so it stopped before running it. What it had already done is' +
+        " committed. Raise the ceiling with 'pomni project edit --max-turns <n>' and resume the" +
+        ' run, or leave it here.';
+      return budget.stopped;
+    }
+
+    return null;
+  }
+
+  /** What a step reports about the run's budget as it starts. */
+  private async budgetLine(run: PipelineRun, budget: RunBudget): Promise<string> {
+    const policy = await this.policyNow(run.projectId);
+    const ceiling =
+      policy?.maxCostUsd !== undefined ? `$${policy.maxCostUsd.toFixed(2)}` : 'no ceiling';
+    const turns = policy?.maxTurns !== undefined ? String(policy.maxTurns) : 'no ceiling';
+
+    return `Budget: $${budget.cost.toFixed(2)} of ${ceiling}, step ${budget.steps} of ${turns}.`;
   }
 
   /**
@@ -2484,6 +2628,17 @@ function mergeRequestUrl(remote: string | null, branch: string): string | null {
   return base.includes('github.com')
     ? `${base}/compare/${encoded}?expand=1`
     : `${base}/-/merge_requests/new?merge_request%5Bsource_branch%5D=${encoded}`;
+}
+
+/**
+ * What an agent stopped by the budget hands back to whoever is waiting on it.
+ *
+ * Carries a `blocked` verdict, so an orchestrator reading it up the tree sees an agent that
+ * did not deliver rather than an answer. `unmet` is left empty on purpose: the run puts the
+ * stop sentence on itself once, and repeating it here would have it recorded twice.
+ */
+function stoppedAnswer(message: string): string {
+  return [message, '', '```json', '{"outcome": "blocked", "unmet": []}', '```'].join('\n');
 }
 
 /** git's own first line is what a person needs; the rest of a git failure is noise. */
