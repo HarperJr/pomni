@@ -783,6 +783,14 @@ ${item.body}`;
       // printing a branch it does not have would send someone looking for it.
       const worktrees = await container.worktrees.list({});
       const branchOf = new Map(worktrees.map((worktree) => [worktree.runId, worktree.branch]));
+      // A run that genuinely shared a repo directory says so in `unmet`, in the words
+      // `WorktreeService` used when it fell back. That sentence is the evidence for `in repo`;
+      // a missing worktree row never was, and saying it on that basis was simply wrong.
+      const sharedRepo = new Set(
+        runs
+          .filter((run) => run.unmet.some((note) => note.includes('working in the repo directory')))
+          .map((run) => run.id),
+      );
 
       // A run in flight has no totals yet — they are summed when it ends — and that is
       // exactly when someone wants to know what it is costing. Few runs are live, so
@@ -806,7 +814,7 @@ ${item.body}`;
             run.status === 'passed' ? style.green(run.status) : style.red(run.status),
             run.workflowName,
             run.itemId ?? '',
-            branchOf.get(run.id) ?? style.dim('in repo'),
+            branchLabel(run, branchOf.get(run.id), sharedRepo.has(run.id)),
             spent(run, soFar.get(run.id)),
             truncate(run.task, 34),
           ]),
@@ -1047,4 +1055,26 @@ function spent(
 /** 1234567 -> 1 234 567. Long token counts are unreadable without it. */
 function thousands(value: number): string {
   return value.toLocaleString('en-US').replace(/,/g, ' ');
+}
+
+/**
+ * Where a run's work is, in one cell.
+ *
+ * Three sources, in the order they are trustworthy. The run's own `branch` is what `deliver()`
+ * wrote when it committed, and it outlives everything. The live worktree row covers a run still
+ * in flight, which has not committed yet and so has nothing on the run. Only a run that
+ * actually fell back to a shared repo directory says `in repo` — that used to be the fallback
+ * for "no worktree row", which made it a claim about a run that had simply finished tidily.
+ *
+ * Anything else says nothing, because nothing is what is known.
+ */
+function branchLabel(
+  run: { branch: string | null },
+  live: string | undefined,
+  shared: boolean,
+): string {
+  if (run.branch) return run.branch;
+  if (live) return live;
+  if (shared) return style.dim('in repo');
+  return style.dim('—');
 }

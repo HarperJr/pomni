@@ -51,8 +51,8 @@ export class SqlitePipelineStore implements PipelineStore {
       `INSERT INTO pipeline_runs (id, project_id, workflow_id, workflow_name, provider_id,
                                   item_id, rerun_of, task, context, status, pid, result, error,
                                   gate_status, gate_summary, item_status, outcome, unmet,
-                                  started_at, ended_at, duration_ms, cost_usd)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                                  started_at, ended_at, duration_ms, cost_usd, branch)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       run.id,
       run.projectId,
@@ -76,6 +76,9 @@ export class SqlitePipelineStore implements PipelineStore {
       run.endedAt,
       run.durationMs,
       run.costUsd,
+      // Bound defensively. This method takes a record from outside, and `undefined` is not a
+      // value SQLite can bind — it fails with a parameter number and no clue which field.
+      run.branch ?? null,
     );
   }
 
@@ -87,7 +90,7 @@ export class SqlitePipelineStore implements PipelineStore {
       `UPDATE pipeline_runs
          SET status = ?, pid = ?, result = ?, error = ?, gate_status = ?, gate_summary = ?,
              item_status = ?, outcome = ?, unmet = ?, ended_at = ?, duration_ms = ?,
-             input_tokens = ?, output_tokens = ?, cost_usd = ?, context = ?
+             input_tokens = ?, output_tokens = ?, cost_usd = ?, context = ?, branch = ?
        WHERE id = ?`,
     ).run(
       run.status,
@@ -105,6 +108,7 @@ export class SqlitePipelineStore implements PipelineStore {
       run.outputTokens,
       run.costUsd,
       JSON.stringify(run.context),
+      run.branch ?? null,
       id,
     );
   }
@@ -332,6 +336,7 @@ interface RunRow {
   provider_id: string;
   item_id: string | null;
   rerun_of: string | null;
+  branch: string | null;
   task: string;
   context: string | null;
   status: string;
@@ -385,6 +390,7 @@ function toRun(row: RunRow): PipelineRun {
     providerId: row.provider_id,
     itemId: row.item_id,
     rerunOf: row.rerun_of ?? null,
+    branch: row.branch ?? null,
     task: row.task,
     context: toContext(row.context),
     status: row.status as PipelineRun['status'],
@@ -586,6 +592,8 @@ const MIGRATIONS: string[] = [
   `ALTER TABLE pipeline_runs ADD COLUMN pid INTEGER;`,
 
   `ALTER TABLE pipeline_steps ADD COLUMN provider_id TEXT;`,
+
+  `ALTER TABLE pipeline_runs ADD COLUMN branch TEXT;`,
 ];
 
 function migrate(db: SqliteDatabase): void {

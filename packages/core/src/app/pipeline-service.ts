@@ -315,6 +315,9 @@ export class PipelineService {
         providerId: provider.id,
         itemId: input.itemId ?? null,
         rerunOf: input.rerunOf ?? null,
+        // Filled in by `deliver()` when there is a commit to point at. Null until then, which
+        // is honest: a run that has not committed has no branch worth naming.
+        branch: null,
         task,
         context,
         status: 'running',
@@ -1853,7 +1856,7 @@ export class PipelineService {
    *
    * Returns the sentences to put on the run. Artifacts and the item's branch are written here.
    */
-  private async deliver(run: PipelineRun): Promise<string[]> {
+  private async deliver(run: PipelineRun): Promise<{ notes: string[]; branch: string | null }> {
     const notes: string[] = [];
     
 
@@ -1862,9 +1865,9 @@ export class PipelineService {
       worktrees = await this.worktrees.list({ runId: run.id, status: 'active' });
     } catch (error) {
       this.logger.warn(`could not read the worktrees of ${run.id}`, error);
-      return notes;
+      return { notes, branch: null };
     }
-    if (worktrees.length === 0) return notes;
+    if (worktrees.length === 0) return { notes, branch: null };
 
     const project = await this.projects.getRef(run.projectId).catch(() => null);
     const policy = project?.data.policy;
@@ -1998,15 +2001,17 @@ export class PipelineService {
 
     // The item points at where its work is. One branch is the ordinary case; a run across two
     // repos genuinely has two, and naming both beats naming whichever came back first.
+    const named = [...new Set(branches)].join(', ');
+
     if (run.itemId && branches.length > 0) {
       await this.backlog
-        .update(run.projectId, run.itemId, { branch: [...new Set(branches)].join(', ') })
+        .update(run.projectId, run.itemId, { branch: named })
         .catch((error) => {
           this.logger.warn(`could not record the branch on ${run.itemId}`, error);
         });
     }
 
-    return notes;
+    return { notes, branch: branches.length > 0 ? named : null };
   }
 
   /**
@@ -2487,7 +2492,10 @@ export class PipelineService {
     const updated: PipelineRun = {
       ...stored,
       pid: null,
-      unmet: [...stored.unmet, ...delivered, ...notes],
+      unmet: [...stored.unmet, ...delivered.notes, ...notes],
+      // The run's own record of where its work went. Read from here rather than from a
+      // worktree row, which a clean release deletes at exactly the moment it starts mattering.
+      branch: delivered.branch ?? stored.branch,
     };
 
     try {
