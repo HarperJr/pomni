@@ -118,21 +118,53 @@ export class ForgeClient implements ForgePort {
   }
 
   /**
-   * One request, decoded. Null for anything that is not a 2xx or is not JSON — the caller's
-   * fallback is the same in every one of those cases, so distinguishing them would only make
-   * the error path longer without making it more useful.
+   * One request, decoded.
+   *
+   * The two answers are told apart on purpose. A forge that could not be reached, or that
+   * answered something this client cannot use, is null — the caller falls back to the link and
+   * there is nothing a person would act on. A forge that answered *and refused* throws, because
+   * that refusal is actionable and silence about it is the worst outcome: the run looks as
+   * though it never tried. A token with `write_repository` but not `api` pushes perfectly and
+   * then fails here with 403, which is exactly the case that has to say so out loud.
    */
   private async json<T>(url: string, init: RequestInit): Promise<T | null> {
+    let response: Response;
     try {
-      const response = await this.fetchImpl(url, {
+      response = await this.fetchImpl(url, {
         ...init,
         signal: AbortSignal.timeout(FORGE_TIMEOUT_MS),
       });
-      if (!response.ok) return null;
+    } catch {
+      // Unreachable host, TLS, timeout. The link works without any of them.
+      return null;
+    }
+
+    if (response.status === 401 || response.status === 403) {
+      throw new Error(`the forge refused the token (${response.status}): ${await reason(response)}`);
+    }
+    if (response.status === 422) {
+      throw new Error(`the forge would not open it (422): ${await reason(response)}`);
+    }
+    if (!response.ok) return null;
+
+    try {
       return (await response.json()) as T;
     } catch {
       return null;
     }
+  }
+}
+
+/** The forge's own words, when it gave any. Both GitLab and GitHub answer JSON here. */
+async function reason(response: Response): Promise<string> {
+  try {
+    const body = (await response.json()) as Record<string, unknown>;
+    const detail =
+      body.error_description ?? body.message ?? body.error ?? JSON.stringify(body).slice(0, 200);
+    const scope = typeof body.scope === 'string' ? ` (scopes it wanted: ${body.scope})` : '';
+    return `${String(detail)}${scope}`;
+  } catch {
+    return response.statusText || 'no detail';
   }
 }
 

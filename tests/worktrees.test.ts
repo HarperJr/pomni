@@ -333,7 +333,8 @@ describe('a worktree with uncommitted work in it', () => {
     await harness.projects.update('acme', {
       policy: { autoPush: true, autoMergeRequest: true },
     });
-    harness.forge.failNext = 'the token has no api scope';
+    harness.forge.failNext =
+      'the forge refused the token (403): insufficient_scope (scopes it wanted: api)';
 
     harness.llm.replies = [askHuman('hold'), 'Done.'];
     const { run, completion } = await harness.pipelines.start({
@@ -354,6 +355,12 @@ describe('a worktree with uncommitted work in it', () => {
     expect((await harness.pipelines.get(run.id)).artifacts.some((a) => a.name === held?.branch)).toBe(
       true,
     );
+
+    // Soft is not the same as silent. A token that pushes but cannot open a merge request is
+    // the commonest way this half fails, and the run has to say so — otherwise it looks as
+    // though it never tried, and the fix is one the person could have made in a minute.
+    expect(finished.unmet.join('\n')).toContain('insufficient_scope');
+    expect(finished.unmet.join('\n')).toContain(held?.branch as string);
   });
 
   it('keeps a run alive when the push is refused, and says which branch to push', async () => {

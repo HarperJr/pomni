@@ -1728,10 +1728,25 @@ export class PipelineService {
       // read from the source when Pomni cloned it and from git itself when it did not.
       const remote =
         repo.source.kind === 'git' ? repo.source.url : (repo.vcs?.remote ?? null);
-      const opened =
-        (policy?.autoMergeRequest ?? false)
-          ? await this.openMergeRequest(run, repo, remote, worktree.branch, worktree.baseBranch)
-          : null;
+      let opened: MergeRequestRef | null = null;
+      if (policy?.autoMergeRequest ?? false) {
+        try {
+          opened = await this.openMergeRequest(
+            run,
+            repo,
+            remote,
+            worktree.branch,
+            worktree.baseBranch,
+          );
+        } catch (error) {
+          // Soft, but never silent. The branch is pushed and the link below still works; what
+          // the person needs is the sentence saying why the automatic half did not happen.
+          notes.push(
+            `The branch ${worktree.branch} is pushed, but the merge request could not be` +
+              ` opened for you: ${firstLine(error)}. Open it from the link on this run.`,
+          );
+        }
+      }
       const url = opened?.url ?? mergeRequestUrl(remote, worktree.branch);
 
       if (opened) {
@@ -1816,8 +1831,10 @@ export class PipelineService {
         description,
       });
     } catch (error) {
+      // Told to the person, not only to a log. A forge that answered and refused is the case
+      // where the run looks as though it never tried — and where the fix is one they can make.
       this.logger.warn(`could not open a merge request for ${branch}`, error);
-      return null;
+      throw error;
     }
   }
 
