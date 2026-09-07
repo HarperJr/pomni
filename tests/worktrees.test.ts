@@ -963,3 +963,47 @@ describe('records written before this change', () => {
     expect(parsed.pid).toBeNull();
   });
 });
+
+describe('branches a run left behind', () => {
+  it('reports work that is on no other ref and has no worktree on it', async () => {
+    await attachRepo('web', { track: true, worktrees: 'always' });
+    // What a failed-then-resumed run leaves: the first pass committed, the tree was released
+    // cleanly, the resume took a different slot, and nobody was ever told this existed.
+    harness.git.unmergedBranches = ['fix/ACME-9/main'];
+
+    const report = await harness.doctor.check('acme');
+
+    expect(report.abandoned.map((entry) => entry.branch)).toEqual(['fix/ACME-9/main']);
+    expect(report.abandoned[0]?.detail).toContain('no worktree is on it');
+    // A warning, never a failure: the commits are safe, the only thing wrong is the silence.
+    expect(report.status).toBe('warn');
+  });
+
+  it('says nothing about a branch someone wrote by hand', async () => {
+    await attachRepo('web', { track: true, worktrees: 'always' });
+    // `isRunBranch` is strict about all three segments precisely so that this is left alone.
+    harness.git.unmergedBranches = ['feature/checkout-rewrite', 'main', 'fix/POMN-43'];
+
+    expect((await harness.doctor.check('acme')).abandoned).toEqual([]);
+  });
+
+  it('says nothing about a branch a live run is still working on', async () => {
+    await attachRepo('web', { track: true, worktrees: 'always' });
+
+    harness.llm.replies = [askHuman('hold'), 'Done.'];
+    const { run, completion } = await harness.pipelines.start({
+      projectId: 'acme',
+      task: 'Write something',
+    });
+    const [questionId] = await waitForQuestions(1);
+
+    const [held] = await harness.worktrees.list({ runId: run.id });
+    harness.git.unmergedBranches = [held?.branch as string];
+
+    // Unmerged, yes — but somebody is standing on it. That is a run in flight, not litter.
+    expect((await harness.doctor.check('acme')).abandoned).toEqual([]);
+
+    await harness.pipelines.answer(questionId as string, 'Carry on.');
+    await completion;
+  });
+});

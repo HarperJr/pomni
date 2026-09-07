@@ -525,6 +525,18 @@ export async function main(argv: string[]): Promise<void> {
         console.log();
       }
 
+      if (report.abandoned.length > 0) {
+        console.log(style.bold('branches a run left behind'));
+        for (const branch of report.abandoned) {
+          console.log(
+            `   ${mark('warn')} ${branch.repoId.padEnd(14)} ${branch.branch}` +
+              `${branch.runId ? `  ${style.dim(`run ${branch.runId}`)}` : ''}`,
+          );
+          console.log(`      ${style.dim(branch.detail)}`);
+        }
+        console.log();
+      }
+
       console.log(
         report.status === 'fail'
           ? style.red('problems found')
