@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { promisify } from 'node:util';
@@ -419,6 +419,44 @@ describe.skipIf(!HAS_GIT)('advancing a clone to its upstream', () => {
     await expect(cli.push(clone, { branch: 'feature/ACME-2/main' })).rejects.toThrow(
       /fetch and rebase/i,
     );
+  });
+
+  it('merges the base in, and leaves no half-merged tree when it cannot', async () => {
+    // A branch that changed a file the base then changed too — the ordinary way three green
+    // branches turn into a red master.
+    await git(clone, 'checkout', '-b', 'feature/ACME-3/main');
+    await writeFile(join(clone, 'shared.txt'), 'mine\n');
+    await cli.commit(clone, { message: 'mine' });
+
+    await git(clone, 'checkout', 'main');
+    await writeFile(join(clone, 'shared.txt'), 'theirs\n');
+    await cli.commit(clone, { message: 'theirs' });
+    await git(clone, 'checkout', 'feature/ACME-3/main');
+
+    const conflicted = await cli.mergeInto(clone, 'main');
+    expect(conflicted.status).toBe('conflict');
+    expect(conflicted.conflicts).toContain('shared.txt');
+
+    // Aborted, not left mid-merge. The gate is about to run in this directory, and a tree full
+    // of conflict markers would fail it for a reason that has nothing to do with the code.
+    expect((await git(clone, 'status', '--porcelain')).stdout.trim()).toBe('');
+    // Trimmed: git's autocrlf rewrites the line ending on checkout, and which one landed is
+    // not what this test is about.
+    expect((await readFile(join(clone, 'shared.txt'), 'utf8')).trim()).toBe('mine');
+    expect(existsSync(join(clone, '.git', 'MERGE_HEAD'))).toBe(false);
+
+    // A branch that does not collide merges, and the tree afterwards has both sides in it.
+    await git(clone, 'checkout', '-b', 'feature/ACME-4/main', 'main~1');
+    await writeFile(join(clone, 'ours-only.txt'), 'ours\n');
+    await cli.commit(clone, { message: 'ours' });
+
+    const merged = await cli.mergeInto(clone, 'main');
+    expect(merged.status).toBe('merged');
+    expect((await readFile(join(clone, 'shared.txt'), 'utf8')).trim()).toBe('theirs');
+    expect(existsSync(join(clone, 'ours-only.txt'))).toBe(true);
+
+    // Asked again, it says nothing moved rather than making an empty merge.
+    expect((await cli.mergeInto(clone, 'main')).status).toBe('already');
   });
 
   it('says so when a branch tracks nothing at all', async () => {

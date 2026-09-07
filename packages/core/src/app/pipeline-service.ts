@@ -891,15 +891,23 @@ export class PipelineService {
       // The gate is what turns "the agents finished" into "the change works". Without it a
       // pipeline can only report its own opinion of itself.
       if (finished.status === 'passed') {
+        // The base first, then the gate. Grading the branch alone answers a question nobody
+        // has: three branches were each green on their own and merged into a red master.
+        const merges = await this.mergeBaseIn(finished);
+        finished = { ...finished, unmet: [...finished.unmet, ...merges.notes] };
         finished = await this.runGate(finished, dirOverrides);
         if (finished.itemId) {
           // Review means "someone should look at finished work". Both halves have to hold:
           // the gate proves the repo still builds, the verdict says the work was actually
           // done. A green gate over an unfinished job is the more dangerous of the two,
           // because it looks like evidence.
-          const ready = finished.gateStatus !== 'failed' && finished.outcome === 'done';
-          const why =
-            finished.gateStatus === 'failed'
+          // Three halves now. Work that will not merge is not ready to review however green
+          // it is on its own — a reviewer reading it would be reading a branch that cannot land.
+          const ready =
+            finished.gateStatus !== 'failed' && finished.outcome === 'done' && !merges.conflicted;
+          const why = merges.conflicted
+            ? `it does not merge onto its base: ${merges.notes.join('; ')}`
+            : finished.gateStatus === 'failed'
               ? 'the gate did not pass after the agent run'
               : `the agents reported the work as ${finished.outcome}${
                   finished.unmet.length > 0 ? `: ${finished.unmet.join('; ')}` : ''
@@ -1683,6 +1691,70 @@ export class PipelineService {
    * its own work grades itself, and the run store already knows how to answer the question
    * properly.
    */
+  /**
+   * Bring each worktree up to its base branch, so the gate that follows grades the merge.
+   *
+   * The gate has always asked "does this branch pass?" and every branch has answered honestly.
+   * Nobody asked "does this branch pass *merged onto its target*", which is the only question
+   * the person pressing Merge actually has. Three branches, each green in its own worktree,
+   * merged into a master where 44 tests failed — none of them wrong, all of them unmeasured
+   * together.
+   *
+   * Merging here rather than in a scratch tree costs nothing extra: the gate is about to run
+   * in this directory anyway, so the merge makes it answer the better question for free.
+   *
+   * Never throws and never fails a run. A conflict is a fact about two branches — it says the
+   * work needs a person before it can land, and that is reported rather than fought.
+   */
+  private async mergeBaseIn(
+    run: PipelineRun,
+  ): Promise<{ notes: string[]; conflicted: boolean }> {
+    const notes: string[] = [];
+    let conflicted = false;
+
+    const worktrees = await this.worktrees
+      .list({ runId: run.id, status: 'active' })
+      .catch(() => []);
+
+    for (const worktree of worktrees) {
+      // Null when the repo was on a detached HEAD when the tree was cut. Nothing to merge onto.
+      if (!worktree.baseBranch) continue;
+
+      const repo = await this.repos.get(run.projectId, worktree.repoId).catch(() => null);
+      const name = repo?.name ?? worktree.repoId;
+
+      let result: Awaited<ReturnType<GitPort['mergeInto']>>;
+      try {
+        result = await this.git.mergeInto(worktree.path, worktree.baseBranch);
+      } catch (error) {
+        notes.push(`'${name}' could not be brought up to ${worktree.baseBranch}: ${firstLine(error)}`);
+        continue;
+      }
+
+      if (result.status === 'conflict') {
+        conflicted = true;
+        notes.push(
+          `'${name}' ${result.detail}. The gate below graded the branch on its own, which is` +
+            ' not the question a merge asks — this needs a person before it can land.',
+        );
+        continue;
+      }
+
+      if (result.status === 'unavailable') {
+        notes.push(`'${name}': ${result.detail} — the gate below graded the branch on its own.`);
+        continue;
+      }
+
+      // `already` is the ordinary case and worth no words; a base that moved under the run is
+      // worth saying, because the gate result now covers code the agents never saw.
+      if (result.status === 'merged') {
+        this.logger.info(`${run.id}: ${name} ${result.detail}`);
+      }
+    }
+
+    return { notes, conflicted };
+  }
+
   private async runGate(
     run: PipelineRun,
     dirOverrides: Record<string, string>,

@@ -8,6 +8,7 @@ import {
   type FastForwardResult,
   type GitAuth,
   type GitPort,
+  type MergeResult,
   type VcsInfo,
   type WorktreeRef,
 } from '@pomni/core';
@@ -122,6 +123,53 @@ export class GitCli implements GitPort {
     if (result.code !== 0) {
       throw new GitError(`git fetch failed: ${firstUsefulLine(redact(result.stderr, auth))}`);
     }
+  }
+
+  /**
+   * Merge `ref` into the checked-out branch, and clean up after itself if it cannot.
+   *
+   * `--no-commit` is deliberately not used: the merge commit is what makes the tree a real
+   * answer to "does this branch pass merged onto its target", and leaving it uncommitted
+   * would mean the gate grades a working copy nobody could reproduce.
+   */
+  async mergeInto(dir: string, ref: string): Promise<MergeResult> {
+    const before = await this.text(['-C', dir, 'rev-parse', 'HEAD']);
+    const identity = (await this.hasIdentity(dir)) ? [] : FALLBACK_IDENTITY;
+
+    const merged = await this.run(
+      ['-C', dir, ...identity, 'merge', '--no-edit', '-m', `Merge ${ref} to check the result`, ref],
+      {},
+    );
+
+    if (merged.code === 0) {
+      const after = await this.text(['-C', dir, 'rev-parse', 'HEAD']);
+      return before === after
+        ? { status: 'already', conflicts: [], detail: `already up to date with ${ref}` }
+        : { status: 'merged', conflicts: [], detail: `merged ${ref} in (${short(before)} → ${short(after)})` };
+    }
+
+    // Anything git would not finish leaves a tree the gate must not be run against.
+    const conflicts = (await this.text(['-C', dir, 'diff', '--name-only', '--diff-filter=U']))
+      ?.split(/\r?\n/)
+      .filter((line) => line.trim().length > 0) ?? [];
+
+    await this.run(['-C', dir, 'merge', '--abort'], {});
+
+    if (conflicts.length === 0) {
+      return {
+        status: 'unavailable',
+        conflicts: [],
+        detail: `could not merge ${ref}: ${firstUsefulLine(merged.stderr || merged.stdout)}`,
+      };
+    }
+
+    return {
+      status: 'conflict',
+      conflicts,
+      detail:
+        `conflicts with ${ref} in ${conflicts.length} file${conflicts.length === 1 ? '' : 's'}` +
+        ` (${conflicts.slice(0, 3).join(', ')}${conflicts.length > 3 ? ', …' : ''})`,
+    };
   }
 
   async branchExists(dir: string, branch: string): Promise<boolean> {
