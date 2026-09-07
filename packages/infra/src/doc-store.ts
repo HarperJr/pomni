@@ -212,20 +212,41 @@ export function serializeMarkdown(data: unknown): string {
 /**
  * Walk up from `start` looking for a `.pomni` directory, so the CLI works from anywhere
  * inside the harness repo — the same way git finds `.git`.
+ *
+ * With one refusal: a workspace never answers for a path that is inside its own `worktrees/`.
+ *
+ * A run's checkout of the Pomni repo lives at `<root>/.pomni/worktrees/<project>/<repo>/<run>`,
+ * and that checkout carries its own `.pomni` — so from the worktree root, or anywhere under it,
+ * the search already finds the run's own workspace and everything is properly isolated. From
+ * *between* the two — `<root>/.pomni/worktrees/<project>/<repo>`, one `cd ..` away — the walk
+ * used to sail up to the live workspace and hand back the real backlog, the real database and
+ * the real credentials.
+ *
+ * That is never what the caller meant. A workspace that contains you among its worktrees is the
+ * harness running you, not the workspace you are working in.
  */
 export async function findWorkspaceRoot(start: string): Promise<string | null> {
-  let dir = resolve(start);
+  const from = resolve(start);
+  let dir = from;
   for (;;) {
     const candidate = join(dir, '.pomni');
     try {
       await access(candidate, constants.F_OK);
-      return candidate;
+      if (!contains(join(candidate, 'worktrees'), from)) return candidate;
     } catch {
-      const parent = dirname(dir);
-      if (parent === dir) return null;
-      dir = parent;
+      // Not here; keep going up.
     }
+    const parent = dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
   }
+}
+
+/** Whether `path` is `ancestor` or sits underneath it. Case-folded — this runs on Windows. */
+function contains(ancestor: string, path: string): boolean {
+  const a = resolve(ancestor).replace(/[\\/]+$/, '').toLowerCase();
+  const p = resolve(path).replace(/[\\/]+$/, '').toLowerCase();
+  return p === a || p.startsWith(a + sep.toLowerCase()) || p.startsWith(a + '/');
 }
 
 export function workspaceRootFor(cwd: string, explicit?: string): string {
