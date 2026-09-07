@@ -277,7 +277,7 @@ export class ClaudeCodeLlm implements LlmPort {
           cacheReadTokens: parsed.usage?.cache_read_input_tokens ?? 0,
           cacheCreationTokens: parsed.usage?.cache_creation_input_tokens ?? 0,
         },
-        turns: parsed.num_turns ?? 1,
+        turns: parsed.num_turns ?? 0,
         // The CLI hands us the cost on every result frame; it used to land nowhere.
         costUsd: parsed.total_cost_usd,
       };

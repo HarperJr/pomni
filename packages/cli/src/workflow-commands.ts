@@ -10,7 +10,7 @@ import {
   type PomniContainer,
 } from '@pomni/core';
 import type { Command } from 'commander';
-import { style, table } from './format.js';
+import { style, table, visibleLength } from './format.js';
 
 export function registerWorkflowCommands(
   program: Command,
@@ -637,14 +637,37 @@ ${item.body}`;
       const detailed = await Promise.all(runs.map((run) => container.pipelines.get(run.id)));
 
       if (flags.byAgent) {
-        const byAgent = new Map<string, { tokens: number; cost: number; steps: number }>();
+        const byAgent = new Map<
+          string,
+          {
+            tokens: number;
+            cost: number;
+            steps: number;
+            turns: number;
+            unmeasuredSteps: number;
+            cacheReadTokens: number;
+            freshInputTokens: number;
+          }
+        >();
 
         for (const run of detailed) {
           for (const step of run.steps) {
-            const at = byAgent.get(step.agentName) ?? { tokens: 0, cost: 0, steps: 0 };
+            const at = byAgent.get(step.agentName) ?? {
+              tokens: 0,
+              cost: 0,
+              steps: 0,
+              turns: 0,
+              unmeasuredSteps: 0,
+              cacheReadTokens: 0,
+              freshInputTokens: 0,
+            };
             at.tokens += step.inputTokens + step.outputTokens;
             at.cost += step.costUsd ?? 0;
             at.steps += 1;
+            at.turns += step.turns;
+            if (step.turns === 0) at.unmeasuredSteps += 1;
+            at.cacheReadTokens += step.cacheReadTokens;
+            at.freshInputTokens += step.freshInputTokens;
             byAgent.set(step.agentName, at);
           }
         }
@@ -655,10 +678,12 @@ ${item.body}`;
             rows.map(([name, at]) => [
               name,
               String(at.steps),
+              turnsLabel(at.turns, at.unmeasuredSteps, at.steps),
               thousands(at.tokens),
+              cacheShareLabel(at.cacheReadTokens, at.freshInputTokens),
               at.cost ? `$${at.cost.toFixed(2)}` : style.dim('—'),
             ]),
-            ['AGENT', 'STEPS', 'TOKENS', 'COST'],
+            ['AGENT', 'STEPS', 'TURNS', 'TOKENS', 'CACHE', 'COST'],
           ),
         );
         return;
@@ -669,15 +694,18 @@ ${item.body}`;
       const totals = detailed.map((run) => ({
         run,
         tokens: run.steps.reduce((sum, step) => sum + step.inputTokens + step.outputTokens, 0),
+        turns: run.steps.reduce((sum, step) => sum + step.turns, 0),
+        unmeasuredSteps: run.steps.filter((step) => step.turns === 0).length,
       }));
       const peak = Math.max(...totals.map((entry) => entry.tokens), 1);
 
-      for (const { run, tokens } of totals) {
+      for (const { run, tokens, turns, unmeasuredSteps } of totals) {
         const bar = '█'.repeat(Math.max(1, Math.round((tokens / peak) * 28)));
         const cost = run.costUsd ? `$${run.costUsd.toFixed(2)}` : style.dim('—');
+        const runTurnsLabel = turnsLabel(turns, unmeasuredSteps, run.steps.length);
         console.log(
           `${style.dim(run.startedAt.slice(5, 16).replace('T', ' '))}  ${style.cyan(bar)} ` +
-            `${thousands(tokens).padStart(9)}  ${cost.padStart(7)}  ` +
+            `${padVisible(thousands(tokens), 9)}  ${padVisible(runTurnsLabel, 9)}  ${padVisible(cost, 7)}  ` +
             `${style.dim(run.steps.length + ' steps')}  ${truncate(run.task, 34)}`,
         );
       }
@@ -1080,3 +1108,31 @@ function branchLabel(
   if (shared) return style.dim('in repo');
   return style.dim('—');
 }
+
+/**
+ * `turns` summed across steps, some of which may predate the field and record `0` (not
+ * measured, not "zero turns"). If none of the contributing steps were measured, the total is
+ * unknown. If some were and some were not, the sum is a floor, not a measurement — marked
+ * `N+ turns` rather than printed as if it were exact.
+ */
+function turnsLabel(turns: number, unmeasuredSteps: number, totalSteps: number): string {
+  if (totalSteps === 0 || unmeasuredSteps === totalSteps) return style.dim('—');
+  if (unmeasuredSteps > 0) return `${turns}+ turns`;
+  return `${turns} turn${turns === 1 ? '' : 's'}`;
+}
+
+/**
+ * Cache share is cacheReadTokens / (cacheReadTokens + freshInputTokens), never over
+ * inputTokens and never over input+output — rows written before these columns existed
+ * contribute inputTokens with both halves at 0, so summing over inputTokens would understate
+ * the share of what was actually measured.
+ */
+function cacheShareLabel(cacheReadTokens: number, freshInputTokens: number): string {
+  const measured = cacheReadTokens + freshInputTokens;
+  if (measured === 0) return style.dim('—');
+  return `${Math.round((cacheReadTokens / measured) * 100)}%`;
+}
+
+/** Pad by visible width, since a dim `—` or colored cell carries invisible ANSI codes. */
+function padVisible(text: string, width: number): string {
+  return ' '.repeat(Math.max(0, width - visibleLength(text))) + text;}

@@ -155,8 +155,9 @@ export class SqlitePipelineStore implements PipelineStore {
       `INSERT INTO pipeline_steps (id, run_id, parent_step_id, agent_id, agent_name, role,
                                    model, provider_id, task, status, output, error, outcome, unmet,
                                    actions, depth, started_at, ended_at, duration_ms,
+                                   turns, cache_read_tokens, fresh_input_tokens,
                                    input_tokens, output_tokens, cost_usd)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       step.id,
       step.runId,
@@ -177,6 +178,9 @@ export class SqlitePipelineStore implements PipelineStore {
       step.startedAt,
       step.endedAt,
       step.durationMs,
+      step.turns,
+      step.cacheReadTokens,
+      step.freshInputTokens,
       step.inputTokens,
       step.outputTokens,
       step.costUsd,
@@ -187,7 +191,9 @@ export class SqlitePipelineStore implements PipelineStore {
     this.statement(
       `UPDATE pipeline_steps
          SET status = ?, output = ?, error = ?, outcome = ?, unmet = ?, actions = ?,
-             provider_id = ?, ended_at = ?, duration_ms = ?, input_tokens = ?, output_tokens = ?, cost_usd = ?
+             provider_id = ?, ended_at = ?, duration_ms = ?,
+             turns = ?, cache_read_tokens = ?, fresh_input_tokens = ?,
+             input_tokens = ?, output_tokens = ?, cost_usd = ?
        WHERE id = ?`,
     ).run(
       step.status,
@@ -199,6 +205,9 @@ export class SqlitePipelineStore implements PipelineStore {
       step.providerId,
       step.endedAt,
       step.durationMs,
+      step.turns,
+      step.cacheReadTokens,
+      step.freshInputTokens,
       step.inputTokens,
       step.outputTokens,
       step.costUsd,
@@ -376,6 +385,9 @@ interface StepRow {
   started_at: string;
   ended_at: string | null;
   duration_ms: number | null;
+  turns: number;
+  cache_read_tokens: number;
+  fresh_input_tokens: number;
   input_tokens: number;
   output_tokens: number;
   cost_usd: number | null;
@@ -494,6 +506,9 @@ function toStep(row: StepRow): PipelineStep {
     startedAt: row.started_at,
     endedAt: row.ended_at,
     durationMs: row.duration_ms,
+    turns: row.turns ?? 0,
+    cacheReadTokens: row.cache_read_tokens ?? 0,
+    freshInputTokens: row.fresh_input_tokens ?? 0,
     inputTokens: row.input_tokens,
     outputTokens: row.output_tokens,
     costUsd: row.cost_usd,
@@ -594,6 +609,14 @@ const MIGRATIONS: string[] = [
   `ALTER TABLE pipeline_steps ADD COLUMN provider_id TEXT;`,
 
   `ALTER TABLE pipeline_runs ADD COLUMN branch TEXT;`,
+
+  // Appended, never inserted. This migration once lived in the middle of this list on an
+  // unmerged branch, ran against the real database, and left it at the same version number as
+  // a database built from this file with different columns in it — which is precisely the
+  // divergence a counter cannot describe. Whatever comes next goes on the end too.
+  `ALTER TABLE pipeline_steps ADD COLUMN turns INTEGER NOT NULL DEFAULT 0;
+   ALTER TABLE pipeline_steps ADD COLUMN cache_read_tokens INTEGER NOT NULL DEFAULT 0;
+   ALTER TABLE pipeline_steps ADD COLUMN fresh_input_tokens INTEGER NOT NULL DEFAULT 0;`,
 ];
 
 function migrate(db: SqliteDatabase): void {

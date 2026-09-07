@@ -495,7 +495,16 @@ export interface PipelineStep {
   startedAt: string;
   endedAt: string | null;
   durationMs: number | null;
+  /**
+   * Turns the provider reported for this session, summed over an orchestrator's rounds.
+   * 0 means not measured — never one turn.
+   */
+  turns: number;
+  /** Every input token this step spent, cache included. The total; the two fields below are its halves. */
   inputTokens: number;
+  /** How much of `inputTokens` came back from the prompt cache. Both 0 on steps recorded before this existed, where the split is unknown. */
+  cacheReadTokens: number;
+  freshInputTokens: number;
   outputTokens: number;
   costUsd: number | null;
 }

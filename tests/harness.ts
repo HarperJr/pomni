@@ -40,6 +40,7 @@ import {
   type LlmResult,
   type LlmToolCall,
   type LlmToolSpec,
+  type LlmUsage,
   type LogSink,
   type PomniContainer,
   type Provider,
@@ -597,6 +598,19 @@ export class FakeLlm implements LlmPort {
   costUsd: number | null = null;
 
   /**
+   * Turns reported per call, shifted in call order across every agent sharing this fake —
+   * the same order `calls` records them in. Falls back to `1` once empty, so a test that
+   * never sets this sees the same "one turn per call" every other test relies on.
+   */
+  turnsQueue: number[] = [];
+
+  /**
+   * Usage reported per call, shifted the same way as `turnsQueue`. Falls back to the fixed
+   * usage below, so a test caring only about turns need not also supply usage.
+   */
+  usageQueue: LlmUsage[] = [];
+
+  /**
    * Awaited before every answer. A test that needs to see a run while it is still `running`
    * holds this open, does its asserting, then releases it. Unset by default, so every other
    * test stays synchronous.
@@ -616,8 +630,10 @@ export class FakeLlm implements LlmPort {
     return {
       text: this.replies.shift() ?? this.reply,
       stopReason: 'end_turn',
-      usage: { inputTokens: 10, outputTokens: 20, cacheReadTokens: 0, cacheCreationTokens: 0 },
-      turns: 1,
+      usage:
+        this.usageQueue.shift() ??
+        { inputTokens: 10, outputTokens: 20, cacheReadTokens: 0, cacheCreationTokens: 0 },
+      turns: this.turnsQueue.shift() ?? 1,
       ...(this.costUsd === null ? {} : { costUsd: this.costUsd }),
     };
   }
