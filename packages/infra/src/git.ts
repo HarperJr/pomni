@@ -4,6 +4,8 @@ import { dirname } from 'node:path';
 import {
   GitError,
   type CloneOptions,
+  type CommitResult,
+  type FastForwardResult,
   type GitAuth,
   type GitPort,
   type VcsInfo,
@@ -25,6 +27,19 @@ interface RunOptions {
 }
 
 const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000;
+
+/**
+ * Who a commit is by when git has nobody to name.
+ *
+ * Passed with `-c` on the one invocation, never written to a config file: borrowing an
+ * identity for a commit is a smaller thing than configuring a machine on the user's behalf.
+ */
+const FALLBACK_IDENTITY = [
+  '-c',
+  'user.name=Pomni',
+  '-c',
+  'user.email=pomni@localhost',
+];
 
 export class GitCli implements GitPort {
   async isAvailable(): Promise<boolean> {
@@ -109,6 +124,176 @@ export class GitCli implements GitPort {
     }
   }
 
+  async branchExists(dir: string, branch: string): Promise<boolean> {
+    const result = await this.run(
+      ['-C', dir, 'show-ref', '--verify', '--quiet', `refs/heads/${branch}`],
+      {},
+    );
+    return result.code === 0;
+  }
+
+  /**
+   * Stage everything and commit it.
+   *
+   * `add -A` rather than `add -u`: a file an agent created is exactly the thing you want in
+   * the commit, and it is the same reasoning `changes()` already applies to untracked files.
+   *
+   * The identity fallback is the difference between a working install and one where every run
+   * silently fails to deliver. A fresh machine, or a service account, has no `user.email`, and
+   * git's refusal there is fatal to the whole loop. Pomni supplies one only when git has none
+   * of its own, passes it per-invocation so nothing is written into anyone's config, and says
+   * that it did — an attributed commit nobody chose is worth reporting.
+   */
+  async commit(dir: string, options: { message: string }): Promise<CommitResult> {
+    const status = await this.run(['-C', dir, 'status', '--porcelain'], {});
+    if (status.code === 0 && status.stdout.trim().length === 0) {
+      return { committed: false, head: await this.text(['-C', dir, 'rev-parse', 'HEAD']) };
+    }
+
+    const staged = await this.run(['-C', dir, 'add', '-A'], {});
+    if (staged.code !== 0) {
+      throw new GitError(`git add failed: ${firstUsefulLine(staged.stderr)}`);
+    }
+
+    // Staging can still leave nothing to commit — a file changed and changed back, or one
+    // that only .gitignore had an opinion about.
+    const cached = await this.run(['-C', dir, 'diff', '--cached', '--quiet'], {});
+    if (cached.code === 0) {
+      return { committed: false, head: await this.text(['-C', dir, 'rev-parse', 'HEAD']) };
+    }
+
+    const identity = (await this.hasIdentity(dir)) ? [] : FALLBACK_IDENTITY;
+    const result = await this.run(
+      ['-C', dir, ...identity, 'commit', '--no-verify', '-m', options.message],
+      {},
+    );
+    if (result.code !== 0) {
+      throw new GitError(`git commit failed: ${firstUsefulLine(result.stderr || result.stdout)}`);
+    }
+
+    return {
+      committed: true,
+      head: await this.text(['-C', dir, 'rev-parse', 'HEAD']),
+      ...(identity.length > 0 ? { identityBorrowed: true } : {}),
+    };
+  }
+
+  async push(
+    dir: string,
+    options: { branch: string; remote?: string; setUpstream?: boolean; auth?: GitAuth },
+  ): Promise<void> {
+    const args = ['-C', dir, 'push'];
+    if (options.setUpstream !== false) args.push('--set-upstream');
+    args.push(options.remote ?? 'origin', `refs/heads/${options.branch}:refs/heads/${options.branch}`);
+
+    const result = await this.run(args, { auth: options.auth });
+    if (result.code !== 0) {
+      throw new GitError(
+        `git push failed: ${explainPushFailure(redact(result.stderr, options.auth))}`,
+      );
+    }
+  }
+
+  /**
+   * Advance a branch to its upstream, fast-forward only.
+   *
+   * `merge --ff-only` rather than any comparison Pomni does itself: git decides what is a
+   * fast-forward, and a refusal from git is a fact rather than a guess. The dirty and
+   * no-upstream checks come first only because their messages are better than git's.
+   */
+  async fastForward(dir: string, options: { branch?: string } = {}): Promise<FastForwardResult> {
+    const branch =
+      options.branch ?? (await this.text(['-C', dir, 'rev-parse', '--abbrev-ref', 'HEAD']));
+    const from = await this.text(['-C', dir, 'rev-parse', 'HEAD']);
+    const base: FastForwardResult = {
+      status: 'unavailable',
+      branch,
+      upstream: null,
+      from,
+      to: from,
+      detail: '',
+    };
+
+    if (!branch || branch === 'HEAD') {
+      return { ...base, detail: 'the working copy is on a detached HEAD, so there is nothing to advance' };
+    }
+
+    // Only the checked-out branch can be advanced by a merge. Anything else would need a ref
+    // update behind the working copy's back, which is how a tree ends up disagreeing with HEAD.
+    const current = await this.text(['-C', dir, 'rev-parse', '--abbrev-ref', 'HEAD']);
+    if (current !== branch) {
+      return {
+        ...base,
+        detail: `the working copy is on '${current}', not '${branch}' — only the checked-out branch is advanced`,
+      };
+    }
+
+    const upstream = await this.text([
+      '-C',
+      dir,
+      'rev-parse',
+      '--abbrev-ref',
+      '--symbolic-full-name',
+      `${branch}@{upstream}`,
+    ]);
+    if (!upstream) {
+      return {
+        ...base,
+        status: 'no-upstream',
+        detail: `'${branch}' tracks nothing, so there is no upstream to advance to`,
+      };
+    }
+
+    const status = await this.run(['-C', dir, 'status', '--porcelain'], {});
+    const dirty = status.stdout
+      .split(/\r?\n/)
+      .map((line) => line.slice(3).trim())
+      .filter((line) => line.length > 0);
+    if (dirty.length > 0) {
+      return {
+        ...base,
+        status: 'dirty',
+        upstream,
+        detail: `'${branch}' was left alone: ${dirty.length} uncommitted change${
+          dirty.length === 1 ? '' : 's'
+        } (${dirty.slice(0, 3).join(', ')}${dirty.length > 3 ? ', …' : ''})`,
+      };
+    }
+
+    const merged = await this.run(['-C', dir, 'merge', '--ff-only', upstream], {});
+    const to = await this.text(['-C', dir, 'rev-parse', 'HEAD']);
+
+    if (merged.code !== 0) {
+      return {
+        ...base,
+        status: 'diverged',
+        upstream,
+        detail:
+          `'${branch}' has commits that ${upstream} does not, so it was not advanced — ` +
+          'they exist nowhere else, and rebasing or resetting is yours to decide',
+      };
+    }
+
+    if (from === to) {
+      return { ...base, status: 'current', upstream, to, detail: `'${branch}' is already at ${upstream}` };
+    }
+
+    return {
+      ...base,
+      status: 'advanced',
+      upstream,
+      to,
+      detail: `'${branch}' advanced to ${upstream} (${short(from)} → ${short(to)})`,
+    };
+  }
+
+  /** Whether git can name an author here without being told. */
+  private async hasIdentity(dir: string): Promise<boolean> {
+    const email = await this.text(['-C', dir, 'config', '--get', 'user.email']);
+    const name = await this.text(['-C', dir, 'config', '--get', 'user.name']);
+    return Boolean(email && name);
+  }
+
   async testRemote(url: string, auth?: GitAuth): Promise<void> {
     const result = await this.run(['ls-remote', '--exit-code', '--heads', url], {
       auth,
@@ -157,6 +342,26 @@ export class GitCli implements GitPort {
 
     const result = await this.run(
       ['-C', repoDir, 'worktree', 'add', '-b', options.branch, options.path, options.baseRef],
+      {},
+    );
+    if (result.code !== 0) {
+      throw new GitError(`git worktree add failed: ${firstUsefulLine(result.stderr)}`);
+    }
+
+    const head = await this.text(['-C', options.path, 'rev-parse', 'HEAD']);
+    return { head: head ?? '' };
+  }
+
+  async attachWorktree(
+    repoDir: string,
+    options: { path: string; branch: string },
+  ): Promise<{ head: string }> {
+    await mkdir(dirname(options.path), { recursive: true });
+
+    // No `-b`: the branch is the run's own and already exists. Creating it again is exactly
+    // what made a resume fall back to the shared repo directory.
+    const result = await this.run(
+      ['-C', repoDir, 'worktree', 'add', options.path, options.branch],
       {},
     );
     if (result.code !== 0) {
@@ -380,6 +585,27 @@ function explainAuthFailure(stderr: string): string {
     return 'repository not found — check the url, or that the token can see a private repo.';
   }
   return firstUsefulLine(stderr);
+}
+
+function short(sha: string | null): string {
+  return sha ? sha.slice(0, 7) : '?';
+}
+
+/**
+ * A push fails for reasons a fetch does not, and the two that matter are worth naming: the
+ * branch moved under us, and the token can read but not write.
+ */
+function explainPushFailure(stderr: string): string {
+  if (/non-fast-forward|fetch first|behind its remote/i.test(stderr)) {
+    return 'the remote branch has commits this one does not — fetch and rebase before pushing again';
+  }
+  if (/protected branch|pre-receive hook declined|denied|not allowed to push/i.test(stderr)) {
+    return `the remote refused the push: ${firstUsefulLine(stderr)}`;
+  }
+  if (/authentication failed|403|invalid username or password/i.test(stderr)) {
+    return 'authentication failed — the token was rejected, or it grants read access but not write';
+  }
+  return explainAuthFailure(stderr);
 }
 
 function explainCloneFailure(result: RunResult, options: CloneOptions): string {

@@ -51,28 +51,123 @@ export interface WorktreeFilter {
 // Branch naming
 // ---------------------------------------------------------------------------
 
+/**
+ * The shape every run branch used to have, and which many still do on disk.
+ *
+ * Kept because `isRunBranch` guards deletion: `removeWorktree` hands the branch to
+ * `git branch -d`, and `prune` asks `isOurs` whether a stale entry is Pomni's to clear. A
+ * predicate that stopped recognising the branches already cut would take away Pomni's right
+ * to clean up after itself, so this prefix is understood forever even though nothing new
+ * carries it.
+ */
 export const WORKTREE_BRANCH_PREFIX = 'pomni/run/';
 
 /**
- * The branch a run's worktree is cut onto.
+ * What each item type is called in a branch name.
  *
- * Run ids are ULIDs — 26 characters of Crockford base32, uppercase letters and digits only —
- * so the result is always a valid git ref and there is no sanitising step. Adding one would be
- * a way for two distinct runs to collide on a single branch.
+ * `bug → fix` is the one place the two vocabularies differ: a backlog talks about bugs, a
+ * branch list talks about fixes, and every forge's automation is written against the second.
+ * Everything else is its own name, so the map is a rename rather than a translation layer.
+ */
+export const BRANCH_PREFIX_BY_TYPE: Record<string, string> = {
+  feature: 'feature',
+  bug: 'fix',
+  chore: 'chore',
+  spike: 'spike',
+  refactor: 'refactor',
+  docs: 'docs',
+  release: 'release',
+};
+
+/** Every prefix a Pomni branch may start with — what `isRunBranch` matches against. */
+export const BRANCH_PREFIXES = [...new Set(Object.values(BRANCH_PREFIX_BY_TYPE))];
+
+/**
+ * The slot a first run on an item takes.
+ *
+ * The third segment exists so two runs on one item cannot land on one ref. That collision is
+ * the reason the old naming reached for a ULID; answering it with a segment costs one word and
+ * leaves the rest of the name readable.
+ */
+export const DEFAULT_BRANCH_SLOT = 'main';
+
+/** An unknown type still has to produce a valid branch, and `chore` is the honest default. */
+export function branchPrefixFor(type: string): string {
+  return BRANCH_PREFIX_BY_TYPE[type] ?? 'chore';
+}
+
+/**
+ * The branch a run's work lives on: `feature/POMN-1/main`.
+ *
+ * Three segments, each earning its place — the type sorts the branch list and is what forge
+ * automation matches on, the item id is the link back to the spec, and the slot keeps two runs
+ * on one item apart.
+ */
+export function itemBranch(
+  type: string,
+  itemId: string,
+  slot: string = DEFAULT_BRANCH_SLOT,
+): string {
+  return `${branchPrefixFor(type)}/${itemId}/${sanitiseSlot(slot)}`;
+}
+
+/**
+ * The branch for a run started without a backlog item.
+ *
+ * Still three segments, so nothing downstream has to special-case it. Run ids are ULIDs —
+ * 26 characters of Crockford base32 — so the result is always a valid ref with no sanitising.
  */
 export function runBranch(runId: string): string {
-  return `${WORKTREE_BRANCH_PREFIX}${runId}`;
+  return `chore/run-${runId}/${DEFAULT_BRANCH_SLOT}`;
 }
 
+/** The slot to fall back to when the readable one is taken. Unique, and still short. */
+export function slotForRun(runId: string): string {
+  return runId.slice(-8).toLowerCase();
+}
+
+/**
+ * A git ref cannot hold every character a slot might be built from. Narrow rather than escape:
+ * a slot is a label Pomni chooses, not user prose, so anything outside the safe set is a bug
+ * upstream and collapsing it is better than producing a ref git will reject.
+ */
+function sanitiseSlot(slot: string): string {
+  const safe = slot.replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^[-.]+|[-.]+$/g, '');
+  return safe.length > 0 ? safe : DEFAULT_BRANCH_SLOT;
+}
+
+const ITEM_BRANCH = new RegExp(
+  `^(?:${BRANCH_PREFIXES.join('|')})/[A-Za-z][A-Za-z0-9_]*-\\d+/[A-Za-z0-9._-]+$`,
+);
+const RUN_ONLY_BRANCH = /^chore\/run-[0-9A-HJKMNP-TV-Z]{26}\/[A-Za-z0-9._-]+$/;
+
+/**
+ * Whether a branch is one Pomni cut.
+ *
+ * Deliberately strict about the whole shape rather than just the prefix. This predicate is
+ * consulted before a branch is deleted and before a repository is pruned, so matching every
+ * `feature/*` would hand Pomni authority over branches a person wrote by hand. All three
+ * segments together are the signature; two of them are not.
+ */
 export function isRunBranch(branch: string): boolean {
-  return branch.startsWith(WORKTREE_BRANCH_PREFIX);
+  if (branch.startsWith(WORKTREE_BRANCH_PREFIX)) return true;
+  return RUN_ONLY_BRANCH.test(branch) || ITEM_BRANCH.test(branch);
 }
 
-/** The run a branch belongs to, or null when it is somebody else's branch. */
+/** The run a branch belongs to, or null — including for a branch named after an item. */
 export function runIdFromBranch(branch: string): string | null {
-  if (!isRunBranch(branch)) return null;
-  const runId = branch.slice(WORKTREE_BRANCH_PREFIX.length);
-  return runId.length > 0 ? runId : null;
+  if (branch.startsWith(WORKTREE_BRANCH_PREFIX)) {
+    const runId = branch.slice(WORKTREE_BRANCH_PREFIX.length);
+    return runId.length > 0 ? runId : null;
+  }
+  const runOnly = /^chore\/run-([0-9A-HJKMNP-TV-Z]{26})\//.exec(branch);
+  return runOnly?.[1] ?? null;
+}
+
+/** The item a branch delivers, or null when it is not an item branch. */
+export function itemIdFromBranch(branch: string): string | null {
+  if (!ITEM_BRANCH.test(branch)) return null;
+  return branch.split('/')[1] ?? null;
 }
 
 // ---------------------------------------------------------------------------

@@ -484,13 +484,20 @@ export interface PipelineStep {
   outcome: Outcome;
   unmet: string[];
   /** What the session actually did: commands, files, skills, MCP calls. */
-  actions: Array<{ tool: string; detail: string }>;
+  actions: Array<{
+    tool: string;
+    detail: string;
+    /** Absent on steps recorded before refusals were kept; read it as `ok`. */
+    outcome?: 'ok' | 'refused' | 'failed';
+    note?: string;
+  }>;
   depth: number;
   startedAt: string;
   endedAt: string | null;
   durationMs: number | null;
   inputTokens: number;
   outputTokens: number;
+  costUsd: number | null;
 }
 
 export interface ContextFile {
@@ -1207,6 +1214,12 @@ export const api = {
     request<{ run: PipelineRun }>(`/api/pipelines/${encodeURIComponent(runId)}/rerun`, {
       method: 'POST',
     }),
+
+  resumePipeline: (runId: string, note?: string) =>
+    request<{ run: PipelineRun; reused: number }>(
+      `/api/pipelines/${encodeURIComponent(runId)}/resume`,
+      { method: 'POST', body: JSON.stringify({ note: note ?? '' }) },
+    ),
 
   cancelPipeline: (runId: string) =>
     request<{ run: PipelineRun }>(`/api/pipelines/${encodeURIComponent(runId)}`, {

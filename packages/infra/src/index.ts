@@ -5,6 +5,7 @@ export * from './credential-store.js';
 export * from './doc-store.js';
 export * from './event-file.js';
 export * from './executor.js';
+export * from './forge.js';
 export * from './fs-probe.js';
 export * from './git.js';
 export * from './claude-code-llm.js';

@@ -28,6 +28,7 @@ import {
   FileEventSink,
   FileLogSink,
   DefaultLlmFactory,
+  ForgeClient,
   GitCli,
   HttpProviderProbe,
   InMemoryEventBus,
@@ -137,6 +138,7 @@ export function createContainer(root: string, logLevel: LogLevel = 'warn'): Pomn
     events,
     logger,
     worktrees,
+    new ForgeClient(),
   );
   const chatStore = new SqliteChatStore(docs.absolute(layout.database));
   const chat = new ChatService(

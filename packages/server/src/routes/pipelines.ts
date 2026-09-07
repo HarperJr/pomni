@@ -96,6 +96,27 @@ export async function pipelineRoutes(
     return { run };
   });
 
+  /**
+   * Carry on an interrupted run, keeping what it already did.
+   *
+   * Distinct from rerun in the one way that matters to whoever presses it: the finished steps
+   * are answered from the last attempt rather than paid for again, and the run goes back to
+   * the worktree it was working in. The note says what changed in between.
+   */
+  app.post<{ Params: { runId: string }; Body: { note?: string } }>(
+    '/api/pipelines/:runId/resume',
+    async (request, reply) => {
+      const { run, completion, reused } = await container.pipelines.resume(
+        request.params.runId,
+        request.body?.note,
+      );
+
+      completion.catch((error: unknown) => container.logger.error('resume failed', error));
+      reply.code(202);
+      return { run, reused: reused ?? 0 };
+    },
+  );
+
   /** What a person is being asked, and their reply. A waiting run is polling for it. */
   app.get<{ Querystring: { project?: string } }>('/api/questions', async (request) => ({
     questions: await container.pipelines.openQuestions(request.query.project),

@@ -536,6 +536,16 @@ export function ConsolePage() {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['pipeline', runId] }),
   });
 
+  // Resume, unlike rerun, stays on this run: same id, same tree, same page.
+  const [note, setNote] = useState('');
+  const resume = useMutation({
+    mutationFn: () => api.resumePipeline(runId, note.trim() || undefined),
+    onSuccess: async () => {
+      setNote('');
+      await queryClient.invalidateQueries({ queryKey: ['pipeline', runId] });
+    },
+  });
+
   // Live events. The polling above keeps the tree honest even if a frame is missed; this is
   // what makes it feel immediate.
   useEffect(() => {
@@ -611,14 +621,25 @@ export function ConsolePage() {
             Stop
           </button>
         ) : (
-          <button
-            className="primary"
-            onClick={() => rerun.mutate()}
-            disabled={rerun.isPending}
-            title="Start again, telling the agents how this attempt ended"
-          >
-            {rerun.isPending ? 'Starting…' : 'Run again'}
-          </button>
+          <>
+            {resumable(data) && (
+              <button
+                onClick={() => resume.mutate()}
+                disabled={resume.isPending}
+                title="Carry on from what it already did, in the same worktree. Finished steps are not paid for twice."
+              >
+                {resume.isPending ? 'Resuming…' : 'Resume'}
+              </button>
+            )}
+            <button
+              className="primary"
+              onClick={() => rerun.mutate()}
+              disabled={rerun.isPending}
+              title="Start again from the task, telling the agents how this attempt ended"
+            >
+              {rerun.isPending ? 'Starting…' : 'Run again'}
+            </button>
+          </>
         )}
       </div>
 
@@ -631,6 +652,24 @@ export function ConsolePage() {
             {data.costUsd ? ` · $${data.costUsd.toFixed(3)}` : ''}
           </span>
         </div>
+
+        {resumable(data) && (
+          <div className="row resume-note">
+            <input
+              className="grow"
+              value={note}
+              onChange={(event) => setNote(event.target.value)}
+              placeholder="Fixed something yourself? Say what, and Resume will tell the agents."
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' && !resume.isPending) resume.mutate();
+              }}
+            />
+            <span className="dim">
+              {finishedSteps(data)} finished step{finishedSteps(data) === 1 ? '' : 's'} can be
+              reused
+            </span>
+          </div>
+        )}
 
         {data.questions
           .filter((question) => question.status === 'open')
@@ -682,6 +721,11 @@ export function ConsolePage() {
                       {OUTCOME_NOTE[step.outcome]}
                     </span>
                   )}
+                  {refusedCount(step) > 0 && (
+                    <span className="tag refused" title="The permission layer turned this away">
+                      {refusedCount(step)} refused
+                    </span>
+                  )}
                   <div className="dim truncate step-task">{firstLine(step.task)}</div>
                   <StepActions step={step} />
                   {step.unmet.map((entry, index) => (
@@ -690,7 +734,10 @@ export function ConsolePage() {
                     </div>
                   ))}
                 </span>
-                <span className="dim mono step-meta">{duration(step.durationMs)}</span>
+                <span className="dim mono step-meta">
+                  <span>{duration(step.durationMs)}</span>
+                  <StepSpend step={step} />
+                </span>
               </button>
             ))
           )}
@@ -788,6 +835,24 @@ export function ConsolePage() {
  * reported one paragraph is unreadable without it — you cannot tell whether it looked.
  */
 /**
+ * Whether carrying on is still on the table.
+ *
+ * The same rule the service enforces, said in the interface instead of in an error: a run that
+ * is still going has nothing to resume, and one that finished its work has nothing left to do.
+ */
+function resumable(run: { status: string; outcome: string }): boolean {
+  if (run.status === 'running') return false;
+  return !(run.status === 'passed' && run.outcome === 'done');
+}
+
+/** How many finished delegations a resume would answer from the ledger rather than re-run. */
+function finishedSteps(run: { steps: PipelineStep[] }): number {
+  return run.steps.filter(
+    (step) => step.parentStepId && step.status === 'done' && step.output,
+  ).length;
+}
+
+/**
  * What one agent ran, folded into that agent.
  *
  * It used to be one list of everything, under everything, which grew with the run until the
@@ -795,20 +860,61 @@ export function ConsolePage() {
  */
 function StepActions({ step }: { step: PipelineStep }) {
   if (step.actions.length === 0) return null;
+  const turned = refusedCount(step);
 
   return (
     <details className="step-actions">
       <summary className="dim">
         {step.actions.length} command{step.actions.length === 1 ? '' : 's'}
+        {turned > 0 ? ` · ${turned} refused` : ''}
       </summary>
       {step.actions.map((action, index) => (
-        <div className="action" key={index}>
+        <div className={`action${action.outcome && action.outcome !== 'ok' ? ' denied' : ''}`} key={index}>
           <span className={`tag action-${kindOf(action.tool)}`}>{action.tool}</span>
           <span className="mono dim truncate grow">{action.detail}</span>
+          {action.outcome === 'refused' && <span className="tag refused">refused</span>}
+          {action.outcome === 'failed' && <span className="tag outcome-blocked">failed</span>}
+          {action.note && <div className="action-note wrap">{action.note}</div>}
         </div>
       ))}
     </details>
   );
+}
+
+/**
+ * How many of this agent's calls the permission layer turned away.
+ *
+ * Worth a badge rather than a line inside a fold: a refused check is why a review has no
+ * build behind it, and it used to be visible only as a sentence the agent chose to write.
+ */
+function refusedCount(step: PipelineStep): number {
+  return step.actions.filter((action) => action.outcome === 'refused').length;
+}
+
+/**
+ * What one agent spent, on the agent itself.
+ *
+ * The run's own total says a pipeline cost eleven dollars; it never said which agent did.
+ * Per-step is the number a person can act on — it is the one that names the agent worth
+ * making cheaper.
+ */
+function StepSpend({ step }: { step: PipelineStep }) {
+  const spent = step.inputTokens + step.outputTokens;
+  if (spent === 0) return null;
+
+  return (
+    <span className="step-spend" title={`${tokens(spent)} tokens in and out`}>
+      {compact(spent)}
+      {step.costUsd ? ` · $${step.costUsd.toFixed(2)}` : ''}
+    </span>
+  );
+}
+
+/** 1 240 000 as `1.2M`: a step row has room for a magnitude, not for a figure. */
+function compact(value: number): string {
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
+  if (value >= 1_000) return `${Math.round(value / 1_000)}k`;
+  return String(value);
 }
 
 /** Tokens, in the shape a person reads: 1 234 567. */

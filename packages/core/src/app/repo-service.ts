@@ -23,6 +23,7 @@ import type {
   DocRef,
   DocStore,
   EventBus,
+  FastForwardResult,
   FsProbe,
   GitAuth,
   GitPort,
@@ -82,6 +83,17 @@ export interface UpdateRepoInput {
 export interface AddRepoResult {
   repo: Repo;
   completion: Promise<Repo>;
+}
+
+/**
+ * A synced repo, plus what the sync did to its base branch.
+ *
+ * `advanced` is null for a repo there was nothing to advance — a linked directory, or a clone
+ * that had to be made from scratch. Carried on the result rather than logged because the whole
+ * point of the change is that a person can see whether the code moved.
+ */
+export interface SyncedRepo extends ResolvedRepo {
+  advanced: FastForwardResult | null;
 }
 
 export class RepoService {
@@ -181,22 +193,44 @@ export class RepoService {
    * missing: Sync is the obvious button to press after a clone failed, and the useful
    * behaviour there is "try again", surfacing the real error if it fails again.
    */
-  async sync(projectId: string, repoId: string): Promise<ResolvedRepo> {
+  async sync(projectId: string, repoId: string): Promise<SyncedRepo> {
     const repo = await this.get(projectId, repoId);
 
     if (repo.source.kind === 'git' && !repo.workingDirExists) {
-      return this.workspace.resolve(await this.materialize(repo));
+      return { ...(await this.workspace.resolve(await this.materialize(repo))), advanced: null };
     }
 
-    if (repo.source.kind === 'git') {
-      try {
-        await this.git.fetch(repo.workingDir, await this.authFor(repo.source));
-      } catch (error) {
-        this.logger.warn(`fetch failed for ${projectId}/${repoId}`, error);
-      }
+    if (repo.source.kind !== 'git') {
+      return { ...(await this.workspace.resolve(await this.inspect(repo))), advanced: null };
     }
 
-    return this.workspace.resolve(await this.inspect(repo));
+    try {
+      await this.git.fetch(repo.workingDir, await this.authFor(repo.source));
+    } catch (error) {
+      this.logger.warn(`fetch failed for ${projectId}/${repoId}`, error);
+    }
+
+    // Fetching told the clone what the remote has; it did not move the clone onto it. Every
+    // run cuts its worktree from the clone's own base branch, so a clone that never advances
+    // is a clone every run starts behind — including behind work Pomni itself just merged.
+    const advanced = await this.git.fastForward(repo.workingDir, { branch: repo.source.ref });
+    if (advanced.status === 'diverged' || advanced.status === 'dirty') {
+      this.logger.warn(`${projectId}/${repoId}: ${advanced.detail}`);
+    }
+
+    return { ...(await this.workspace.resolve(await this.inspect(repo))), advanced };
+  }
+
+  /**
+   * The credential a repo's remote authenticates with, for callers outside this service that
+   * have to reach the same remote — pushing a run's branch, above all.
+   *
+   * Public where {@link authFor} is private because the argument is a repo rather than a
+   * source: a caller that had to build a `RepoSource` to ask this question would be one
+   * assembling a domain record from parts, which is how the two drift apart.
+   */
+  async authForRepo(repo: Pick<Repo, 'source'>): Promise<GitAuth | undefined> {
+    return this.authFor(repo.source);
   }
 
   /**

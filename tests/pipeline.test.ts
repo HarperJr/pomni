@@ -1,5 +1,10 @@
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import {
+  MAX_SIBLING_BYTES,
+  parseHandover,
+  withSiblings,
+} from '@pomni/core';
 import { createHarness, makeNodeRepo, type TestHarness } from './harness.js';
 
 let harness: TestHarness;
@@ -528,5 +533,83 @@ describe('resuming an interrupted run', () => {
     ).completion;
 
     await expect(harness.pipelines.resume(done.id)).rejects.toThrow(/finished/);
+  });
+});
+
+describe('what an agent is handed before it starts', () => {
+  const report = (agentId: string, answer: string) => ({
+    agentId,
+    agentName: agentId,
+    task: `do the ${agentId} part`,
+    answer,
+  });
+
+  it('adds nothing when nobody has reported yet', () => {
+    expect(withSiblings('Write the store.', [])).toBe('Write the store.');
+  });
+
+  it('tells a delegate what the ones before it decided', () => {
+    const composed = withSiblings('Write the web.', [
+      report('service-author', 'I named the fields turns and cacheReadTokens.'),
+    ]);
+
+    expect(composed).toContain('Write the web.');
+    expect(composed).toContain('already decided');
+    expect(composed).toContain('turns and cacheReadTokens');
+    // The task it was asked, so the reader can tell which part of the change this was.
+    expect(composed).toContain('do the service-author part');
+  });
+
+  it('carries the newest first and stops at its budget', () => {
+    const many = Array.from({ length: 12 }, (_, index) =>
+      report(`agent-${index}`, `line for ${index}${'x'.repeat(4000)}`),
+    );
+
+    const composed = withSiblings('Task.', many);
+
+    expect(Buffer.byteLength(composed, 'utf8')).toBeLessThan(MAX_SIBLING_BYTES + 1500);
+    // Newest first: the most recent decision is the one most likely to bind this agent.
+    expect(composed).toContain('agent-11');
+    expect(composed).not.toContain('agent-0 ');
+  });
+});
+
+describe('an agent handing something to the rest of the run', () => {
+  it('reads a published file out of an answer', () => {
+    const answer = [
+      'I settled the shape.',
+      '',
+      '```handover field-names.md',
+      'turns, cacheReadTokens, freshInputTokens',
+      '```',
+      '',
+      'That is all.',
+    ].join('\n');
+
+    expect(parseHandover(answer)).toEqual([
+      { name: 'field-names.md', content: 'turns, cacheReadTokens, freshInputTokens' },
+    ]);
+  });
+
+  it('ignores an unnamed, an empty or an unterminated block', () => {
+    expect(parseHandover('```handover\nno name\n```')).toEqual([]);
+    expect(parseHandover('```handover a.md\n\n```')).toEqual([]);
+    expect(parseHandover('```handover a.md\nnever closed')).toEqual([]);
+  });
+
+  it('reads several, and leaves ordinary fences alone', () => {
+    const answer = [
+      '```ts',
+      'const notAHandover = true;',
+      '```',
+      '```handover one.md',
+      'first',
+      '```',
+      '```handover two.md',
+      'second',
+      '```',
+    ].join('\n');
+
+    expect(parseHandover(answer).map((file) => file.name)).toEqual(['one.md', 'two.md']);
   });
 });

@@ -110,6 +110,29 @@ export interface WorktreeRef {
   prunable: boolean;
 }
 
+/**
+ * What a fast-forward found. Every arm is a fact about the repository, not an error:
+ * a diverged or dirty clone is a normal state that has to be reported rather than resolved.
+ */
+export interface FastForwardResult {
+  status: 'advanced' | 'current' | 'diverged' | 'dirty' | 'no-upstream' | 'unavailable';
+  branch: string | null;
+  upstream: string | null;
+  /** HEAD before and after. Equal whenever `status` is not `advanced`. */
+  from: string | null;
+  to: string | null;
+  /** One sentence a person reads. Always set; the status alone does not explain itself. */
+  detail: string;
+}
+
+export interface CommitResult {
+  /** False when the tree was clean — an empty commit is never made. */
+  committed: boolean;
+  head: string | null;
+  /** Set when git had no identity of its own and Pomni supplied one. */
+  identityBorrowed?: boolean;
+}
+
 export interface GitPort {
   isAvailable(): Promise<boolean>;
   isRepo(dir: string): Promise<boolean>;
@@ -121,6 +144,30 @@ export interface GitPort {
   testRemote(url: string, auth?: GitAuth): Promise<void>;
   /** Files changed in the working copy, as `{ path, change }`. Empty when clean. */
   changes(dir: string): Promise<Array<{ path: string; change: string }>>;
+  /** True when `refs/heads/<branch>` exists in this repository. */
+  branchExists(dir: string, branch: string): Promise<boolean>;
+  /**
+   * Stage everything and commit it. Returns `committed: false` on a clean tree rather than
+   * making an empty commit — an empty commit is a claim that a run did work when it did not.
+   * Throws GitError when git refuses for any other reason.
+   */
+  commit(dir: string, options: { message: string }): Promise<CommitResult>;
+  /**
+   * `git push` one branch. Throws GitError with the forge's own words on rejection, so a
+   * caller can report it without guessing why.
+   */
+  push(
+    dir: string,
+    options: { branch: string; remote?: string; setUpstream?: boolean; auth?: GitAuth },
+  ): Promise<void>;
+  /**
+   * Advance a branch to its upstream, and only ever that.
+   *
+   * Never merges, never resets: a diverged clone holds commits that exist nowhere else, and
+   * being out of date is the cheaper of the two failures. Never throws — every outcome is a
+   * `FastForwardResult` the caller reports.
+   */
+  fastForward(dir: string, options?: { branch?: string }): Promise<FastForwardResult>;
   /** True when this git can do worktrees at all (2.5+). Implementations may cache per process. */
   supportsWorktrees(): Promise<boolean>;
   /** `git -C repoDir worktree add -b <branch> <path> <baseRef>`. Throws GitError. */
@@ -128,6 +175,12 @@ export interface GitPort {
     repoDir: string,
     options: { path: string; branch: string; baseRef: string },
   ): Promise<{ head: string }>;
+  /**
+   * `git -C repoDir worktree add <path> <branch>` — the same directory, back on the branch it
+   * already has. Attaching rather than creating is what lets a resumed run carry on in its own
+   * tree; `addWorktree` always passes `-b` and so can only ever be a first attempt.
+   */
+  attachWorktree(repoDir: string, options: { path: string; branch: string }): Promise<{ head: string }>;
   /**
    * `git -C repoDir worktree remove <path>`, then delete `options.deleteBranch` if given.
    * Never uses --force: git refusing on a dirty tree is the mechanism by which uncommitted
@@ -149,6 +202,42 @@ export interface GitPort {
  */
 export interface ProviderProbe {
   probe(url: string): Promise<'github' | 'gitlab' | 'bitbucket' | 'generic'>;
+}
+
+// ---------------------------------------------------------------------------
+// Forge
+// ---------------------------------------------------------------------------
+
+export interface OpenMergeRequestInput {
+  /** The repository's remote url. What the API host and the project path are derived from. */
+  remote: string;
+  provider: 'github' | 'gitlab' | 'bitbucket' | 'generic';
+  auth?: GitAuth;
+  sourceBranch: string;
+  /** Null asks the forge for its own default branch, rather than guessing at `main`. */
+  targetBranch: string | null;
+  title: string;
+  description: string;
+}
+
+export interface MergeRequestRef {
+  url: string;
+  /** True when this call created it; false when one for the branch already existed. */
+  created: boolean;
+  /** The forge's own number, when it has one. */
+  number: number | null;
+}
+
+/**
+ * Opens a merge request through a forge's API.
+ *
+ * Allowed to answer null for a forge it does not know, a remote it cannot parse, or a
+ * credential that is missing — every one of which is an ordinary case with a good fallback
+ * (the url a person opens themselves), not an error. Throws only when the forge answered and
+ * the answer was a refusal worth reporting.
+ */
+export interface ForgePort {
+  openMergeRequest(input: OpenMergeRequestInput): Promise<MergeRequestRef | null>;
 }
 
 // ---------------------------------------------------------------------------

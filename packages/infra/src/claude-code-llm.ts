@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   mcpConfig,
+  SHELL_TOOLS,
   toolGrants,
   verifyGrants,
   type AgentAction,
@@ -42,13 +43,43 @@ function sandbox(): string {
 const FILE_TOOLS = ['Write', 'Edit', 'MultiEdit', 'NotebookEdit'];
 
 /**
- * The shell, for an agent allowed to run things.
+ * The shells, for an agent allowed to run things.
  *
  * Headless Claude Code lets trivial commands through and gates the rest, so an agent could
  * `echo` but not `npm test` — it would write a change, be refused the build, and report the
- * refusal. `run` on an agent means it may run commands; this is what says so.
+ * refusal. `run` on an agent means it may run commands; this is what says so. Both shells,
+ * because a Windows session has both and picks between them on its own.
  */
-const SHELL_TOOLS = ['Bash'];
+const SHELLS = [...SHELL_TOOLS];
+
+/**
+ * One argument, as the shell will hand it back.
+ *
+ * Node does not quote when `shell` is used — it joins the array with spaces and lets the
+ * shell re-split it. So `Bash(npm run typecheck)` arrived at the CLI as three arguments,
+ * `--allowedTools` swallowed the pieces as three nonsense tool names, and the permission it
+ * was meant to grant was never granted. Every verify-only agent on Windows was refused its
+ * own project's checks, and reported the refusal as its finding.
+ *
+ * Plain values are left alone so the command line stays readable in a process list; anything
+ * else is wrapped, with embedded quotes escaped the way an argv parser reads them back.
+ */
+export function quoteForShell(argument: string): string {
+  if (argument === '') return '""';
+  if (/^[A-Za-z0-9_@:,.=+\/\\-]+$/.test(argument)) return argument;
+
+  // Backslashes are literal until they meet a quote, where each one has to be doubled or it
+  // escapes the quote instead of itself. A trailing run would otherwise escape the closer.
+  const escaped = argument
+    .replace(/(\\*)"/g, '$1$1\\"')
+    .replace(/(\\+)$/, '$1$1');
+  return `"${escaped}"`;
+}
+
+/** The argument list as it must be handed to {@link spawn}, for this platform. */
+export function spawnArgs(args: string[], platform: NodeJS.Platform = process.platform): string[] {
+  return platform === 'win32' ? args.map(quoteForShell) : args;
+}
 
 /** Tools a pure-text task has no use for, and which only invite the session to wander. */
 const TEXT_ONLY_DISALLOWED = [
@@ -80,7 +111,7 @@ export function sessionPermissions(options: {
   return [
     ...(options.allowedTools ?? []),
     ...(options.files ? FILE_TOOLS : []),
-    ...(options.run ? SHELL_TOOLS : []),
+    ...(options.run ? SHELLS : []),
     // Named commands, not a shell. Redundant when `run` is on, and harmless there.
     ...(options.run ? [] : verifyGrants(options.verify ?? [])),
     ...toolGrants(options.tools ?? []),
@@ -289,7 +320,7 @@ export class ClaudeCodeLlm implements LlmPort {
     stdin?: string,
   ): Promise<string> {
     return new Promise<string>((resolve, reject) => {
-      const child = spawn('claude', args, {
+      const child = spawn('claude', spawnArgs(args), {
         // Never the process's own cwd: that would be the Pomni repo, whose hooks and
         // CLAUDE.md would be loaded into a session that has nothing to do with them.
         cwd: this.options.cwd ?? sandbox(),
@@ -370,6 +401,9 @@ export class ClaudeCodeLlm implements LlmPort {
  */
 export function readStream(raw: string): { result: ClaudeResult; actions: AgentAction[] } {
   const actions: AgentAction[] = [];
+  // A result names the call it answers, and the two arrive in different frames, so the calls
+  // have to be findable by id when their answer turns up.
+  const byId = new Map<string, AgentAction>();
   let result: ClaudeResult | null = null;
 
   for (const line of raw.split(/\r?\n/)) {
@@ -387,13 +421,68 @@ export function readStream(raw: string): { result: ClaudeResult; actions: AgentA
 
     for (const block of frame.message?.content ?? []) {
       if (block.type === 'tool_use' && block.name) {
-        actions.push({ tool: block.name, detail: describeCall(block.name, block.input ?? {}) });
+        const action: AgentAction = {
+          tool: block.name,
+          detail: describeCall(block.name, block.input ?? {}),
+          outcome: 'ok',
+        };
+        actions.push(action);
+        if (block.id) byId.set(block.id, action);
+        continue;
       }
+
+      if (block.type !== 'tool_result' || !block.tool_use_id) continue;
+
+      const action = byId.get(block.tool_use_id);
+      if (!action) continue;
+
+      const said = resultText(block.content);
+      const wasRefused = refused(said);
+      if (block.is_error !== true && !wasRefused) continue;
+
+      action.outcome = wasRefused ? 'refused' : 'failed';
+      action.note = firstLine(said);
     }
   }
 
   // No result line at all: the CLI printed something else, which is still an answer.
   return { result: result ?? parse(raw), actions };
+}
+
+/**
+ * Whether this is the permission layer talking, rather than the command failing.
+ *
+ * Worth telling apart: a failing build is the answer the agent went looking for, and a
+ * refused one means it was never allowed to ask. The words are the CLI's own.
+ */
+function refused(said: string): boolean {
+  // 'multiple operations' is the permission layer refusing a compound command, and it is the
+  // most common refusal an agent with named checks meets — it reaches for `cd … && npm test`
+  // and is turned away for the shape of the command rather than for the command. Read as a
+  // failure it looks like a broken build, which is the wrong thing to go and fix.
+  return /permission|not allowed|haven't granted|have not granted|denied|requires approval|multiple operations|requested permissions/i.test(
+    said,
+  );
+}
+
+/** A tool result is a string, or the blocks a richer tool answered with. */
+function resultText(content: unknown): string {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+
+  return content
+    .map((block) =>
+      block && typeof block === 'object' && typeof (block as { text?: unknown }).text === 'string'
+        ? (block as { text: string }).text
+        : '',
+    )
+    .join(' ')
+    .trim();
+}
+
+function firstLine(said: string): string {
+  const line = said.split(/\r?\n/).find((candidate) => candidate.trim().length > 0) ?? '';
+  return line.trim().slice(0, 200);
 }
 
 /** The part of a tool call worth reading back later. */
@@ -422,7 +511,15 @@ function describeCall(tool: string, input: Record<string, unknown>): string {
 interface StreamFrame {
   type?: string;
   message?: {
-    content?: Array<{ type?: string; name?: string; input?: Record<string, unknown> }>;
+    content?: Array<{
+      type?: string;
+      id?: string;
+      name?: string;
+      input?: Record<string, unknown>;
+      tool_use_id?: string;
+      is_error?: boolean;
+      content?: unknown;
+    }>;
   };
 }
 

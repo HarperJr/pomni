@@ -1,6 +1,7 @@
+import { spawnSync } from 'node:child_process';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mcpConfig, toolBriefing, toolGrants } from '@pomni/core';
-import { readStream, sessionPermissions } from '@pomni/infra';
+import { quoteForShell, readStream, sessionPermissions, spawnArgs } from '@pomni/infra';
 import { verifyGrants } from '@pomni/core';
 import { createHarness, type TestHarness } from './harness.js';
 
@@ -231,10 +232,65 @@ describe('reading a streamed session', () => {
 
     expect(result.result).toBe('Finished.');
     expect(actions).toEqual([
-      { tool: 'Bash', detail: 'npm run typecheck' },
-      { tool: 'Skill', detail: 'code-review' },
-      { tool: 'Edit', detail: 'a/b.ts' },
+      { tool: 'Bash', detail: 'npm run typecheck', outcome: 'ok' },
+      { tool: 'Skill', detail: 'code-review', outcome: 'ok' },
+      { tool: 'Edit', detail: 'a/b.ts', outcome: 'ok' },
     ]);
+  });
+
+  it('records a command the permission layer turned away', () => {
+    const raw = [
+      line({
+        type: 'assistant',
+        message: {
+          content: [
+            { type: 'tool_use', id: 'call_1', name: 'Bash', input: { command: 'npm run typecheck' } },
+          ],
+        },
+      }),
+      line({
+        type: 'user',
+        message: {
+          content: [
+            {
+              type: 'tool_result',
+              tool_use_id: 'call_1',
+              is_error: true,
+              content: 'Claude requested permissions to use Bash, but you have not granted it yet.',
+            },
+          ],
+        },
+      }),
+      line({ type: 'result', result: 'I could not build it.' }),
+    ].join('\n');
+
+    const [action] = readStream(raw).actions;
+
+    expect(action?.outcome).toBe('refused');
+    expect(action?.note).toContain('permissions');
+  });
+
+  it('tells a failing command apart from a refused one', () => {
+    const raw = [
+      line({
+        type: 'assistant',
+        message: {
+          content: [{ type: 'tool_use', id: 'c', name: 'Bash', input: { command: 'npm test' } }],
+        },
+      }),
+      line({
+        type: 'user',
+        message: {
+          content: [
+            { type: 'tool_result', tool_use_id: 'c', is_error: true, content: '3 tests failed' },
+          ],
+        },
+      }),
+    ].join('\n');
+
+    // A failing build is the answer the agent went looking for; only the permission layer
+    // saying no means it never got to ask.
+    expect(readStream(raw).actions[0]?.outcome).toBe('failed');
   });
 
   it('loses one frame, not the answer, when a line is malformed', () => {
@@ -248,10 +304,14 @@ describe('reading a streamed session', () => {
 });
 
 describe('verifying without a shell', () => {
-  it('turns the repos own checks into exact permissions', () => {
+  it('turns the repos own checks into exact permissions, for every shell it has', () => {
+    // Windows hands the session a PowerShell tool as well; an agent refused on Bash simply
+    // tries the other one, and used to be refused there for a reason nobody had told it.
     expect(verifyGrants(['npm run typecheck', 'npm test'])).toEqual([
       'Bash(npm run typecheck)',
+      'PowerShell(npm run typecheck)',
       'Bash(npm test)',
+      'PowerShell(npm test)',
     ]);
   });
 
@@ -263,13 +323,56 @@ describe('verifying without a shell', () => {
   it('grants the checks and no shell', () => {
     const permissions = sessionPermissions({ verify: ['npm test'] });
 
-    expect(permissions).toEqual(['Bash(npm test)']);
+    expect(permissions).toEqual(['Bash(npm test)', 'PowerShell(npm test)']);
     expect(permissions).not.toContain('Bash');
+    expect(permissions).not.toContain('PowerShell');
   });
 
   it('does not repeat them for an agent that already has a shell', () => {
     const permissions = sessionPermissions({ run: true, verify: ['npm test'] });
 
-    expect(permissions).toEqual(['Bash']);
+    expect(permissions).toEqual(['Bash', 'PowerShell']);
+  });
+});
+
+describe('handing arguments to the CLI', () => {
+  // The bug this covers cost every verify-only agent its checks: `shell: true` is needed on
+  // Windows to resolve `claude.cmd`, Node does not quote when a shell is used, and
+  // `Bash(npm run typecheck)` arrived as three arguments. The permission was never granted,
+  // and the only sign of it was an agent reporting that it had been refused.
+  const awkward = [
+    'Bash(npm run typecheck)',
+    'PowerShell(npm run test)',
+    'Write',
+    'mcp__pomni__*',
+    'C:/a path/with spaces/repo',
+    'node -e "console.log(1)"',
+  ];
+
+  it('gives back exactly the arguments it was given, through a real spawn', () => {
+    const probe = 'console.log(JSON.stringify(process.argv.slice(1)))';
+    const result = spawnSync('node', spawnArgs(['-e', probe, ...awkward]), {
+      shell: process.platform === 'win32',
+      encoding: 'utf8',
+    });
+
+    expect(JSON.parse(result.stdout.trim())).toEqual(awkward);
+  });
+
+  it('leaves a plain value alone, so the command line stays readable', () => {
+    expect(quoteForShell('--allowedTools')).toBe('--allowedTools');
+    expect(quoteForShell('Write')).toBe('Write');
+    // A glob is wrapped rather than trusted: cmd does not expand it, but nothing here should
+    // depend on which shell is on the other side.
+    expect(quoteForShell('mcp__pomni__*')).toBe('"mcp__pomni__*"');
+  });
+
+  it('quotes anything a shell would split or read as syntax', () => {
+    expect(quoteForShell('Bash(npm run test)')).toBe('"Bash(npm run test)"');
+    expect(quoteForShell('')).toBe('""');
+  });
+
+  it('passes argv straight through where no shell is involved', () => {
+    expect(spawnArgs(awkward, 'linux')).toEqual(awkward);
   });
 });

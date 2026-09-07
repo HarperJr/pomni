@@ -1,5 +1,8 @@
 import { existsSync } from 'node:fs';
-import { writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { tmpdir } from 'node:os';
+import { promisify } from 'node:util';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { runBranch } from '@pomni/core';
@@ -15,6 +18,10 @@ import { createHarness, gitAvailable, makeGitRepo, type TestHarness } from './ha
  * real git can settle. Skipped, loudly, on a machine with no git on PATH.
  */
 const HAS_GIT = await gitAvailable();
+
+/** Raw git, for the setup these tests need and the service deliberately does not expose. */
+const exec = promisify(execFile);
+const git = (cwd: string, ...args: string[]) => exec('git', args, { cwd });
 
 let harness: TestHarness<GitCli>;
 
@@ -114,6 +121,9 @@ describe.skipIf(!HAS_GIT)('real git', () => {
 
   it('keeps a worktree real git refuses to remove, and removes a clean one', async () => {
     const repo = await seed();
+    // Only an uncommitted tree is one git will refuse. With committing on — the default — the
+    // work goes onto the branch and the directory comes away, which the next test covers.
+    await harness.projects.update('acme', { policy: { autoCommit: false } });
 
     const taken: string[] = [];
     harness.events.subscribe((event) => {
@@ -155,6 +165,267 @@ describe.skipIf(!HAS_GIT)('real git', () => {
     expect((await harness.git.listWorktrees(repo.dir)).map((ref) => ref.path)).not.toContain(
       cleanPath,
     );
+  });
+
+  it('commits what a run wrote onto a branch named after the item it delivers', async () => {
+    const repo = await seed();
+    const item = await harness.backlog.create('acme', { title: 'Rewrite the checkout', type: 'bug' });
+
+    const taken: string[] = [];
+    harness.events.subscribe((event) => {
+      if (event.type === 'worktree.taken') taken.push(event.path);
+    });
+
+    harness.llm.replies = [askHuman('hold'), 'Done.'];
+    const { run, completion } = await harness.pipelines.start({
+      projectId: 'acme',
+      task: 'Rewrite the checkout',
+      itemId: item.id,
+    });
+    const [questionId] = await waitForQuestions(1);
+
+    const path = taken[0] as string;
+    // A branch a person can read, and one that says what kind of change this is. `bug` is the
+    // backlog's word for it; `fix` is the branch list's.
+    const branch = (await harness.worktrees.list({ runId: run.id }))[0]?.branch;
+    expect(branch).toBe(`fix/${item.id}/main`);
+    expect((await git(path, 'rev-parse', '--abbrev-ref', 'HEAD')).stdout.trim()).toBe(branch);
+
+    await writeFile(join(path, 'delivered.ts'), 'export const whole = true;\n');
+    await harness.pipelines.answer(questionId as string, 'Carry on.');
+    await completion;
+
+    // The whole point, against real git: the branch is one commit ahead of where it started,
+    // and the file is in that commit. Before this, every run branch was 0 commits ahead of the
+    // base and the work existed only as loose files in a gitignored directory.
+    const ahead = (await git(repo.dir, 'rev-list', '--count', `main..${branch}`)).stdout.trim();
+    expect(ahead).toBe('1');
+
+    const files = (await git(repo.dir, 'show', '--name-only', '--format=', branch)).stdout;
+    expect(files).toContain('delivered.ts');
+    const message = (await git(repo.dir, 'log', '-1', '--format=%B', branch)).stdout;
+    expect(message).toContain(item.id);
+    expect(message).toContain(run.id);
+
+    // Committed means clean, so git no longer refuses the directory — but `branch -d` refuses
+    // an unmerged branch, which is what keeps the work after the directory is gone.
+    expect(existsSync(path)).toBe(false);
+    const branches = (await git(repo.dir, 'branch', '--list', branch as string)).stdout;
+    expect(branches.trim()).toContain(branch);
+
+    // And the item points at where its work is, instead of leaving you to find the branch.
+    expect((await harness.backlog.get('acme', item.id)).branch).toBe(branch);
+  });
+});
+
+describe.skipIf(!HAS_GIT)('putting a resumed run back where it was', () => {
+  beforeEach(async () => {
+    harness = await createHarness({ git: new GitCli() });
+  });
+
+  afterEach(async () => {
+    await harness.cleanup();
+  });
+
+  /**
+   * The failure this covers is silent, which is what makes it expensive. `take` only ever
+   * creates, so on a second attempt the path and the branch both exist, `git worktree add -b`
+   * fails, and the catch hands back the shared repo directory. The run then replays answers
+   * that describe files sitting on another branch entirely.
+   */
+  it('reuses the very worktree the run left behind', async () => {
+    const repo = await seed();
+    const repos = await harness.repos.listResolved('acme');
+    const runId = '01M1RESUMEREUSE000000000AA';
+
+    const taken = await harness.worktrees.take('acme', runId, repos);
+    const path = taken.dirs[repo.id] as string;
+    await writeFile(join(path, 'half-done.ts'), 'export const half = true;\n');
+
+    // Dirty, so git refuses to remove it and the row is kept rather than deleted.
+    await harness.worktrees.release(runId);
+    expect((await harness.worktrees.list({ runId }))[0]?.status).toBe('kept');
+
+    const back = await harness.worktrees.reclaim('acme', runId, repos);
+
+    expect(back.dirs[repo.id]).toBe(path);
+    expect(back.reclaimed).toEqual([repo.id]);
+    expect(back.lost).toEqual([]);
+    expect(back.fallbacks).toEqual([]);
+    expect(existsSync(join(path, 'half-done.ts'))).toBe(true);
+    expect((await harness.worktrees.list({ runId }))[0]?.status).toBe('active');
+  });
+
+  it('rebuilds a deleted worktree from the run branch, not from the base', async () => {
+    const repo = await seed();
+    const repos = await harness.repos.listResolved('acme');
+    const runId = '01M1RESUMEREBUILD0000000BB';
+
+    const taken = await harness.worktrees.take('acme', runId, repos);
+    const path = taken.dirs[repo.id] as string;
+    await writeFile(join(path, 'committed.ts'), 'export const kept = true;\n');
+    await git(path, 'add', '-A');
+    await git(path, 'commit', '-m', 'work');
+
+    await rm(path, { recursive: true, force: true });
+
+    const back = await harness.worktrees.reclaim('acme', runId, repos);
+
+    expect(back.dirs[repo.id]).toBe(path);
+    expect(back.reclaimed).toEqual([repo.id]);
+    expect(back.lost).toEqual([]);
+    // From the branch: the commit the run made is there. From the base ref it would not be.
+    expect(existsSync(join(path, 'committed.ts'))).toBe(true);
+  });
+
+  it('says which repo lost its tree instead of quietly using the shared one', async () => {
+    const repo = await seed();
+    const repos = await harness.repos.listResolved('acme');
+    const runId = '01M1RESUMELOST000000000CC';
+
+    const taken = await harness.worktrees.take('acme', runId, repos);
+    const path = taken.dirs[repo.id] as string;
+    await rm(path, { recursive: true, force: true });
+    // The branch is what makes the work reachable; without it there is nothing to go back to.
+    await git(repo.dir, 'worktree', 'prune');
+    await git(repo.dir, 'branch', '-D', runBranch(runId));
+
+    const back = await harness.worktrees.reclaim('acme', runId, repos);
+
+    expect(back.lost).toEqual([repo.id]);
+    expect(back.dirs[repo.id]).toBe(repo.dir);
+    expect(back.fallbacks[0]?.reason).toContain(runBranch(runId));
+  });
+});
+
+/**
+ * Advancing a clone onto what was merged.
+ *
+ * Only real git can settle these: what counts as a fast-forward, what `--ff-only` refuses, and
+ * whether a dirty tree is one it will move. A fake that agreed with a wrong implementation here
+ * would leave every run starting from stale code, which is the failure this exists to prevent.
+ */
+describe.skipIf(!HAS_GIT)('advancing a clone to its upstream', () => {
+  let dir: string;
+  let origin: string;
+  let clone: string;
+  const cli = new GitCli();
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'pomni-ff-'));
+    origin = await makeGitRepo(join(dir, 'origin'));
+    clone = join(dir, 'clone');
+    await exec('git', ['clone', origin, clone]);
+    await git(clone, 'config', 'user.email', 'tests@pomni.invalid');
+    await git(clone, 'config', 'user.name', 'Pomni Tests');
+    await git(clone, 'config', 'commit.gpgsign', 'false');
+  });
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  });
+
+  /** A commit on the origin, as a merge into its default branch would leave one. */
+  async function commitUpstream(name: string): Promise<void> {
+    await writeFile(join(origin, name), 'merged\n');
+    await git(origin, 'add', '-A');
+    await git(origin, 'commit', '-m', `add ${name}`);
+  }
+
+  it('moves the clone onto what the remote gained, which fetching alone never did', async () => {
+    await commitUpstream('merged.txt');
+    await cli.fetch(clone);
+
+    // Fetching is where this used to stop: origin/main knew about the commit, main did not,
+    // and every worktree was cut from main.
+    expect(existsSync(join(clone, 'merged.txt'))).toBe(false);
+
+    const result = await cli.fastForward(clone, { branch: 'main' });
+    expect(result.status).toBe('advanced');
+    expect(result.upstream).toBe('origin/main');
+    expect(result.from).not.toBe(result.to);
+    expect(existsSync(join(clone, 'merged.txt'))).toBe(true);
+
+    // Asked twice, it says so rather than reporting a second advance.
+    expect((await cli.fastForward(clone, { branch: 'main' })).status).toBe('current');
+  });
+
+  it('refuses a clone that has commits of its own, rather than merging or resetting', async () => {
+    await commitUpstream('theirs.txt');
+    await writeFile(join(clone, 'mine.txt'), 'local\n');
+    await git(clone, 'add', '-A');
+    await git(clone, 'commit', '-m', 'mine');
+    await cli.fetch(clone);
+
+    const result = await cli.fastForward(clone, { branch: 'main' });
+    expect(result.status).toBe('diverged');
+    expect(result.from).toBe(result.to);
+    // The local commit is still the only copy of itself, which is the whole reason to refuse.
+    expect(existsSync(join(clone, 'mine.txt'))).toBe(true);
+    expect(existsSync(join(clone, 'theirs.txt'))).toBe(false);
+  });
+
+  it('leaves a dirty clone alone and names what it found', async () => {
+    await commitUpstream('merged.txt');
+    await cli.fetch(clone);
+    await writeFile(join(clone, 'package.json'), '{"name":"edited"}');
+
+    const result = await cli.fastForward(clone, { branch: 'main' });
+    expect(result.status).toBe('dirty');
+    expect(result.detail).toContain('package.json');
+    expect(existsSync(join(clone, 'merged.txt'))).toBe(false);
+  });
+
+  it('commits and pushes a branch the remote did not have', async () => {
+    await git(clone, 'checkout', '-b', 'feature/ACME-1/main');
+    await writeFile(join(clone, 'delivered.ts'), 'export const whole = true;\n');
+
+    const committed = await cli.commit(clone, { message: 'ACME-1: deliver\n\nPomni-Run: 01X' });
+    expect(committed.committed).toBe(true);
+
+    // A clean tree makes no commit rather than an empty one: an empty commit is a claim that
+    // a run did work when it did not.
+    expect((await cli.commit(clone, { message: 'again' })).committed).toBe(false);
+
+    await cli.push(clone, { branch: 'feature/ACME-1/main', setUpstream: true });
+
+    // The branch is on the remote — the thing that was missing, and without which there is
+    // nothing to open a merge request against.
+    const remoteBranches = (await git(origin, 'branch', '--list')).stdout;
+    expect(remoteBranches).toContain('feature/ACME-1/main');
+    const files = (
+      await git(origin, 'show', '--name-only', '--format=', 'feature/ACME-1/main')
+    ).stdout;
+    expect(files).toContain('delivered.ts');
+  });
+
+  it('says what the remote said when it refuses a push', async () => {
+    await git(clone, 'checkout', '-b', 'feature/ACME-2/main');
+    await writeFile(join(clone, 'a.txt'), 'a\n');
+    await cli.commit(clone, { message: 'first' });
+    await cli.push(clone, { branch: 'feature/ACME-2/main' });
+
+    // The remote moves on, and this clone does not know. A push that would lose that commit
+    // has to be refused with words a person can act on.
+    await git(origin, 'checkout', 'feature/ACME-2/main');
+    await writeFile(join(origin, 'b.txt'), 'b\n');
+    await git(origin, 'add', '-A');
+    await git(origin, 'commit', '-m', 'theirs');
+    await git(origin, 'checkout', 'main');
+
+    await writeFile(join(clone, 'c.txt'), 'c\n');
+    await cli.commit(clone, { message: 'second' });
+
+    await expect(cli.push(clone, { branch: 'feature/ACME-2/main' })).rejects.toThrow(
+      /fetch and rebase/i,
+    );
+  });
+
+  it('says so when a branch tracks nothing at all', async () => {
+    await git(clone, 'checkout', '-b', 'orphan');
+    const result = await cli.fastForward(clone, { branch: 'orphan' });
+    expect(result.status).toBe('no-upstream');
+    expect(result.detail).toContain('orphan');
   });
 });
 

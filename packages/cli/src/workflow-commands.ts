@@ -559,13 +559,21 @@ ${item.body}`;
     );
 
   task
-    .command('resume <id>')
+    .command('resume <id> [note...]')
     .description('carry on an interrupted run, keeping what it already did')
-    .action(async (id: string) => {
+    .action(async (id: string, note: string[]) => {
       const container = await open();
-      const { run, completion } = await container.pipelines.resume(id);
+      const { run, completion, reused } = await container.pipelines.resume(id, note.join(' '));
 
       console.log(`${style.cyan('resumed')} ${style.bold(run.id)}  ${run.workflowName}`);
+      // Offered, not spent: the ledger answers a delegation only when the orchestrator asks
+      // for it in the same words, so claiming these were reused would be a claim we cannot
+      // make until the run is over.
+      console.log(
+        style.dim(
+          `  ${reused ?? 0} step${reused === 1 ? '' : 's'} can be answered from the last attempt`,
+        ),
+      );
       console.log(
         style.dim(`  watch it:  http://localhost:7777/p/${run.projectId}/console/${run.id}`),
       );
