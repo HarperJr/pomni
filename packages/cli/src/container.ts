@@ -118,7 +118,7 @@ export function createContainer(root: string, logLevel: LogLevel = 'warn'): Pomn
   );
 
   const doctor = new DoctorService(projects, repos, executor, git, worktrees);
-  const backlog = new BacklogService(docs, projects, runStore, lock, clock, events, worktrees);
+  const backlog = new BacklogService(docs, projects, runStore, lock, clock, events, worktrees, logger);
   const providerService = new ProviderService(docs, new DefaultLlmFactory(), clock, events);
   const workflows = new WorkflowService(docs, projects, providerService, clock, events);
   const tools = new ToolService(docs, projects, credentials, executor, clock, events, logger);

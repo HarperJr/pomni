@@ -38,7 +38,7 @@ import { layout } from '../domain/layout.js';
 import { flowOf, type Project } from '../domain/project.js';
 import type { Repo } from '../domain/repo.js';
 import { planWaves, type WavePlan } from '../domain/schedule.js';
-import type { Clock, DocRef, DocStore, EventBus, Lock, RunStore } from '../ports/index.js';
+import type { Clock, DocRef, DocStore, EventBus, Lock, Logger, RunStore } from '../ports/index.js';
 import type { ProjectService } from './project-service.js';
 import type { WorktreeService } from './worktree-service.js';
 
@@ -97,6 +97,7 @@ export class BacklogService {
     private readonly clock: Clock,
     private readonly events: EventBus,
     private readonly worktrees: WorktreeService,
+    private readonly logger: Logger,
   ) {}
 
   /**
@@ -111,8 +112,8 @@ export class BacklogService {
       const project = await this.projects.getRef(projectId);
       await this.assertReposExist(projectId, input.repos ?? []);
 
-      const id = `${project.data.itemPrefix}-${project.data.counters.nextItem}`;
       const existing = await this.list({ projectId });
+      const id = await this.issueId(projectId, project.data, existing);
       const now = this.clock.iso();
       // Where a new item starts is the flow's business, not a literal 'backlog'.
       const initial = flowOf(project.data).initial;
@@ -141,6 +142,45 @@ export class BacklogService {
       this.events.emit({ type: 'item.created', projectId, itemId: id });
       return item;
     });
+  }
+
+  /**
+   * The id for a new item, and a refusal to reissue one that is already on disk.
+   *
+   * `counters.nextItem` is the intent, but `.pomni/` is a tracked directory in the repository
+   * Pomni manages, so git rewrites it: a `checkout` of an older branch moves the counter
+   * backwards, silently and consistently with the files beside it. The directory is then the
+   * better witness of how far the numbering actually got, and the counter is caught up to it.
+   *
+   * This does not close the hole, and the item says so. When git removed the *files* too — the
+   * way it did on the checkout that produced this guard — the directory has forgotten as well,
+   * and nothing inside the repository remembers. Only state that lives outside the repository
+   * could, which is the decision POMN-57 asks for and does not take here.
+   */
+  private async issueId(
+    projectId: string,
+    project: Project,
+    existing: BacklogItem[],
+  ): Promise<string> {
+    const counter = project.counters.nextItem;
+    const highest = existing.reduce((max, item) => {
+      const [prefix, number] = item.id.split('-');
+      if (prefix !== project.itemPrefix) return max;
+      const parsed = Number(number);
+      return Number.isInteger(parsed) && parsed > max ? parsed : max;
+    }, 0);
+
+    if (highest < counter) return `${project.itemPrefix}-${counter}`;
+
+    // Catching up is one bump at a time, so `nextItem` stays the single writer of its own value
+    // and nothing else has to know how it is stored.
+    this.logger.warn(
+      `${projectId}: the item counter said ${counter} but ${project.itemPrefix}-${highest} already` +
+        ' exists — something rewrote .pomni/ underneath, most likely a branch switch. Numbering' +
+        ` continues from ${highest + 1}; ids already issued are never reused.`,
+    );
+    for (let n = counter; n <= highest; n += 1) await this.projects.bumpItemCounter(projectId);
+    return `${project.itemPrefix}-${highest + 1}`;
   }
 
   async list(filter: ItemFilter): Promise<BacklogItem[]> {
