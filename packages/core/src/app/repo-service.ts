@@ -314,11 +314,19 @@ export class RepoService {
       this.logger.debug(`failed to add ${repo.projectId}/${repo.id}`, message);
 
       try {
-        return await this.patch(repo.projectId, repo.id, (current) => ({
-          ...current,
-          status: 'error',
-          lastError: message,
-        }));
+        // An unreachable remote fails the same way every retry. Without `skipUnchanged` each
+        // one rewrites the record with a one-timestamp diff; a different failure still differs
+        // in `lastError` and is still written.
+        return await this.patch(
+          repo.projectId,
+          repo.id,
+          (current) => ({
+            ...current,
+            status: 'error',
+            lastError: message,
+          }),
+          { skipUnchanged: true },
+        );
       } catch (writeError) {
         if (await this.isGone(repo)) return repo;
         throw writeError;
@@ -363,29 +371,43 @@ export class RepoService {
     const dir = this.workspace.workingDir(repo);
 
     if (!(await this.fs.isDirectory(dir))) {
-      return this.patch(repo.projectId, repo.id, (current) => ({
-        ...current,
-        status: 'missing',
-        lastError: `working directory '${dir}' does not exist`,
-      }));
+      return this.patch(
+        repo.projectId,
+        repo.id,
+        (current) => ({
+          ...current,
+          status: 'missing',
+          lastError: `working directory '${dir}' does not exist`,
+        }),
+        { skipUnchanged: true },
+      );
     }
 
     const vcs = await this.git.info(dir);
     const detected = await this.detection.detect(dir);
 
-    return this.patch(repo.projectId, repo.id, (current) => ({
-      ...current,
-      status: current.source.kind === 'local' ? 'linked' : 'ready',
-      lastError: null,
-      lastSyncedAt: this.clock.iso(),
-      vcs,
-      stack: detected
-        ? { adapter: detected.adapter, detected: detected.detected, detectedAt: this.clock.iso() }
-        : current.stack,
-      capabilities: detected
-        ? mergeCapabilities(current.capabilities, detected.capabilities)
-        : current.capabilities,
-    }));
+    // Inspecting is mostly a read, and a read should leave no trace: `skipUnchanged` drops the
+    // write when the only thing that moved is the clock, or the working copy's own dirtiness
+    // and branch. Pomni's own repo record is a tracked file in the repo Pomni manages, so a
+    // write here dirties the tree and the next checkout is refused.
+    return this.patch(
+      repo.projectId,
+      repo.id,
+      (current) => ({
+        ...current,
+        status: current.source.kind === 'local' ? 'linked' : 'ready',
+        lastError: null,
+        lastSyncedAt: this.clock.iso(),
+        vcs,
+        stack: detected
+          ? { adapter: detected.adapter, detected: detected.detected, detectedAt: this.clock.iso() }
+          : current.stack,
+        capabilities: detected
+          ? mergeCapabilities(current.capabilities, detected.capabilities)
+          : current.capabilities,
+      }),
+      { skipUnchanged: true },
+    );
   }
 
   private async normalizeSource(source: AddRepoSourceInput): Promise<RepoSource> {
@@ -538,17 +560,26 @@ export class RepoService {
   /**
    * Read-modify-write with the current rev, retried once. Status updates race with a user
    * renaming the repo in the UI; a single retry resolves that without a lock.
+   *
+   * `skipUnchanged` makes the write conditional on the result differing from what is on disk
+   * in something other than what was merely true at the moment of looking — see
+   * {@link sameApartFromTimestamps} and {@link withoutTimestamps}. The record
+   * returned is then the one on disk, old timestamps and all, so no caller reports a
+   * `lastSyncedAt` that was never persisted.
    */
   private async patch(
     projectId: string,
     repoId: string,
     mutate: (current: Repo) => Repo,
+    options: { skipUnchanged?: boolean } = {},
   ): Promise<Repo> {
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const ref = await this.readRef(projectId, repoId);
       if (!ref) throw new NotFoundError('repo', `${projectId}/${repoId}`);
 
       const next = RepoSchema.parse({ ...mutate(ref.data), updatedAt: this.clock.iso() });
+      if (options.skipUnchanged && sameApartFromTimestamps(ref.data, next)) return ref.data;
+
       try {
         await this.docs.write(layout.repo(projectId, repoId), next, { ifMatch: ref.rev });
         this.events.emit({ type: 'repo.updated', projectId, repoId, status: next.status });
@@ -566,6 +597,65 @@ export class RepoService {
   private async readRef(projectId: string, repoId: string): Promise<DocRef<Repo> | null> {
     return this.docs.read(layout.repo(projectId, repoId), RepoSchema as z.ZodType<Repo>);
   }
+}
+
+/**
+ * Two repo records that differ only in what was true at the moment of looking.
+ *
+ * The one exception: a record whose stored `lastSyncedAt` is null, being replaced by one that
+ * has it. A record written before the field existed would otherwise skip every write forever
+ * and read as never synced however many times it is actually synced.
+ */
+function sameApartFromTimestamps(a: Repo, b: Repo): boolean {
+  if (a.lastSyncedAt === null && b.lastSyncedAt !== null) return false;
+  return stableJson(withoutTimestamps(a)) === stableJson(withoutTimestamps(b));
+}
+
+/**
+ * Drops the fields that move on their own, so what is left is what a person would want to see
+ * in a diff: `head`, `status`, `stack.detected`, `capabilities` and everything else on `Repo`.
+ *
+ * `lastSyncedAt`, `updatedAt` and `stack.detectedAt` move on every inspection whether or not
+ * anything was found. `vcs.dirty` and `vcs.currentBranch` are the same kind of observation:
+ * `GitAdapter.info` derives `dirty` from `git status --porcelain`, which counts untracked
+ * files, and the delivery loop switches branch as a matter of course — on Pomni's own clone
+ * both flip constantly with the head unmoved, and rewriting the tracked yaml for them is the
+ * write that gets the next `git checkout` refused. The price is that a record can carry a
+ * stale `dirty`/`currentBranch` until something substantive changes; that is cheaper than a
+ * repo whose state file cannot be checked out past.
+ *
+ * Everything else is compared rather than enumerated, so a field added to `Repo` later is
+ * significant by default — the failure mode of forgetting a field here is a change that
+ * silently never gets written.
+ */
+function withoutTimestamps(repo: Repo): unknown {
+  const { lastSyncedAt: _lastSyncedAt, updatedAt: _updatedAt, stack, vcs, ...rest } = repo;
+  const stable = {
+    ...rest,
+    vcs: vcs ? omit(vcs, ['dirty', 'currentBranch']) : vcs,
+  };
+  if (!stack) return { ...stable, stack };
+  const { detectedAt: _detectedAt, ...detection } = stack;
+  return { ...stable, stack: detection };
+}
+
+function omit<T extends object, K extends keyof T>(value: T, keys: readonly K[]): Omit<T, K> {
+  const rest = { ...value };
+  for (const key of keys) delete rest[key];
+  return rest;
+}
+
+/** Key order differs between a record parsed from disk and one built by spreading. */
+function stableJson(value: unknown): string {
+  return JSON.stringify(value, (_key, entry: unknown) =>
+    entry && typeof entry === 'object' && !Array.isArray(entry)
+      ? Object.fromEntries(
+          Object.entries(entry as Record<string, unknown>).sort(([left], [right]) =>
+            left < right ? -1 : left > right ? 1 : 0,
+          ),
+        )
+      : entry,
+  );
 }
 
 function samePath(a: string, b: string): boolean {
