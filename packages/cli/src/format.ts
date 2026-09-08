@@ -97,7 +97,7 @@ export function describeCapabilities(capabilities: Record<string, { cmd: string 
   return names.map((name) => `${name}: ${style.dim(capabilities[name]?.cmd ?? '')}`).join('\n');
 }
 
-function visibleLength(text: string): number {
+export function visibleLength(text: string): number {
   return stripAnsi(text).length;
 }
 

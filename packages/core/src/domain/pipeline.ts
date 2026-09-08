@@ -59,7 +59,41 @@ export const PipelineStepSchema = z.object({
   startedAt: z.string(),
   endedAt: z.string().nullable(),
   durationMs: z.number().nullable(),
+  /**
+   * Turns the provider reported for this session. For an orchestrator, summed over the rounds
+   * it took: each round opens its own session, and what is being measured is the whole step.
+   *
+   * This is what tells a 6.5M-token step that read the repository forty times apart from one
+   * that took a single enormous turn. Those have opposite fixes, and without this they are
+   * the same shape in every view — one is simply bigger.
+   *
+   * **0 means not measured. It never means one turn.** A provider that reports no count
+   * records 0, and no reader or writer may substitute 1 for a missing figure: an absent
+   * measurement that reads as a measured one is worse than no column at all, because it
+   * averages into the number someone will act on. Steps written before this field existed
+   * read back 0 for exactly that reason — they were not measured either.
+   */
+  turns: z.number().int().nonnegative().default(0),
+  /** Every input token this step spent, cache included. The total; the two fields below are its halves. */
   inputTokens: z.number(),
+  /**
+   * How much of `inputTokens` came back from the prompt cache, and how much the model read
+   * fresh. Two numbers with opposite readings: a step that is 95% cache read is a long
+   * session on a warm prompt, a step that is 95% fresh is a prompt being rebuilt every turn.
+   *
+   * `inputTokens` keeps the meaning it has today — the total, cache included — and stays the
+   * number every existing reader sums. These are its parts, not a replacement, and for every
+   * step written from now on `cacheReadTokens + freshInputTokens === inputTokens`. Fresh is
+   * real input plus cache *creation*: tokens the model read for the first time, whichever
+   * side of the cache they were written to.
+   *
+   * Both 0 on steps recorded before the columns existed, where the split is simply unknown.
+   * So the identity above does not hold backwards, and neither half may be derived by
+   * subtracting the other from `inputTokens` — on an old row that yields a whole confident
+   * number out of nothing.
+   */
+  cacheReadTokens: z.number().int().nonnegative().default(0),
+  freshInputTokens: z.number().int().nonnegative().default(0),
   outputTokens: z.number(),
   costUsd: z.number().nullable(),
 });

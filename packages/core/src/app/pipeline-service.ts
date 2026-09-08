@@ -1062,7 +1062,10 @@ export class PipelineService {
       startedAt: this.clock.iso(),
       endedAt: null,
       durationMs: null,
+      turns: 0,
       inputTokens: 0,
+      cacheReadTokens: 0,
+      freshInputTokens: 0,
       outputTokens: 0,
       costUsd: null,
     };
@@ -1101,6 +1104,9 @@ export class PipelineService {
     let inputTokens = 0;
     let stepCost = 0;
     let outputTokens = 0;
+    let turns = 0;
+    let cacheReadTokens = 0;
+    let freshInputTokens = 0;
 
     try {
       const prompt = session.system;
@@ -1164,7 +1170,14 @@ export class PipelineService {
           result.usage.inputTokens +
           result.usage.cacheReadTokens +
           result.usage.cacheCreationTokens;
+        // The halves of the same total, off the same usage object in the same iteration, so
+        // that `cacheReadTokens + freshInputTokens === inputTokens` holds for every step.
+        cacheReadTokens += result.usage.cacheReadTokens;
+        freshInputTokens += result.usage.inputTokens + result.usage.cacheCreationTokens;
         outputTokens += result.usage.outputTokens;
+        // Summed, not overwritten: an orchestrator's rounds are one session's worth of turns,
+        // and 0 from a provider that reports none stays 0 rather than being read as one turn.
+        turns += result.turns;
         stepCost += result.costUsd ?? 0;
         addCost(result.costUsd ?? 0);
         transcript.push(`\n# Reply (round ${round + 1})\n\n${result.text}`);
@@ -1411,7 +1424,10 @@ export class PipelineService {
         actions,
         endedAt: this.clock.iso(),
         durationMs: Date.now() - startedAt,
+        turns,
         inputTokens,
+        cacheReadTokens,
+        freshInputTokens,
         outputTokens,
         costUsd: stepCost || null,
       };
@@ -1436,7 +1452,11 @@ export class PipelineService {
         error: message,
         endedAt: this.clock.iso(),
         durationMs: Date.now() - startedAt,
+        // A step that failed mid-way still spent what it spent on the way there.
+        turns,
         inputTokens,
+        cacheReadTokens,
+        freshInputTokens,
         outputTokens,
         costUsd: stepCost || null,
       };

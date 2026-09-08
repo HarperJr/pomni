@@ -727,6 +727,7 @@ export function ConsolePage() {
                     </span>
                   )}
                   <div className="dim truncate step-task">{firstLine(step.task)}</div>
+                  <StepSpend step={step} />
                   <StepActions step={step} />
                   {step.unmet.map((entry, index) => (
                     <div className="unmet" key={index}>
@@ -891,35 +892,54 @@ function refusedCount(step: PipelineStep): number {
   return step.actions.filter((action) => action.outcome === 'refused').length;
 }
 
-/**
- * What one agent spent, on the agent itself.
- *
- * The run's own total says a pipeline cost eleven dollars; it never said which agent did.
- * Per-step is the number a person can act on — it is the one that names the agent worth
- * making cheaper.
- */
-function StepSpend({ step }: { step: PipelineStep }) {
-  const spent = step.inputTokens + step.outputTokens;
-  if (spent === 0) return null;
-
-  return (
-    <span className="step-spend" title={`${tokens(spent)} tokens in and out`}>
-      {compact(spent)}
-      {step.costUsd ? ` · $${step.costUsd.toFixed(2)}` : ''}
-    </span>
-  );
-}
-
-/** 1 240 000 as `1.2M`: a step row has room for a magnitude, not for a figure. */
-function compact(value: number): string {
-  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
-  if (value >= 1_000) return `${Math.round(value / 1_000)}k`;
-  return String(value);
-}
-
 /** Tokens, in the shape a person reads: 1 234 567. */
 function tokens(value: number): string {
   return value.toLocaleString('en-US').replace(/,/g, ' ');
+}
+
+/** Tokens, compact: 1.2M, 847k — for a row that already has too much on it. */
+function compactTokens(value: number): string {
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
+  if (value >= 1_000) return `${(value / 1_000).toFixed(0)}k`;
+  return `${value}`;
+}
+
+/**
+ * What one step cost, next to it: `12 turns · 1.2M · $0.42`.
+ *
+ * `turns: 0` means the provider never reported one, not that the session took none — so it is
+ * omitted rather than shown as a measurement. The cache split is unknown, not zero, on any step
+ * recorded before that split existed; hovering shows the full figures rather than a guess.
+ */
+function StepSpend({ step }: { step: PipelineStep }) {
+  const totalTokens = step.inputTokens + step.outputTokens;
+  if (totalTokens === 0) return null;
+
+  const parts: string[] = [];
+  if (step.turns > 0) parts.push(`${step.turns} turn${step.turns === 1 ? '' : 's'}`);
+  parts.push(compactTokens(totalTokens));
+  if (step.costUsd) parts.push(`$${step.costUsd.toFixed(2)}`);
+
+  const cacheShare =
+    step.cacheReadTokens === 0 && step.freshInputTokens === 0
+      ? step.inputTokens > 0
+        ? 'cache: unknown'
+        : null
+      : `cache: ${Math.round((step.cacheReadTokens / step.inputTokens) * 100)}%`;
+
+  const title = [
+    `input: ${tokens(step.inputTokens)}`,
+    `output: ${tokens(step.outputTokens)}`,
+    cacheShare,
+  ]
+    .filter(Boolean)
+    .join(' · ');
+
+  return (
+    <div className="dim mono step-task" title={title}>
+      {parts.join(' · ')}
+    </div>
+  );
 }
 
 /**
