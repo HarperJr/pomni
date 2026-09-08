@@ -48,6 +48,28 @@ export const PipelineStepSchema = z.object({
   /** What it returned. */
   output: z.string().nullable(),
   error: z.string().nullable(),
+  /**
+   * Bytes of the assembled system prompt this step was sent.
+   *
+   * Zero means not measured — a step recorded before this existed — never "an empty prompt".
+   * A turn pays for this in full every time it takes one, so it is the number that says
+   * whether an agent is expensive because of what it does or because of what it carries.
+   */
+  promptBytes: z.number().default(0),
+  /**
+   * Where those bytes went. Measured at assembly, not estimated afterwards: the parts are
+   * joined into the prompt in the same breath, so the breakdown cannot drift from the total.
+   */
+  promptParts: z
+    .object({
+      agent: z.number().default(0),
+      protocol: z.number().default(0),
+      roster: z.number().default(0),
+      tools: z.number().default(0),
+      repos: z.number().default(0),
+      context: z.number().default(0),
+    })
+    .default({}),
   /** Commands run, files touched, skills and MCP tools called, in order. */
   actions: z.array(z.object({ tool: z.string(), detail: z.string() })).default([]),
   /** What the agent says it achieved. `status` says it finished; this says whether it worked. */
@@ -684,4 +706,22 @@ export function summarise(text: string | null, max = 140): string {
     .find((entry) => entry.length > 0 && !entry.startsWith('```'));
   if (!line) return '';
   return line.length <= max ? line : `${line.slice(0, max - 1)}…`;
+}
+
+/** Where a step's prompt bytes went, part by part. */
+export interface PromptParts {
+  agent: number;
+  protocol: number;
+  roster: number;
+  tools: number;
+  repos: number;
+  context: number;
+}
+
+/**
+ * Bytes, not characters. A prompt is billed and transmitted as bytes, and on a prompt full of
+ * em-dashes and Cyrillic the two numbers differ by enough to change a decision.
+ */
+export function bytes(text: string): number {
+  return Buffer.byteLength(text, 'utf8');
 }

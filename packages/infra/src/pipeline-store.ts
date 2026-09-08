@@ -156,8 +156,9 @@ export class SqlitePipelineStore implements PipelineStore {
                                    model, provider_id, task, status, output, error, outcome, unmet,
                                    actions, depth, started_at, ended_at, duration_ms,
                                    turns, cache_read_tokens, fresh_input_tokens,
+                                   prompt_bytes, prompt_parts,
                                    input_tokens, output_tokens, cost_usd)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       step.id,
       step.runId,
@@ -181,6 +182,8 @@ export class SqlitePipelineStore implements PipelineStore {
       step.turns,
       step.cacheReadTokens,
       step.freshInputTokens,
+      step.promptBytes,
+      JSON.stringify(step.promptParts),
       step.inputTokens,
       step.outputTokens,
       step.costUsd,
@@ -193,6 +196,7 @@ export class SqlitePipelineStore implements PipelineStore {
          SET status = ?, output = ?, error = ?, outcome = ?, unmet = ?, actions = ?,
              provider_id = ?, ended_at = ?, duration_ms = ?,
              turns = ?, cache_read_tokens = ?, fresh_input_tokens = ?,
+             prompt_bytes = ?, prompt_parts = ?,
              input_tokens = ?, output_tokens = ?, cost_usd = ?
        WHERE id = ?`,
     ).run(
@@ -208,6 +212,8 @@ export class SqlitePipelineStore implements PipelineStore {
       step.turns,
       step.cacheReadTokens,
       step.freshInputTokens,
+      step.promptBytes,
+      JSON.stringify(step.promptParts),
       step.inputTokens,
       step.outputTokens,
       step.costUsd,
@@ -388,6 +394,8 @@ interface StepRow {
   turns: number;
   cache_read_tokens: number;
   fresh_input_tokens: number;
+  prompt_bytes: number;
+  prompt_parts: string;
   input_tokens: number;
   output_tokens: number;
   cost_usd: number | null;
@@ -509,6 +517,8 @@ function toStep(row: StepRow): PipelineStep {
     turns: row.turns ?? 0,
     cacheReadTokens: row.cache_read_tokens ?? 0,
     freshInputTokens: row.fresh_input_tokens ?? 0,
+    promptBytes: row.prompt_bytes ?? 0,
+    promptParts: parseParts(row.prompt_parts),
     inputTokens: row.input_tokens,
     outputTokens: row.output_tokens,
     costUsd: row.cost_usd,
@@ -617,6 +627,9 @@ const MIGRATIONS: string[] = [
   `ALTER TABLE pipeline_steps ADD COLUMN turns INTEGER NOT NULL DEFAULT 0;
    ALTER TABLE pipeline_steps ADD COLUMN cache_read_tokens INTEGER NOT NULL DEFAULT 0;
    ALTER TABLE pipeline_steps ADD COLUMN fresh_input_tokens INTEGER NOT NULL DEFAULT 0;`,
+
+  `ALTER TABLE pipeline_steps ADD COLUMN prompt_bytes INTEGER NOT NULL DEFAULT 0;
+   ALTER TABLE pipeline_steps ADD COLUMN prompt_parts TEXT NOT NULL DEFAULT '{}';`,
 ];
 
 function migrate(db: SqliteDatabase): void {
@@ -670,5 +683,40 @@ function migrate(db: SqliteDatabase): void {
       db.exec(`INSERT INTO pipeline_schema (version) VALUES (${version + 1})`);
       db.exec('COMMIT');
     }
+  }
+}
+
+/**
+ * The prompt breakdown as it comes back out of the row.
+ *
+ * A step recorded before the column existed reads `{}`, and every part defaults to zero —
+ * which is "not measured", the same thing `promptBytes: 0` says beside it. Anything that
+ * cannot be parsed is treated the same way rather than throwing: a listing should not fail
+ * because one old row has something odd in a column nobody had written to yet.
+ */
+function parseParts(raw: string | null): {
+  agent: number;
+  protocol: number;
+  roster: number;
+  tools: number;
+  repos: number;
+  context: number;
+} {
+  const empty = { agent: 0, protocol: 0, roster: 0, tools: 0, repos: 0, context: 0 };
+  if (!raw) return empty;
+  try {
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    const read = (key: keyof typeof empty): number =>
+      typeof parsed[key] === 'number' ? (parsed[key] as number) : 0;
+    return {
+      agent: read('agent'),
+      protocol: read('protocol'),
+      roster: read('roster'),
+      tools: read('tools'),
+      repos: read('repos'),
+      context: read('context'),
+    };
+  } catch {
+    return empty;
   }
 }

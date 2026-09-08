@@ -15,6 +15,7 @@ import {
   HANDOVER_PROTOCOL,
   ORCHESTRATOR_PROTOCOL,
   parseDelegations,
+  bytes,
   parseHandover,
   summarise,
   TOUCHED_FILES_CONTEXT_NAME,
@@ -28,6 +29,7 @@ import {
   type PipelineRun,
   type PipelineRunDetail,
   type PipelineStep,
+  type PromptParts,
   type Question,
   type Verdict,
 } from '../domain/pipeline.js';
@@ -1014,29 +1016,31 @@ export class PipelineService {
 
     // Resolved before the step is recorded: an agent asking for a tool nobody gave the
     // project should fail as a configuration error, not halfway through a paid session.
+    const rosterBlock = [
+      '## Agents you can delegate to',
+      `- ${HUMAN_AGENT_ID} — the person who started this run. For decisions that are`
+        + ' theirs, not yours. The run waits until they answer.',
+      roster
+        .map(
+          (other) =>
+            `- \`${other.id}\` — ${other.name}. ${other.spec.split('\n')[0] ?? ''}${
+              other.outputs ? ` Returns: ${other.outputs}` : ''
+            }`,
+        )
+        .join('\n'),
+    ].join('\n');
+
     const session = await this.openSession({
       projectId: run.projectId,
       agent,
       providerId: agent.provider ?? run.providerId,
       cwd,
       workspace,
-      protocol: orchestrating
-        ? [
-            ORCHESTRATOR_PROTOCOL,
-            '',
-            '## Agents you can delegate to',
-            `- ${HUMAN_AGENT_ID} — the person who started this run. For decisions that are`
-              + ' theirs, not yours. The run waits until they answer.',
-            roster
-              .map(
-                (other) =>
-                  `- \`${other.id}\` — ${other.name}. ${other.spec.split('\n')[0] ?? ''}${
-                    other.outputs ? ` Returns: ${other.outputs}` : ''
-                  }`,
-              )
-              .join('\n'),
-          ].join('\n')
-        : undefined,
+      protocol: orchestrating ? [ORCHESTRATOR_PROTOCOL, '', rosterBlock].join('\n') : undefined,
+      // Handed over separately as well, so the breakdown can say what the roster costs. It is
+      // the part that grows with the team rather than with the job, and a lead delegating to
+      // eleven agents carries eleven descriptions on every one of its rounds.
+      roster: orchestrating ? rosterBlock : undefined,
     });
     const { port, model, provider } = session;
 
@@ -1062,6 +1066,8 @@ export class PipelineService {
       startedAt: this.clock.iso(),
       endedAt: null,
       durationMs: null,
+      promptBytes: session.promptBytes,
+      promptParts: session.promptParts,
       turns: 0,
       inputTokens: 0,
       cacheReadTokens: 0,
@@ -1559,9 +1565,18 @@ export class PipelineService {
     workspace: AgentWorkspace;
     /** Goes between the agent's own prompt and its tool briefing: the orchestrator protocol. */
     protocol?: string;
+    /** The delegation roster, when there is one. Measured apart from the protocol it sits in. */
+    roster?: string;
     /** A skill's instructions, put above everything else so they frame the whole turn. */
     skillPrompt?: string;
-  }): Promise<{ port: LlmPort; model: string; provider: Provider; system: string }> {
+  }): Promise<{
+    port: LlmPort;
+    model: string;
+    provider: Provider;
+    system: string;
+    promptBytes: number;
+    promptParts: PromptParts;
+  }> {
     const { agent, workspace } = input;
     assertRunnable(agent);
 
@@ -1651,15 +1666,94 @@ export class PipelineService {
       VERDICT_PROTOCOL,
     ].join('\n');
 
+    // A skill goes above the agent's own prompt rather than below it: it is the frame the
+    // turn is being asked for, not an extra instruction bolted onto the job description.
+    const assembled = input.skillPrompt?.trim()
+      ? [input.skillPrompt.trim(), '', system].join('\n')
+      : system;
+
+    // Re-assembles the prompt with whichever optional parts survived, in the same order the
+    // untrimmed one uses. A second join rather than string surgery on the first: cutting a
+    // block out of finished text by matching it is how you eventually cut the wrong one.
+    const rebuild = (tools: string | null, repoList: string | null): string => {
+      const core = [
+        tools ? [own, '', tools].join('\n') : own,
+        '',
+        abilities,
+        ...(repoList ? ['', repoList] : []),
+        '',
+        HANDOVER_PROTOCOL,
+        '',
+        VERDICT_PROTOCOL,
+      ].join('\n');
+      return input.skillPrompt?.trim() ? [input.skillPrompt.trim(), '', core].join('\n') : core;
+    };
+
+    // Trimmed before it is measured, so the number recorded is the prompt that was actually
+    // sent. Order matters and is the whole policy: the tool notes go first because an agent
+    // can ask how a tool works, then the repo list because it is told where it is by its own
+    // working directory. The agent's own prompt, the verdict protocol and anything a person
+    // attached are never cut — losing those changes what the agent was asked to do, which is
+    // a worse outcome than a large prompt.
+    const budget = (await this.policyNow(input.projectId))?.promptBudget;
+    let trimmed = assembled;
+    const dropped: string[] = [];
+    let briefingSent: string | null = briefing;
+    let reposSent: string | null = repos;
+
+    if (budget !== undefined && bytes(trimmed) > budget && briefingSent) {
+      dropped.push('the tool usage notes');
+      briefingSent = null;
+    }
+    if (budget !== undefined && reposSent) {
+      const withoutTools = rebuild(briefingSent, reposSent);
+      if (bytes(withoutTools) > budget) {
+        dropped.push('the repo list');
+        reposSent = null;
+      }
+    }
+    if (dropped.length > 0) {
+      trimmed = [
+        rebuild(briefingSent, reposSent),
+        '',
+        `[${dropped.join(' and ')} ${dropped.length === 1 ? 'was' : 'were'} left out: this` +
+          ` prompt was over the ${budget} bytes this project allows one turn to carry` +
+          ' (policy.promptBudget). Ask if you need what is missing.]',
+      ].join('\n');
+    }
+
+    // Over budget with nothing left that may be cut. Said to the person rather than added to
+    // the prompt: the agent cannot act on it, and growing the prompt to complain about its
+    // size is absurd. Silence here would be the same silence `maxCostUsd` used to keep.
+    if (budget !== undefined && bytes(trimmed) > budget) {
+      this.logger.warn(
+        `'${agent.name}' carries ${bytes(trimmed)} bytes of prompt against a budget of ${budget}` +
+          `${dropped.length > 0 ? `, after dropping ${dropped.join(' and ')}` : ''}. What is left` +
+          ' is its own prompt and the protocols, which are never cut — shorten the prompt' +
+          ' itself, or raise policy.promptBudget.',
+      );
+    }
+
+    // Measured where the parts are joined rather than estimated from the result: a breakdown
+    // computed separately drifts from its total the first time either of them changes.
+    const roster = input.roster ?? '';
+    const protocolOnly = (input.protocol ?? '').replace(roster, '');
+    const promptParts = {
+      agent: bytes(agent.prompt) + bytes(input.skillPrompt ?? ''),
+      protocol: bytes(protocolOnly) + bytes(HANDOVER_PROTOCOL) + bytes(VERDICT_PROTOCOL) + bytes(abilities),
+      roster: bytes(roster),
+      tools: bytes(briefingSent ?? ''),
+      repos: bytes(reposSent ?? ''),
+      context: 0,
+    };
+
     return {
       port,
       model,
       provider,
-      // A skill goes above the agent's own prompt rather than below it: it is the frame the
-      // turn is being asked for, not an extra instruction bolted onto the job description.
-      system: input.skillPrompt?.trim()
-        ? [input.skillPrompt.trim(), '', system].join('\n')
-        : system,
+      system: trimmed,
+      promptBytes: bytes(trimmed),
+      promptParts,
     };
   }
 
