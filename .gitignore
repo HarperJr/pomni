@@ -4,15 +4,18 @@ dist/
 .DS_Store
 Thumbs.db
 
-# Pomni runtime state (see docs/DATA-MODEL.md)
-.pomni/workspace/
-.pomni/worktrees/
-.pomni/runs/
-.pomni/sessions/
-.pomni/events.ndjson
-.pomni/.lock
-.pomni/pomni.db*
-.pomni/credentials.secret.json
+# Pomni's workspace — all of it, runtime and records alike.
+#
+# It used to be half-tracked: the runtime under here was ignored and the records — projects,
+# backlog, repo entries, workflows — were committed, so that state travelled with the code and
+# could be read in a diff. That split cost more than it paid. It let `git checkout` rewind the
+# item counter and reissue live ids (POMN-57), it made `repo sync` dirty a tracked file and
+# refuse the next checkout (POMN-52), and it meant a run's `git add -A` swept Pomni's own state
+# into commits of code. Untracking the whole directory closes all three at once.
+#
+# What it costs, stated plainly: a fresh clone has no backlog. These records live on the machine
+# that holds them, and nowhere else, unless you put them somewhere yourself.
+.pomni/
 
 # local env
 .env
