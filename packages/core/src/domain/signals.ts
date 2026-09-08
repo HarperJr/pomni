@@ -181,3 +181,39 @@ export function findings(signals: Signal[], threshold = 3): Finding[] {
     .filter((finding) => finding.runIds.length >= threshold)
     .sort((a, b) => b.runIds.length - a.runIds.length);
 }
+
+/**
+ * Whether a signal has kept happening since the agent was last changed.
+ *
+ * Measured against `agent.updatedAt` rather than a record of amendments. Nothing new is
+ * stored: the agent already carries when it last changed, and a run already carries when it
+ * started, so "before" and "after" are a comparison of two timestamps that both exist. The
+ * limit of that, stated: any edit to the agent resets the clock, not only an amendment. A
+ * rename counts as a change here. That is the price of not keeping a second ledger.
+ *
+ * `after: 0` with `before` high is the shape worth seeing. It is not proof — the runs since
+ * may simply not have exercised the agent — which is why the count of runs since is returned
+ * beside it rather than a verdict.
+ */
+export function since(
+  signals: Signal[],
+  runs: Array<{ id: string; startedAt: string }>,
+  changedAt: string,
+): { before: number; after: number; runsAfter: number } {
+  const boundary = Date.parse(changedAt);
+  const startedAt = new Map(runs.map((run) => [run.id, Date.parse(run.startedAt)]));
+
+  // Counted in distinct runs, the same unit a finding is counted in. Counting signals here
+  // and runs there puts two different things on one line and reads as a contradiction — a
+  // finding in 11 runs cannot have 31 of them anywhere.
+  const before = new Set<string>();
+  const after = new Set<string>();
+  for (const signal of signals) {
+    const started = startedAt.get(signal.runId);
+    if (started === undefined) continue;
+    (started >= boundary ? after : before).add(signal.runId);
+  }
+
+  const runsAfter = runs.filter((run) => Date.parse(run.startedAt) >= boundary).length;
+  return { before: before.size, after: after.size, runsAfter };
+}

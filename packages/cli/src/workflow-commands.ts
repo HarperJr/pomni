@@ -2,6 +2,7 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { basename, resolve } from 'node:path';
 import {
   AgentRoleSchema,
+  since,
   HANDOVER_PROTOCOL,
   VERDICT_PROTOCOL,
   StruggleSchema,
@@ -161,11 +162,36 @@ export function registerWorkflowCommands(
       if (findings.length === 0) {
         console.log(style.dim(`${signals.length} signals, none repeated across three runs yet`));
       } else {
+        const workflows = id ? [await container.workflows.get(id)] : await container.workflows.list();
+        const changedAt = new Map(
+          workflows.flatMap((found) => found.agents.map((agent) => [agent.id, agent.updatedAt])),
+        );
+        const runs = (await container.pipelines.list({ projectId, limit: 200 })).map((run) => ({
+          id: run.id,
+          startedAt: run.startedAt,
+        }));
+
         console.log(style.bold('what keeps happening'));
         for (const finding of findings) {
+          // Measured against when the agent last changed. Not proof either way — the runs
+          // since may simply not have exercised it — so the count of those runs is shown
+          // beside the figure rather than a verdict in place of it.
+          const edited = finding.agentId ? changedAt.get(finding.agentId) : undefined;
+          const split = edited
+            ? since(signals.filter((s) => s.kind === finding.kind && s.agentId === finding.agentId), runs, edited)
+            : null;
+
           console.log(
             `   ${style.yellow(finding.kind.padEnd(13))} ${(finding.agentName ?? 'the run').padEnd(18)}` +
-              ` ${finding.runIds.length} runs`,
+              ` ${finding.runIds.length} runs` +
+              (split && split.runsAfter > 0
+                ? style.dim(
+                    `  · ${split.after} of them since this agent last changed` +
+                      ` (${split.runsAfter} runs ago)`,
+                  )
+                : split
+                  ? style.dim('  · no runs since this agent last changed')
+                  : ''),
           );
           // The wording is the evidence, so one example is shown whole rather than summarised.
           console.log(`      ${style.dim(truncate(finding.details[0] ?? '', 96))}`);
@@ -186,6 +212,80 @@ export function registerWorkflowCommands(
         );
       }
     });
+
+  workflow
+    .command('amend <workflow> <agent>')
+    .description('propose a spec change from what keeps going wrong, and never apply it silently')
+    .option('-p, --project <id>', 'project whose runs are the evidence')
+    .option('-k, --kind <kind>', 'which signal to answer, when an agent has more than one')
+    .option('--apply', 'write the amended spec and regenerate the prompt from it')
+    .action(
+      async (
+        workflowId: string,
+        agentId: string,
+        flags: { project?: string; kind?: string; apply?: boolean },
+      ) => {
+        const container = await open();
+        const projectId = flags.project ?? (await defaultProject());
+        const { findings } = await container.pipelines.signals(projectId, workflowId);
+
+        const forAgent = findings.filter(
+          (finding) => finding.agentId === agentId && (!flags.kind || finding.kind === flags.kind),
+        );
+        if (forAgent.length === 0) {
+          console.log(style.dim(`nothing keeps happening to '${agentId}' — nothing to answer`));
+          return;
+        }
+        if (forAgent.length > 1 && !flags.kind) {
+          console.log(style.yellow(`'${agentId}' has more than one — name it with --kind:`));
+          for (const finding of forAgent) {
+            console.log(`   ${finding.kind.padEnd(13)} ${finding.runIds.length} runs`);
+          }
+          return;
+        }
+
+        const finding = forAgent[0] as (typeof forAgent)[number];
+        console.log(style.bold(`${finding.kind} · ${finding.runIds.length} runs`));
+        for (const detail of finding.details.slice(0, 3)) {
+          console.log(`   ${style.dim(truncate(detail, 96))}`);
+        }
+        console.log();
+
+        console.log(style.dim('asking for an amendment…'));
+        const { current, proposed } = await container.workflows.proposeAmendment(
+          workflowId,
+          agentId,
+          finding,
+        );
+
+        if (proposed.trim() === current.trim()) {
+          // The model was told to say so rather than invent wording for a permissions bug.
+          console.log(style.yellow('the model returned the spec unchanged — this is not a wording problem'));
+          return;
+        }
+
+        console.log(style.bold('proposed spec'));
+        console.log(proposed);
+        console.log();
+
+        if (!flags.apply) {
+          console.log(
+            style.dim(`nothing was written. Apply it with: pomni workflow amend ${workflowId} ${agentId} --apply`),
+          );
+          return;
+        }
+
+        await container.workflows.updateAgent(workflowId, agentId, { spec: proposed });
+        console.log(style.dim('regenerating the prompt from it…'));
+        await container.workflows.generatePrompt(workflowId, agentId);
+        console.log(`${style.green('amended')} ${agentId} — the prompt is derived from the new spec`);
+        console.log(
+          style.dim(
+            "the finding stays open: 'pomni workflow signals' will show whether it recurs in the runs after this",
+          ),
+        );
+      },
+    );
 
   workflow
     .command('remove <id>')
