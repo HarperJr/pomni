@@ -401,6 +401,35 @@ export class PipelineService {
    * over-large limit, which is a different thing from bounding the answer, and left the
    * CLI and every other caller unbounded.
    */
+  /**
+   * What a backlog item has cost, across every run against it.
+   *
+   * Reruns included, deliberately. One task attempted three times cost the sum of three
+   * attempts, and that is the number that answers whether the agents were worth it — the
+   * last attempt's figure flatters every task that needed more than one.
+   *
+   * `costUsd` is null when no run reported one, never 0: a provider that does not report cost
+   * is not a provider that ran for free, and a zero here would be read as the second.
+   */
+  async itemSpend(
+    projectId: string,
+    itemId: string,
+  ): Promise<{ runs: number; inputTokens: number; outputTokens: number; costUsd: number | null }> {
+    const runs = await this.store.listRuns({ projectId, itemId, limit: MAX_LISTED });
+
+    let costUsd: number | null = null;
+    let inputTokens = 0;
+    let outputTokens = 0;
+
+    for (const run of runs) {
+      inputTokens += run.inputTokens;
+      outputTokens += run.outputTokens;
+      if (run.costUsd !== null) costUsd = (costUsd ?? 0) + run.costUsd;
+    }
+
+    return { runs: runs.length, inputTokens, outputTokens, costUsd };
+  }
+
   async list(filter: PipelineFilter): Promise<PipelineRun[]> {
     return this.store.listRuns({
       ...filter,
@@ -1066,6 +1095,7 @@ export class PipelineService {
       startedAt: this.clock.iso(),
       endedAt: null,
       durationMs: null,
+      cacheCreationTokens: 0,
       promptBytes: session.promptBytes,
       promptParts: session.promptParts,
       turns: 0,
@@ -1112,6 +1142,7 @@ export class PipelineService {
     let outputTokens = 0;
     let turns = 0;
     let cacheReadTokens = 0;
+    let cacheCreationTokens = 0;
     let freshInputTokens = 0;
 
     try {
@@ -1179,6 +1210,7 @@ export class PipelineService {
         // The halves of the same total, off the same usage object in the same iteration, so
         // that `cacheReadTokens + freshInputTokens === inputTokens` holds for every step.
         cacheReadTokens += result.usage.cacheReadTokens;
+        cacheCreationTokens += result.usage.cacheCreationTokens;
         freshInputTokens += result.usage.inputTokens + result.usage.cacheCreationTokens;
         outputTokens += result.usage.outputTokens;
         // Summed, not overwritten: an orchestrator's rounds are one session's worth of turns,
@@ -1433,6 +1465,7 @@ export class PipelineService {
         turns,
         inputTokens,
         cacheReadTokens,
+        cacheCreationTokens,
         freshInputTokens,
         outputTokens,
         costUsd: stepCost || null,

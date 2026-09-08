@@ -1,7 +1,7 @@
 import { createRequire } from 'node:module';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { PipelineStepSchema, type PipelineStep } from '@pomni/core';
+import { PipelineRunSchema, PipelineStepSchema, type PipelineStep } from '@pomni/core';
 import { createHarness, type TestHarness } from './harness.js';
 
 let harness: TestHarness;
@@ -192,5 +192,71 @@ describe('pipeline step: turns across an orchestrator round', () => {
     expect((leadStep?.cacheReadTokens ?? 0) + (leadStep?.freshInputTokens ?? 0)).toBe(
       leadStep?.inputTokens,
     );
+  });
+});
+
+describe('what a task has cost, across every attempt', () => {
+  it('sums the runs against one item, reruns included', async () => {
+    const spend = async () => harness.pipelines.itemSpend('acme', 'ACME-1');
+
+    for (const [id, cost] of [['r1', 2], ['r2', 3]] as const) {
+      // Inserted then updated, because that is the path production takes: `insertRun` writes
+      // a run that has not spent anything yet, and the totals arrive when it ends.
+      const row = PipelineRunSchema.parse({
+          id,
+          projectId: 'acme',
+          workflowId: 'w',
+          workflowName: 'W',
+          providerId: 'p',
+          itemId: 'ACME-1',
+          task: 't',
+          status: 'passed',
+          outcome: 'done',
+          result: null,
+          error: null,
+          endedAt: null,
+          durationMs: null,
+          inputTokens: 1000,
+          outputTokens: 100,
+          costUsd: cost,
+        startedAt: '2026-09-09T00:00:00.000Z',
+      });
+      await harness.pipelineStore.insertRun(row);
+      await harness.pipelineStore.updateRun(row.id, row);
+    }
+
+    // One task attempted twice cost the sum of both. The last attempt's figure flatters
+    // every task that needed more than one.
+    expect(await spend()).toMatchObject({ runs: 2, inputTokens: 2000, costUsd: 5 });
+  });
+
+  it('reports no cost as null, never as zero', async () => {
+    const solo = PipelineRunSchema.parse({
+        id: 'r3',
+        projectId: 'acme',
+        workflowId: 'w',
+        workflowName: 'W',
+        providerId: 'p',
+        itemId: 'ACME-2',
+        task: 't',
+        status: 'passed',
+        outcome: 'done',
+        result: null,
+        error: null,
+        endedAt: null,
+        durationMs: null,
+        inputTokens: 500,
+        outputTokens: 50,
+        // The OpenAI-compatible backend reports tokens and no price.
+        costUsd: null,
+        startedAt: '2026-09-09T00:00:00.000Z',
+    });
+    await harness.pipelineStore.insertRun(solo);
+    await harness.pipelineStore.updateRun(solo.id, solo);
+
+    // A provider that reports no cost is not a provider that ran for free.
+    const spend = await harness.pipelines.itemSpend('acme', 'ACME-2');
+    expect(spend.costUsd).toBeNull();
+    expect(spend.inputTokens).toBe(500);
   });
 });
