@@ -17,6 +17,8 @@ import {
   parseDelegations,
   parseHandover,
   summarise,
+  TOUCHED_FILES_CONTEXT_NAME,
+  touchedFilesContext,
   withBrief,
   withSiblings,
   withContext,
@@ -245,7 +247,17 @@ export class PipelineService {
     // An author who is not told which files a change is about pays to find them: on the run
     // that produced this, one spent 2.4M input tokens looking for two the item had named.
     const touched = input.itemId ? await this.touchedFiles(input.projectId, input.itemId) : null;
-    const context = normaliseContext([...(input.context ?? []), ...(touched ? [touched] : [])]);
+    // Replaced, never stacked: a rerun carries the previous run's context forward, and that
+    // already holds a list under this name. Appending a second one would rename it to
+    // `touched-files.md (2)` and charge every agent for both copies of the same paths.
+    const context = normaliseContext(
+      touched
+        ? [
+            ...(input.context ?? []).filter((file) => file.name !== TOUCHED_FILES_CONTEXT_NAME),
+            touched,
+          ]
+        : (input.context ?? []),
+    );
 
     const attached = await this.workflows.forProject(input.projectId);
     if (attached.length === 0) {
@@ -402,33 +414,10 @@ export class PipelineService {
    * the same treatment the run's other composed information already gets.
    */
   private async touchedFiles(projectId: string, itemId: string): Promise<ContextFile | null> {
+    // An item that cannot be read is not a reason to refuse to run: the run has a task, and
+    // the list is a head start rather than a requirement.
     const item = await this.backlog.get(projectId, itemId).catch(() => null);
-    const paths = (item?.touches ?? []).map((path) => path.trim()).filter(Boolean);
-    if (paths.length === 0) return null;
-
-    return {
-      name: TOUCHED_FILE,
-      content: [
-        'The item says this change is about these paths:',
-        '',
-        ...paths.map((path) => `- \`${path}\``),
-        '',
-        'Start there rather than searching for them. This is a starting point, not a fence:',
-        'if the work genuinely needs a file that is not listed, open it and say in your answer',
-        'which one and why.',
-        '',
-        // Measured: handing this list to the agents cut the authors 46%, and handing it to the
-        // orchestrator without this paragraph convinced it the change was big enough to scout —
-        // one scout costing more than everything the four authors saved.
-        'If you are planning this change rather than making it: this list is why you do not need',
-        'to send anyone to find out where the work is. Hand each path to the agent that owns that',
-        'part of the tree. A scout that returns this list has been paid to tell you what you were',
-        'already told.',
-        '',
-        'The list is the whole change, not your part of it. Open what your own job needs and',
-        'leave the rest to whoever owns it.',
-      ].join('\n'),
-    };
+    return touchedFilesContext(item?.touches) ?? null;
   }
 
   /**
@@ -445,7 +434,13 @@ export class PipelineService {
       throw new ValidationError('that run is still going — stop it before running it again');
     }
 
-    const carried = previous.context.filter((file) => file.name !== ATTEMPT_FILE);
+    // Only what a person attached. An agent's handover was a decision taken inside a run that
+    // did not finish; carrying it into the next attempt hands the new agents a conclusion and
+    // calls it source material, so the second attempt inherits the first one's mistake and
+    // cannot see that it did.
+    const carried = previous.context.filter(
+      (file) => file.name !== ATTEMPT_FILE && file.origin !== 'handover',
+    );
 
     return this.start({
       projectId: previous.projectId,
@@ -497,7 +492,7 @@ export class PipelineService {
       // a step that was still running never recorded an answer worth keeping.
       if (!step.parentStepId || step.status !== 'done' || !step.output) continue;
 
-      seed.answered.set(`${step.agentId}::${step.task.trim().toLowerCase()}`, step.output);
+      seed.answered.set(memoKey(step.agentId, step.task), step.output);
       seed.useCount.set(step.agentId, (seed.useCount.get(step.agentId) ?? 0) + 1);
       finished.push({ agentId: step.agentId, task: step.task });
       reused += 1;
@@ -507,7 +502,7 @@ export class PipelineService {
     // returned from the ledger rather than put to them a second time.
     for (const question of previous.questions) {
       if (question.status !== 'answered' || !question.answer) continue;
-      seed.answered.set(`human::${question.question.trim().toLowerCase()}`, question.answer);
+      seed.answered.set(memoKey(HUMAN_AGENT_ID, question.question), question.answer);
     }
 
     const usable = (await this.repos.listResolved(previous.projectId)).filter(
@@ -541,11 +536,21 @@ export class PipelineService {
 
     // What the resume is and what changed since, as a context file: the orchestrator reads it
     // on its first turn, and it is the same chip a person already sees on the run.
-    const carried = previous.context.filter((file) => file.name !== RESUME_FILE);
+    // Recomposed rather than carried: the item may have declared another path since the run
+    // was interrupted. Matched by name and replaced, so a resumed run holds one list and not
+    // one per resume — every agent in the tree pays for this text.
+    const touched = previous.itemId
+      ? await this.touchedFiles(previous.projectId, previous.itemId)
+      : null;
+    const carried = previous.context.filter(
+      (file) =>
+        file.name !== RESUME_FILE && !(touched && file.name === TOUCHED_FILES_CONTEXT_NAME),
+    );
     const reopened: PipelineRun = {
       ...previous,
       context: [
         ...carried,
+        ...(touched ? [touched] : []),
         {
           name: RESUME_FILE,
           content: describeResume(finished, taken.reclaimed.length, note),
@@ -863,6 +868,11 @@ export class PipelineService {
 
       let finished: PipelineRun = {
         ...run,
+        // What agents published during the run. `run` is the object this method was handed
+        // and it never learns about handovers — deliberately, since it is passed by reference
+        // to every agent still to come. Writing it back unchanged is what silently undid
+        // `publish`, which had already put these on the stored run.
+        context: this.withHandovers(run),
         status: this.cancelled.has(run.id)
           ? 'cancelled'
           : stopped || verdict.outcome === 'blocked'
@@ -931,6 +941,8 @@ export class PipelineService {
 
       const failed: PipelineRun = {
         ...run,
+        // A run that ended badly published just as much as one that did not.
+        context: this.withHandovers(run),
         status: this.cancelled.has(run.id) ? 'cancelled' : 'failed',
         pid: null,
         error: message,
@@ -1215,9 +1227,10 @@ export class PipelineService {
           const settled = await Promise.all(
             batch.map(async (delegation) => {
               if (delegation.agent === HUMAN_AGENT_ID) {
-                const key = `human::${delegation.task.trim().toLowerCase()}`;
+                const key = memoKey(HUMAN_AGENT_ID, delegation.task);
                 const previous = answered.get(key);
                 if (previous !== undefined) {
+                  this.noteMemo(run, step, 'the person who started this run', delegation.task);
                   return `### You already asked this\n\n${previous}`;
                 }
 
@@ -1258,9 +1271,14 @@ export class PipelineService {
                 );
               }
 
-              const key = `${target.id}::${delegation.task.trim().toLowerCase()}`;
+              // The promise the protocol now makes to the orchestrator, kept: a task already
+              // answered comes back from the ledger instead of opening a second session for
+              // it. Not silent — a step that never ran is otherwise invisible in the run,
+              // and a person reading why a run was cheap has nothing to read.
+              const key = memoKey(target.id, delegation.task);
               const previous = answered.get(key);
               if (previous !== undefined) {
+                this.noteMemo(run, step, `${target.name} (\`${target.id}\`)`, delegation.task);
                 return `### ${target.name} — you already asked this\n\n${previous}`;
               }
 
@@ -2191,26 +2209,77 @@ export class PipelineService {
   }
 
   /**
+   * Say that a delegation was answered from the ledger rather than run.
+   *
+   * On the asking step's own output channel, which is where the budget line already goes: a
+   * session that never opened records no step, so without this the only trace of a repeat is
+   * a run that cost less than its transcript suggests it should have.
+   */
+  private noteMemo(run: PipelineRun, step: PipelineStep, target: string, task: string): void {
+    const line = `answered from this run's ledger, no session opened: ${target} — ${summarise(task, 120)}`;
+    this.events.emit({
+      type: 'pipeline.step.output',
+      runId: run.id,
+      stepId: step.id,
+      chunk: line,
+    });
+    this.logger.info(line);
+  }
+
+  /**
    * Put what an agent decided where every agent after it can see it.
    *
    * The same shelf a person's attachments land on, deliberately: an agent settling the shape
    * of a record and a person attaching a spec are the same kind of fact to whoever is asked
    * next, and one channel means one place to look when something arrives wrong.
    */
+  /**
+   * The run's context plus everything agents handed over during it.
+   *
+   * Kept as a merge rather than mutating `run.context`: the run object is passed by reference
+   * to every agent still to come, and quietly growing it underneath them is how two versions
+   * of the truth appear. Last writer wins on a name, matching `publish`.
+   */
+  private withHandovers(run: PipelineRun): ContextFile[] {
+    const published = this.handedOver.get(run.id) ?? [];
+    if (published.length === 0) return run.context;
+
+    const others = run.context.filter((file) => !published.some((added) => added.name === file.name));
+    return [...others, ...published];
+  }
+
   private async publish(run: PipelineRun, files: ContextFile[]): Promise<void> {
     if (files.length === 0) return;
+
+    // Clamped, never refused. `normaliseContext` throws, which is right for a person attaching
+    // a file — they are told and can attach a smaller one — and wrong here: an agent is
+    // mid-run, nobody is reading, and killing the run over an oversized note would throw away
+    // work that is otherwise finished. What a handover cannot be is unbounded: it goes into
+    // the front of every later agent's session and is therefore re-sent on every one of that
+    // agent's internal turns, so its size is multiplied by their turn count, not paid once.
+    const { files: clamped, notes } = clampHandover(files);
+    for (const note of notes) this.logger.warn(`${run.id}: ${note}`);
+    if (clamped.length === 0) return;
 
     const existing = this.handedOver.get(run.id) ?? [];
     // Last writer wins on a name: an agent correcting itself should replace what it said,
     // not leave two versions for the next agent to choose between.
-    const kept = existing.filter((file) => !files.some((added) => added.name === file.name));
-    this.handedOver.set(run.id, [...kept, ...files]);
+    const kept = existing.filter((file) => !clamped.some((added) => added.name === file.name));
+    const merged = withinBudget([...kept, ...clamped], (dropped) => {
+      this.logger.warn(
+        `${run.id}: handover '${dropped}' was dropped — the run's context reached the ${
+          MAX_CONTEXT_BYTES / 1000
+        }kB every later agent carries. The oldest goes first.`,
+      );
+    });
+
+    this.handedOver.set(run.id, merged);
 
     const stored = await this.store.getRun(run.id);
     if (!stored) return;
 
-    const others = stored.context.filter((file) => !files.some((added) => added.name === file.name));
-    await this.store.updateRun(run.id, { ...stored, context: [...others, ...files] });
+    const others = stored.context.filter((file) => !merged.some((added) => added.name === file.name));
+    await this.store.updateRun(run.id, { ...stored, context: [...others, ...merged] });
   }
 
   /**
@@ -2534,6 +2603,77 @@ export class PipelineService {
  * every round an orchestrator takes, so a careless attachment is paid for many times over.
  * A file with a NUL byte is not text, and inlining it would only spend tokens on noise.
  */
+/**
+ * An agent's handover, cut down to something every later agent can afford to carry.
+ *
+ * Truncates rather than refuses, and says so inside the file itself: an agent reading a note
+ * that stops mid-sentence should be able to tell that it was cut, not conclude the author
+ * stopped writing. Empty and binary handovers are dropped — there is nothing in them to pass on.
+ */
+export function clampHandover(files: ContextFile[]): { files: ContextFile[]; notes: string[] } {
+  const notes: string[] = [];
+  const kept: ContextFile[] = [];
+
+  for (const file of files) {
+    const name = file.name.split(/[\/]/).pop()?.trim() || 'handover';
+
+    if (file.content.trim().length === 0 || file.content.includes(' ')) {
+      notes.push(`handover '${name}' was ignored — it is empty or is not text`);
+      continue;
+    }
+
+    const bytes = Buffer.byteLength(file.content, 'utf8');
+    if (bytes <= MAX_CONTEXT_FILE_BYTES) {
+      kept.push({ name, content: file.content, origin: 'handover' });
+      continue;
+    }
+
+    // The note is part of what the file costs, so reserve it before cutting rather than
+    // appending it afterwards and going over by its own length.
+    const note = `
+
+[cut here: this handover was ${Math.round(bytes / 1000)}kB, over the ${
+      MAX_CONTEXT_FILE_BYTES / 1000
+    }kB one file may carry. Hand over what was decided, not the material it was decided from.]
+`;
+    const room = MAX_CONTEXT_FILE_BYTES - Buffer.byteLength(note, 'utf8');
+
+    // Slice the string, not the bytes, so a multi-byte character is never cut in half; then
+    // shrink until it fits, because one character is not one byte.
+    let cut = file.content.slice(0, Math.floor(file.content.length * (room / bytes)));
+    while (cut.length > 0 && Buffer.byteLength(cut, 'utf8') > room) {
+      cut = cut.slice(0, Math.max(0, cut.length - 64));
+    }
+
+    kept.push({ name, origin: 'handover', content: `${cut}${note}` });
+    notes.push(
+      `handover '${name}' was ${Math.round(bytes / 1000)}kB and was cut to ${
+        MAX_CONTEXT_FILE_BYTES / 1000
+      }kB`,
+    );
+  }
+
+  return { files: kept, notes };
+}
+
+/**
+ * Everything the run carries, held under the total every later agent pays for.
+ *
+ * Oldest first when something has to go: the most recent decision is the one the next agent
+ * is most likely to need, and an agent that corrected itself replaced its own file already.
+ */
+export function withinBudget(
+  files: ContextFile[],
+  onDrop: (name: string) => void,
+): ContextFile[] {
+  const kept = [...files];
+  while (kept.length > 1 && contextBytes(kept) > MAX_CONTEXT_BYTES) {
+    const dropped = kept.shift();
+    if (dropped) onDrop(dropped.name);
+  }
+  return kept;
+}
+
 function normaliseContext(files: ContextFile[]): ContextFile[] {
   const seen = new Set<string>();
 
@@ -2575,8 +2715,21 @@ function normaliseContext(files: ContextFile[]): ContextFile[] {
   return normalised;
 }
 
-/** The name the item's own file list always has, so a rerun replaces it rather than stacking. */
-const TOUCHED_FILE = 'touched-files.md';
+/**
+ * What a delegation is remembered under, so an exact repeat is answered rather than run.
+ *
+ * Trimmed, lowercased, and runs of whitespace collapsed to one space: a model that rewraps the
+ * same paragraph across two lines means the same thing by it, and the protocol promises the
+ * orchestrator that re-asking returns the earlier answer. Nothing beyond whitespace and case is
+ * normalised — two tasks differing by a word are two tasks, and answering the second from the
+ * first would be worse than paying for it.
+ *
+ * A resume seeds from stored steps through this same function, so an answer written by the
+ * earlier attempt is found by the key the new attempt computes.
+ */
+function memoKey(agentId: string, task: string): string {
+  return `${agentId}::${task.trim().toLowerCase().replace(/\s+/g, ' ')}`;
+}
 
 /** The name a resume's own summary always has, so a second resume replaces the first. */
 const RESUME_FILE = 'resumed.md';

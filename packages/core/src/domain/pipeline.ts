@@ -77,6 +77,19 @@ export const ContextFileSchema = z.object({
   /** How the file is named to the agents. A basename, not the path it came from. */
   name: z.string().min(1).max(200),
   content: z.string().min(1),
+  /**
+   * Where this came from, and therefore how much it is worth.
+   *
+   * `attached` is a person's: they chose it, and it is as true on the third attempt as the
+   * first. `handover` is an agent's, decided inside one run — carrying it into a later attempt
+   * presents a conclusion from a run that did not finish as if it were source material, which
+   * is how a wrong decision outlives the reasoning that produced it.
+   *
+   * Optional, and absent means attached. Every run recorded before this field was attached —
+   * nothing else could put a file here — and leaving it optional keeps every caller that
+   * builds a file from a path unchanged. Only a handover has to say what it is.
+   */
+  origin: z.enum(['attached', 'handover']).optional(),
 });
 export type ContextFile = z.infer<typeof ContextFileSchema>;
 
@@ -402,7 +415,7 @@ export function withSiblings(task: string, reports: AgentReport[]): string {
     if (!answer) continue;
 
     const block = [
-      `### ${report.agentName} — asked for: ${summarise(report.task, 120)}`,
+      `### ${report.agentName} (\`${report.agentId}\`) — asked for: ${summarise(report.task, 120)}`,
       '',
       answer,
     ].join('\n');
@@ -424,6 +437,11 @@ export function withSiblings(task: string, reports: AgentReport[]): string {
     'signatures they chose rather than picking your own, and do not go looking for what is',
     'already written here. If one of them is wrong, say so in your answer instead of quietly',
     'doing something different.',
+    '',
+    `Abridged on purpose: the ${MAX_SIBLING_REPORTS} most recent answers at most, trimmed to`,
+    `${MAX_SIBLING_BYTES} bytes in total, newest first. Older agents in this run may have decided`,
+    'things that are not here, and an answer shown here may be cut short — ask your orchestrator',
+    'rather than assuming what is missing was never decided.',
     '',
     ...blocks,
   ].join('\n');
@@ -457,6 +475,53 @@ function cutBytes(text: string, bytes: number): string {
   return new TextDecoder('utf-8', { fatal: false })
     .decode(buffer.subarray(0, bytes))
     .replace(/\uFFFD$/, '');
+}
+
+/**
+ * What the touched-files context file is called, on the run and on the console chip.
+ *
+ * A constant because two sides must agree on it: the service composes a file under this name
+ * at `start`, and a resumed run must recognise the one it already stored rather than adding a
+ * second copy beside it.
+ */
+export const TOUCHED_FILES_CONTEXT_NAME = 'touched-files.md';
+
+/**
+ * The files an item says it changes, as a context file every agent is given.
+ *
+ * `touches` was read only by the scheduler, to decide which items may run at the same time; no
+ * agent had ever seen one. An agent that is not told where the work is pays to find it — one
+ * measured here spent 2.4M tokens adding a column to a row, almost none of it writing.
+ *
+ * Returns `undefined` — not an empty file, not a file saying "none" — when the item declares
+ * nothing. An item with an empty `touches` must add no section and no chip, and a heading
+ * followed by nothing reads as "this change touches no files", which is never what it means:
+ * it means nobody wrote the list down.
+ */
+export function touchedFilesContext(touches: readonly string[] | undefined): ContextFile | undefined {
+  const paths = (touches ?? []).map((path) => path.trim()).filter((path) => path.length > 0);
+  if (paths.length === 0) return undefined;
+
+  return {
+    name: TOUCHED_FILES_CONTEXT_NAME,
+    content: [
+      'The item says this change is about these paths:',
+      '',
+      ...paths.map((path) => `- \`${path}\``),
+      '',
+      'Start there rather than searching for them. This is a starting point, not a fence:',
+      'if the work genuinely needs a file that is not listed, open it and say in your answer',
+      'which one and why.',
+      '',
+      'If you are planning this change rather than making it: this list is why you do not need',
+      'to send anyone to find out where the work is. Hand each path to the agent that owns that',
+      'part of the tree. A scout that returns this list has been paid to tell you what you were',
+      'already told.',
+      '',
+      'The list is the whole change, not your part of it. Open what your own job needs and',
+      'leave the rest to whoever owns it.',
+    ].join('\n'),
+  };
 }
 
 export function withContext(task: string, files: ContextFile[]): string {
@@ -517,6 +582,14 @@ must do and what it needs that the brief does not say. Do not restate the backgr
 cannot see this conversation or what the other agents returned.
 
 You then get their results and may delegate again.
+
+A delegate does not start from nothing. It arrives already holding the run's brief, the files
+this item says it changes, a digest of what the delegates before it in this run concluded, and
+anything an agent has handed over. So do not re-explain what a sibling established, do not
+retype the field names or signatures another agent chose, and do not send anyone to find out
+which files the work is in — they have been told. Delegating a task that has already been
+answered returns you the earlier answer instead of running it again, so re-asking buys nothing
+and costs a whole session; ask for what is still open.
 
 \`human\` is not an agent: it puts the question to the person who started the run, and the run
 waits until they answer. Use it for a decision that is theirs — a trade-off, a preference,

@@ -508,6 +508,7 @@ ${item.body}`;
           flags.file.map(async (path) => ({
             name: basename(path),
             content: await readFile(resolve(path), 'utf8'),
+            origin: 'attached' as const,
           })),
         );
 
@@ -727,6 +728,7 @@ ${item.body}`;
         flags.file.map(async (path) => ({
           name: basename(path),
           content: await readFile(resolve(path), 'utf8'),
+          origin: 'attached' as const,
         })),
       );
 
