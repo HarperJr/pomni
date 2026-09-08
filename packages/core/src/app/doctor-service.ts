@@ -1,6 +1,6 @@
 import type { ResolvedRepo } from '../domain/repo.js';
 import { WELL_KNOWN_CAPABILITIES } from '../domain/capability.js';
-import type { WorktreeState } from '../domain/worktree.js';
+import { isRunBranch, runIdFromBranch, type WorktreeState } from '../domain/worktree.js';
 import type { Executor, GitPort } from '../ports/index.js';
 import type { ProjectService } from './project-service.js';
 import type { RepoService } from './repo-service.js';
@@ -37,11 +37,29 @@ export interface WorktreeCheck {
   detail: string;
 }
 
+/**
+ * A branch a run left behind: commits that are on no other ref, with no worktree on them.
+ *
+ * `fix/POMN-54/main` is the one that prompted this. A run failed on a session limit, committed
+ * what it had — `deliver()` runs on the failure path too — and was tidied up cleanly, which
+ * deleted its worktree row. The resume then cut a fresh tree and took a different slot, and
+ * the first pass's commit has sat there since, on no remote, referenced by nothing. Nobody was
+ * ever told.
+ */
+export interface AbandonedBranch {
+  repoId: string;
+  branch: string;
+  /** The run it belongs to, when the name still says. */
+  runId: string | null;
+  detail: string;
+}
+
 export interface DoctorReport {
   projectId: string;
   status: CheckStatus;
   repos: RepoReport[];
   worktrees: WorktreeCheck[];
+  abandoned: AbandonedBranch[];
 }
 
 /**
@@ -67,15 +85,20 @@ export class DoctorService {
 
     const repos = await Promise.all(targets.map((repo) => this.checkRepo(repo)));
     const worktrees = await this.checkWorktrees(projectId, repoId);
+    const abandoned = await this.checkAbandoned(targets, worktrees);
 
     return {
       projectId,
       status: worst([
         ...repos.map((repo) => repo.status),
         ...worktrees.map((worktree) => worktree.status),
+        // Work nobody can see is a warning, never a failure: the repo is fine, the commits are
+        // safe, and the only thing wrong is that no one has been told they exist.
+        ...abandoned.map(() => 'warn' as const),
       ]),
       repos,
       worktrees,
+      abandoned,
     };
   }
 
@@ -92,6 +115,42 @@ export class DoctorService {
       status: state === 'live' || state === 'kept' ? ('ok' as const) : ('warn' as const),
       detail,
     }));
+  }
+
+  /**
+   * Run branches carrying commits that are on no other ref and have no worktree on them.
+   *
+   * Only branches Pomni itself cut — `isRunBranch` is the filter, and it is strict about all
+   * three segments precisely so that a branch a person wrote is never reported as litter.
+   */
+  private async checkAbandoned(
+    repos: ResolvedRepo[],
+    worktrees: WorktreeCheck[],
+  ): Promise<AbandonedBranch[]> {
+    const held = new Set(worktrees.map((worktree) => worktree.branch));
+    const found: AbandonedBranch[] = [];
+
+    for (const repo of repos) {
+      if (!repo.workingDirExists) continue;
+
+      const base = repo.vcs?.defaultBranch ?? repo.vcs?.currentBranch;
+      if (!base) continue;
+
+      const branches = await this.git.branches(repo.workingDir, base).catch(() => []);
+      for (const branch of branches) {
+        if (branch.merged || held.has(branch.name) || !isRunBranch(branch.name)) continue;
+        found.push({
+          repoId: repo.id,
+          branch: branch.name,
+          runId: runIdFromBranch(branch.name),
+          detail:
+            `'${branch.name}' has commits that ${base} does not, and no worktree is on it — ` +
+            'a run left it behind. Look at it, then merge it or delete it.',
+        });
+      }
+    }
+
+    return found;
   }
 
   private async checkRepo(repo: ResolvedRepo): Promise<RepoReport> {

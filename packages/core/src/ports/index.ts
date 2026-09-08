@@ -140,6 +140,12 @@ export interface MergeResult {
   detail: string;
 }
 
+export interface BranchRef {
+  name: string;
+  /** Contained in the ref it was compared against, so its commits are not the only copy. */
+  merged: boolean;
+}
+
 export interface CommitResult {
   /** False when the tree was clean — an empty commit is never made. */
   committed: boolean;
@@ -161,6 +167,13 @@ export interface GitPort {
   changes(dir: string): Promise<Array<{ path: string; change: string }>>;
   /** True when `refs/heads/<branch>` exists in this repository. */
   branchExists(dir: string, branch: string): Promise<boolean>;
+  /**
+   * Local branches, and whether each is already contained in `mergedInto`.
+   *
+   * The second half is the whole point: a branch that is merged is work you can find in the
+   * history, and a branch that is not is work that exists nowhere else.
+   */
+  branches(dir: string, mergedInto: string): Promise<BranchRef[]>;
   /**
    * Merge `ref` into whatever `dir` has checked out, so the gate can be run on the result.
    *

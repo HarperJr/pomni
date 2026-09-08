@@ -6,6 +6,7 @@ import {
   type CloneOptions,
   type CommitResult,
   type FastForwardResult,
+  type BranchRef,
   type GitAuth,
   type GitPort,
   type MergeResult,
@@ -170,6 +171,27 @@ export class GitCli implements GitPort {
         `conflicts with ${ref} in ${conflicts.length} file${conflicts.length === 1 ? '' : 's'}` +
         ` (${conflicts.slice(0, 3).join(', ')}${conflicts.length > 3 ? ', …' : ''})`,
     };
+  }
+
+  /**
+   * Every local branch, and whether `mergedInto` already contains it.
+   *
+   * Two calls, because `--merged` filters rather than annotates: one for the names, one for
+   * the subset that is contained. The second half is the whole point — a merged branch is
+   * work you can find in the history, an unmerged one is work that exists nowhere else.
+   */
+  async branches(dir: string, mergedInto: string): Promise<BranchRef[]> {
+    const lines = async (args: string[]): Promise<string[]> => {
+      const result = await this.run(['-C', dir, 'for-each-ref', '--format=%(refname:short)', ...args, 'refs/heads'], {});
+      if (result.code !== 0) return [];
+      return result.stdout
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter((name) => name.length > 0);
+    };
+
+    const merged = new Set(await lines([`--merged=${mergedInto}`]));
+    return (await lines([])).map((name) => ({ name, merged: merged.has(name) }));
   }
 
   async branchExists(dir: string, branch: string): Promise<boolean> {

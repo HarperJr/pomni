@@ -30,6 +30,7 @@ import {
   type ForgePort,
   type GitAuth,
   type GitPort,
+  type BranchRef,
   type MergeRequestRef,
   type MergeResult,
   type OpenMergeRequestInput,
@@ -404,6 +405,20 @@ export class FakeGit implements GitPort {
         detail: `already up to date with ${ref}`,
       }
     );
+  }
+
+  /** Branches a test has declared unmerged — work that exists on no other ref. */
+  unmergedBranches: string[] = [];
+
+  async branches(dir: string, _mergedInto: string): Promise<BranchRef[]> {
+    const repoKey = dirKey(dir);
+    const names = new Set(this.declaredBranches);
+    for (const entry of this.worktrees.values()) {
+      if (entry.repoKey === repoKey || dirKey(entry.path) === repoKey) names.add(entry.branch);
+    }
+    for (const name of this.unmergedBranches) names.add(name);
+
+    return [...names].map((name) => ({ name, merged: !this.unmergedBranches.includes(name) }));
   }
 
   async branchExists(dir: string, branch: string): Promise<boolean> {
