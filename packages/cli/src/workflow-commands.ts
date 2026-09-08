@@ -821,6 +821,62 @@ ${item.body}`;
     });
 
   task
+    .command('show <id>')
+    .description('one run, broken down by agent — which one was expensive')
+    .option('-p, --project <id>', 'project')
+    .action(async (id: string, flags: { project?: string }) => {
+      const container = await open();
+      const projectId = flags.project ?? (await defaultProject());
+      const runs = await container.pipelines.list({ projectId, limit: 200 });
+      const match = runs.find((run) => run.id === id || run.id.endsWith(id.toUpperCase()));
+      if (!match) {
+        console.log(style.red(`no run here ends with '${id}'`));
+        return;
+      }
+
+      const detail = await container.pipelines.get(match.id);
+      console.log(`${style.bold(detail.id.slice(-8))}  ${detail.workflowName}  ${detail.status}`);
+      if (detail.itemId) console.log(style.dim(`item ${detail.itemId}`));
+      console.log();
+
+      console.log(
+        table(
+          detail.steps.map((step) => [
+            style.bold(step.agentName),
+            step.role === 'orchestrator' ? style.cyan('lead') : '',
+            thousands(step.inputTokens + step.outputTokens),
+            cacheShareLabel(step.cacheReadTokens, step.freshInputTokens),
+            step.promptBytes > 0 ? thousands(step.promptBytes) : style.dim('—'),
+            // Null and zero are different facts. A provider that reports no cost did not run
+            // for free, and printing $0.00 would say it did.
+            step.costUsd === null ? style.dim('not reported') : `$${step.costUsd.toFixed(2)}`,
+          ]),
+          ['AGENT', '', 'TOKENS', 'CACHE', 'PROMPT', 'COST'],
+        ),
+      );
+
+      console.log();
+      const spent = detail.costUsd === null ? style.dim('not reported') : `$${detail.costUsd.toFixed(2)}`;
+      console.log(
+        `${thousands(detail.inputTokens + detail.outputTokens)} tokens · ${spent} · ${detail.steps.length} steps`,
+      );
+
+      if (detail.itemId) {
+        const item = await container.pipelines.itemSpend(projectId, detail.itemId);
+        if (item.runs > 1) {
+          const total = item.costUsd === null ? style.dim('not reported') : `$${item.costUsd.toFixed(2)}`;
+          // The number that answers whether the agents were worth it. One run's figure
+          // flatters every task that needed more than one attempt.
+          console.log(
+            style.dim(
+              `${detail.itemId} across ${item.runs} runs: ${thousands(item.inputTokens + item.outputTokens)} tokens · ${total}`,
+            ),
+          );
+        }
+      }
+    });
+
+  task
     .command('cancel <id>')
     .description('stop a run, or close out one whose process is gone')
     .action(async (id: string) => {

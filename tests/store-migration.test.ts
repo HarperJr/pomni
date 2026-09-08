@@ -14,12 +14,28 @@ const { DatabaseSync } = createRequire(import.meta.url)('node:sqlite') as {
 };
 
 let dir: string;
+/**
+ * Every store this file opens, closed in teardown.
+ *
+ * Windows keeps the file handle until the connection is closed, so a store left open makes
+ * the directory undeletable and `afterEach` fails with EBUSY — intermittently, because it
+ * depends on what else is running. That is the flake this suite had.
+ */
+let opened: Array<{ close(): void }>;
 
 beforeEach(async () => {
+  opened = [];
   dir = await mkdtemp(join(tmpdir(), 'pomni-migrate-'));
 });
 
 afterEach(async () => {
+  for (const store of opened) {
+    try {
+      store.close();
+    } catch {
+      // Already closed, or never opened cleanly. Teardown must not fail over it.
+    }
+  }
   await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 });
 
@@ -41,7 +57,7 @@ describe('a database whose schema diverged from this one', () => {
     // it is what an unmerged branch's migrations did to the real database, and the version
     // number could not tell the two apart, because a counter describes depth and never
     // divergence.
-    new SqlitePipelineStore(path);
+    opened.push(new SqlitePipelineStore(path));
     const db = new DatabaseSync(path);
     const version = (db.prepare('select version from pipeline_schema limit 1').get() as {
       version: number;
@@ -52,7 +68,7 @@ describe('a database whose schema diverged from this one', () => {
     expect(columns(path, 'pipeline_runs')).not.toContain('branch');
 
     // Opening it again is the repair. Nothing has to be told that anything is wrong.
-    new SqlitePipelineStore(path);
+    opened.push(new SqlitePipelineStore(path));
 
     expect(columns(path, 'pipeline_runs')).toContain('branch');
     const after = new DatabaseSync(path);
@@ -66,6 +82,7 @@ describe('a database whose schema diverged from this one', () => {
   it('keeps the rows it already had', async () => {
     const path = join(dir, 'rows.db');
     const store = new SqlitePipelineStore(path);
+    opened.push(store);
     await store.insertRun({
       id: 'r1',
       projectId: 'acme',
@@ -98,7 +115,7 @@ describe('a database whose schema diverged from this one', () => {
     db.exec('ALTER TABLE pipeline_runs DROP COLUMN branch');
     db.close();
 
-    new SqlitePipelineStore(path);
+    opened.push(new SqlitePipelineStore(path));
     const after = new DatabaseSync(path);
     expect((after.prepare('select count(*) c from pipeline_runs').get() as { c: number }).c).toBe(1);
     after.close();

@@ -55,6 +55,14 @@ export const PipelineStepSchema = z.object({
    * A turn pays for this in full every time it takes one, so it is the number that says
    * whether an agent is expensive because of what it does or because of what it carries.
    */
+  /**
+   * Tokens written into the cache on this step, as the provider reported them.
+   *
+   * Kept apart from `cacheReadTokens` because they are priced apart and mean opposite things:
+   * a creation is an investment the next turn collects on, a read is the collection. Summing
+   * them would hide which of the two a run is actually doing.
+   */
+  cacheCreationTokens: z.number().default(0),
   promptBytes: z.number().default(0),
   /**
    * Where those bytes went. Measured at assembly, not estimated afterwards: the parts are

@@ -156,9 +156,9 @@ export class SqlitePipelineStore implements PipelineStore {
                                    model, provider_id, task, status, output, error, outcome, unmet,
                                    actions, depth, started_at, ended_at, duration_ms,
                                    turns, cache_read_tokens, fresh_input_tokens,
-                                   prompt_bytes, prompt_parts,
+                                   prompt_bytes, prompt_parts, cache_creation_tokens,
                                    input_tokens, output_tokens, cost_usd)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       step.id,
       step.runId,
@@ -184,6 +184,7 @@ export class SqlitePipelineStore implements PipelineStore {
       step.freshInputTokens,
       step.promptBytes,
       JSON.stringify(step.promptParts),
+      step.cacheCreationTokens,
       step.inputTokens,
       step.outputTokens,
       step.costUsd,
@@ -196,7 +197,7 @@ export class SqlitePipelineStore implements PipelineStore {
          SET status = ?, output = ?, error = ?, outcome = ?, unmet = ?, actions = ?,
              provider_id = ?, ended_at = ?, duration_ms = ?,
              turns = ?, cache_read_tokens = ?, fresh_input_tokens = ?,
-             prompt_bytes = ?, prompt_parts = ?,
+             prompt_bytes = ?, prompt_parts = ?, cache_creation_tokens = ?,
              input_tokens = ?, output_tokens = ?, cost_usd = ?
        WHERE id = ?`,
     ).run(
@@ -214,6 +215,7 @@ export class SqlitePipelineStore implements PipelineStore {
       step.freshInputTokens,
       step.promptBytes,
       JSON.stringify(step.promptParts),
+      step.cacheCreationTokens,
       step.inputTokens,
       step.outputTokens,
       step.costUsd,
@@ -396,6 +398,7 @@ interface StepRow {
   fresh_input_tokens: number;
   prompt_bytes: number;
   prompt_parts: string;
+  cache_creation_tokens: number;
   input_tokens: number;
   output_tokens: number;
   cost_usd: number | null;
@@ -519,6 +522,7 @@ function toStep(row: StepRow): PipelineStep {
     freshInputTokens: row.fresh_input_tokens ?? 0,
     promptBytes: row.prompt_bytes ?? 0,
     promptParts: parseParts(row.prompt_parts),
+    cacheCreationTokens: row.cache_creation_tokens ?? 0,
     inputTokens: row.input_tokens,
     outputTokens: row.output_tokens,
     costUsd: row.cost_usd,
@@ -630,6 +634,8 @@ const MIGRATIONS: string[] = [
 
   `ALTER TABLE pipeline_steps ADD COLUMN prompt_bytes INTEGER NOT NULL DEFAULT 0;
    ALTER TABLE pipeline_steps ADD COLUMN prompt_parts TEXT NOT NULL DEFAULT '{}';`,
+
+  `ALTER TABLE pipeline_steps ADD COLUMN cache_creation_tokens INTEGER NOT NULL DEFAULT 0;`,
 ];
 
 function migrate(db: SqliteDatabase): void {
