@@ -17,6 +17,8 @@ import {
   parseDelegations,
   parseHandover,
   summarise,
+  TOUCHED_FILES_CONTEXT_NAME,
+  touchedFilesContext,
   withBrief,
   withSiblings,
   withContext,
@@ -245,7 +247,17 @@ export class PipelineService {
     // An author who is not told which files a change is about pays to find them: on the run
     // that produced this, one spent 2.4M input tokens looking for two the item had named.
     const touched = input.itemId ? await this.touchedFiles(input.projectId, input.itemId) : null;
-    const context = normaliseContext([...(input.context ?? []), ...(touched ? [touched] : [])]);
+    // Replaced, never stacked: a rerun carries the previous run's context forward, and that
+    // already holds a list under this name. Appending a second one would rename it to
+    // `touched-files.md (2)` and charge every agent for both copies of the same paths.
+    const context = normaliseContext(
+      touched
+        ? [
+            ...(input.context ?? []).filter((file) => file.name !== TOUCHED_FILES_CONTEXT_NAME),
+            touched,
+          ]
+        : (input.context ?? []),
+    );
 
     const attached = await this.workflows.forProject(input.projectId);
     if (attached.length === 0) {
@@ -402,33 +414,10 @@ export class PipelineService {
    * the same treatment the run's other composed information already gets.
    */
   private async touchedFiles(projectId: string, itemId: string): Promise<ContextFile | null> {
+    // An item that cannot be read is not a reason to refuse to run: the run has a task, and
+    // the list is a head start rather than a requirement.
     const item = await this.backlog.get(projectId, itemId).catch(() => null);
-    const paths = (item?.touches ?? []).map((path) => path.trim()).filter(Boolean);
-    if (paths.length === 0) return null;
-
-    return {
-      name: TOUCHED_FILE,
-      content: [
-        'The item says this change is about these paths:',
-        '',
-        ...paths.map((path) => `- \`${path}\``),
-        '',
-        'Start there rather than searching for them. This is a starting point, not a fence:',
-        'if the work genuinely needs a file that is not listed, open it and say in your answer',
-        'which one and why.',
-        '',
-        // Measured: handing this list to the agents cut the authors 46%, and handing it to the
-        // orchestrator without this paragraph convinced it the change was big enough to scout —
-        // one scout costing more than everything the four authors saved.
-        'If you are planning this change rather than making it: this list is why you do not need',
-        'to send anyone to find out where the work is. Hand each path to the agent that owns that',
-        'part of the tree. A scout that returns this list has been paid to tell you what you were',
-        'already told.',
-        '',
-        'The list is the whole change, not your part of it. Open what your own job needs and',
-        'leave the rest to whoever owns it.',
-      ].join('\n'),
-    };
+    return touchedFilesContext(item?.touches) ?? null;
   }
 
   /**
@@ -497,7 +486,7 @@ export class PipelineService {
       // a step that was still running never recorded an answer worth keeping.
       if (!step.parentStepId || step.status !== 'done' || !step.output) continue;
 
-      seed.answered.set(`${step.agentId}::${step.task.trim().toLowerCase()}`, step.output);
+      seed.answered.set(memoKey(step.agentId, step.task), step.output);
       seed.useCount.set(step.agentId, (seed.useCount.get(step.agentId) ?? 0) + 1);
       finished.push({ agentId: step.agentId, task: step.task });
       reused += 1;
@@ -507,7 +496,7 @@ export class PipelineService {
     // returned from the ledger rather than put to them a second time.
     for (const question of previous.questions) {
       if (question.status !== 'answered' || !question.answer) continue;
-      seed.answered.set(`human::${question.question.trim().toLowerCase()}`, question.answer);
+      seed.answered.set(memoKey(HUMAN_AGENT_ID, question.question), question.answer);
     }
 
     const usable = (await this.repos.listResolved(previous.projectId)).filter(
@@ -541,11 +530,21 @@ export class PipelineService {
 
     // What the resume is and what changed since, as a context file: the orchestrator reads it
     // on its first turn, and it is the same chip a person already sees on the run.
-    const carried = previous.context.filter((file) => file.name !== RESUME_FILE);
+    // Recomposed rather than carried: the item may have declared another path since the run
+    // was interrupted. Matched by name and replaced, so a resumed run holds one list and not
+    // one per resume — every agent in the tree pays for this text.
+    const touched = previous.itemId
+      ? await this.touchedFiles(previous.projectId, previous.itemId)
+      : null;
+    const carried = previous.context.filter(
+      (file) =>
+        file.name !== RESUME_FILE && !(touched && file.name === TOUCHED_FILES_CONTEXT_NAME),
+    );
     const reopened: PipelineRun = {
       ...previous,
       context: [
         ...carried,
+        ...(touched ? [touched] : []),
         {
           name: RESUME_FILE,
           content: describeResume(finished, taken.reclaimed.length, note),
@@ -1215,9 +1214,10 @@ export class PipelineService {
           const settled = await Promise.all(
             batch.map(async (delegation) => {
               if (delegation.agent === HUMAN_AGENT_ID) {
-                const key = `human::${delegation.task.trim().toLowerCase()}`;
+                const key = memoKey(HUMAN_AGENT_ID, delegation.task);
                 const previous = answered.get(key);
                 if (previous !== undefined) {
+                  this.noteMemo(run, step, 'the person who started this run', delegation.task);
                   return `### You already asked this\n\n${previous}`;
                 }
 
@@ -1258,9 +1258,14 @@ export class PipelineService {
                 );
               }
 
-              const key = `${target.id}::${delegation.task.trim().toLowerCase()}`;
+              // The promise the protocol now makes to the orchestrator, kept: a task already
+              // answered comes back from the ledger instead of opening a second session for
+              // it. Not silent — a step that never ran is otherwise invisible in the run,
+              // and a person reading why a run was cheap has nothing to read.
+              const key = memoKey(target.id, delegation.task);
               const previous = answered.get(key);
               if (previous !== undefined) {
+                this.noteMemo(run, step, `${target.name} (\`${target.id}\`)`, delegation.task);
                 return `### ${target.name} — you already asked this\n\n${previous}`;
               }
 
@@ -2191,6 +2196,24 @@ export class PipelineService {
   }
 
   /**
+   * Say that a delegation was answered from the ledger rather than run.
+   *
+   * On the asking step's own output channel, which is where the budget line already goes: a
+   * session that never opened records no step, so without this the only trace of a repeat is
+   * a run that cost less than its transcript suggests it should have.
+   */
+  private noteMemo(run: PipelineRun, step: PipelineStep, target: string, task: string): void {
+    const line = `answered from this run's ledger, no session opened: ${target} — ${summarise(task, 120)}`;
+    this.events.emit({
+      type: 'pipeline.step.output',
+      runId: run.id,
+      stepId: step.id,
+      chunk: line,
+    });
+    this.logger.info(line);
+  }
+
+  /**
    * Put what an agent decided where every agent after it can see it.
    *
    * The same shelf a person's attachments land on, deliberately: an agent settling the shape
@@ -2575,8 +2598,21 @@ function normaliseContext(files: ContextFile[]): ContextFile[] {
   return normalised;
 }
 
-/** The name the item's own file list always has, so a rerun replaces it rather than stacking. */
-const TOUCHED_FILE = 'touched-files.md';
+/**
+ * What a delegation is remembered under, so an exact repeat is answered rather than run.
+ *
+ * Trimmed, lowercased, and runs of whitespace collapsed to one space: a model that rewraps the
+ * same paragraph across two lines means the same thing by it, and the protocol promises the
+ * orchestrator that re-asking returns the earlier answer. Nothing beyond whitespace and case is
+ * normalised — two tasks differing by a word are two tasks, and answering the second from the
+ * first would be worse than paying for it.
+ *
+ * A resume seeds from stored steps through this same function, so an answer written by the
+ * earlier attempt is found by the key the new attempt computes.
+ */
+function memoKey(agentId: string, task: string): string {
+  return `${agentId}::${task.trim().toLowerCase().replace(/\s+/g, ' ')}`;
+}
 
 /** The name a resume's own summary always has, so a second resume replaces the first. */
 const RESUME_FILE = 'resumed.md';
