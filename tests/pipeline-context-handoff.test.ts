@@ -1,5 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { TOUCHED_FILES_CONTEXT_NAME, type PomniEvent } from '@pomni/core';
+import {
+  MAX_CONTEXT_FILE_BYTES,
+  TOUCHED_FILES_CONTEXT_NAME,
+  clampHandover,
+  withinBudget,
+  type PomniEvent,
+} from '@pomni/core';
 import { createHarness, type TestHarness } from './harness.js';
 
 let harness: TestHarness;
@@ -270,5 +276,99 @@ describe('a repeated delegation is answered from the ledger', () => {
 
     const analystSteps = detail.steps.filter((step) => step.agentId === 'analyst');
     expect(analystSteps).toHaveLength(2);
+  });
+});
+
+describe('what a handover may cost the agents after it', () => {
+  it('cuts one that is too big, and says so inside the file', () => {
+    const huge = 'x'.repeat(MAX_CONTEXT_FILE_BYTES + 50_000);
+    const { files, notes } = clampHandover([{ name: 'dump.md', content: huge }]);
+
+    // Cut, not refused. `normaliseContext` throws, which is right for a person attaching a
+    // file and wrong mid-run: nobody is reading, and killing a run over an oversized note
+    // throws away work that is otherwise finished.
+    expect(files).toHaveLength(1);
+    expect(Buffer.byteLength(files[0]?.content ?? '', 'utf8')).toBeLessThanOrEqual(
+      MAX_CONTEXT_FILE_BYTES,
+    );
+    // An agent reading a note that stops mid-sentence must be able to tell it was cut.
+    expect(files[0]?.content).toContain('cut here');
+    expect(notes.join(' ')).toContain('dump.md');
+  });
+
+  it('drops one that is empty or is not text, and keeps the rest', () => {
+    const { files, notes } = clampHandover([
+      { name: 'empty.md', content: '   ' },
+      { name: 'binary.md', content: `a\u0000b` },
+      { name: 'good.md', content: 'turns, cacheReadTokens' },
+    ]);
+
+    expect(files.map((file) => file.name)).toEqual(['good.md']);
+    expect(notes).toHaveLength(2);
+  });
+
+  it('holds the run under the total every later agent carries, oldest first', () => {
+    const half = 'y'.repeat(MAX_CONTEXT_FILE_BYTES);
+    const dropped: string[] = [];
+
+    const kept = withinBudget(
+      [
+        { name: 'first.md', content: half },
+        { name: 'second.md', content: half },
+        { name: 'third.md', content: half },
+      ],
+      (name) => dropped.push(name),
+    );
+
+    // The most recent decision is the one the next agent is most likely to need.
+    expect(dropped).toEqual(['first.md']);
+    expect(kept.map((file) => file.name)).toEqual(['second.md', 'third.md']);
+  });
+
+  it('marks a handover as one, so a later attempt can tell it from an attachment', async () => {
+    await seed();
+    harness.llm.replies = [
+      delegate('author-a', 'settle the shape'),
+      ['Named them.', '', '```handover field-names.md', 'turns, cacheReadTokens', '```'].join('\n'),
+      'Done.',
+    ];
+
+    const { run, completion } = await harness.pipelines.start({
+      projectId: 'acme',
+      task: 'Ship it',
+      context: [{ name: 'spec.md', content: 'what a person attached' }],
+    });
+    await completion;
+
+    const detail = await harness.pipelines.get(run.id);
+    expect(detail.context.find((file) => file.name === 'field-names.md')?.origin).toBe('handover');
+    // Absent means attached: nothing else could ever have put a file here.
+    expect(detail.context.find((file) => file.name === 'spec.md')?.origin).toBeUndefined();
+  });
+
+  it('does not carry a handover into a rerun, only what a person attached', async () => {
+    await seed();
+    harness.llm.replies = [
+      delegate('author-a', 'settle the shape'),
+      ['Named them.', '', '```handover field-names.md', 'turns, cacheReadTokens', '```'].join('\n'),
+      'Done.',
+    ];
+
+    const first = await harness.pipelines.start({
+      projectId: 'acme',
+      task: 'Ship it',
+      context: [{ name: 'spec.md', content: 'what a person attached' }],
+    });
+    await first.completion;
+
+    harness.llm.replies = ['Done.'];
+    const again = await harness.pipelines.rerun(first.run.id);
+    await again.completion;
+
+    const carried = (await harness.pipelines.get(again.run.id)).context.map((file) => file.name);
+    // A decision taken inside a run that did not finish is not source material for the next
+    // attempt: carrying it hands the new agents a conclusion and calls it evidence.
+    expect(carried).toContain('spec.md');
+    expect(carried).not.toContain('field-names.md');
   });
 });

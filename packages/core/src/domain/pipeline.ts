@@ -77,6 +77,19 @@ export const ContextFileSchema = z.object({
   /** How the file is named to the agents. A basename, not the path it came from. */
   name: z.string().min(1).max(200),
   content: z.string().min(1),
+  /**
+   * Where this came from, and therefore how much it is worth.
+   *
+   * `attached` is a person's: they chose it, and it is as true on the third attempt as the
+   * first. `handover` is an agent's, decided inside one run — carrying it into a later attempt
+   * presents a conclusion from a run that did not finish as if it were source material, which
+   * is how a wrong decision outlives the reasoning that produced it.
+   *
+   * Optional, and absent means attached. Every run recorded before this field was attached —
+   * nothing else could put a file here — and leaving it optional keeps every caller that
+   * builds a file from a path unchanged. Only a handover has to say what it is.
+   */
+  origin: z.enum(['attached', 'handover']).optional(),
 });
 export type ContextFile = z.infer<typeof ContextFileSchema>;
 
