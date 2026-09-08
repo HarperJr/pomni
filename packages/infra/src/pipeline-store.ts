@@ -599,17 +599,20 @@ const MIGRATIONS: string[] = [
 function migrate(db: SqliteDatabase): void {
   db.exec(`CREATE TABLE IF NOT EXISTS pipeline_schema (version INTEGER NOT NULL)`);
 
-  const row = db.prepare('SELECT version FROM pipeline_schema LIMIT 1').get() as unknown as
-    | { version: number }
-    | undefined;
-  const current = row?.version ?? 0;
-
-  // Every step, every time. A counter is only right while migrations are appended, and one
-  // inserted into the middle leaves an existing database claiming a version it never reached
-  // — which is how a server refused to start and a Stop button silently did nothing. The
-  // statements below are individually safe to re-attempt, so the truth is the schema itself
-  // rather than a number we wrote down.
-  for (let version = current; version < MIGRATIONS.length; version += 1) {
+  // Every step, every time — which is what this comment always said and what the loop below
+  // did not do. Starting from the recorded version trusts a counter to describe a schema, and
+  // a counter can only ever describe *depth*. It cannot describe divergence.
+  //
+  // Two lists of the same length are indistinguishable by it. That is not hypothetical: this
+  // database sat at version 12, and so did a database built from this file, and they had
+  // different columns — one carried `turns`/`cache_read_tokens`/`fresh_input_tokens` from a
+  // branch that was never merged, the other carried `branch`. Both were "fully migrated" and
+  // neither would ever run another step, so the missing column would have stayed missing until
+  // the next run failed on an INSERT naming it.
+  //
+  // The statements are individually safe to re-attempt — a column that is already there is
+  // caught below — so the truth is the schema itself rather than a number we wrote down.
+  for (let version = 0; version < MIGRATIONS.length; version += 1) {
     db.exec('BEGIN');
     try {
       db.exec(MIGRATIONS[version] as string);
