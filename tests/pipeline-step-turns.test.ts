@@ -1,7 +1,7 @@
 import { createRequire } from 'node:module';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import type { PipelineStep } from '@pomni/core';
+import { PipelineStepSchema, type PipelineStep } from '@pomni/core';
 import { createHarness, type TestHarness } from './harness.js';
 
 let harness: TestHarness;
@@ -16,7 +16,9 @@ afterEach(async () => {
 
 /** A step with every required field set, so a test only has to vary what it cares about. */
 function makeStep(overrides: Partial<PipelineStep> = {}): PipelineStep {
-  return {
+  // Through the schema, so a field added to `PipelineStep` defaults here instead of failing
+  // this helper — which is how the same literal has fallen behind twice already.
+  return PipelineStepSchema.parse({
     id: 'step-1',
     runId: 'run-1',
     parentStepId: null,
@@ -43,7 +45,7 @@ function makeStep(overrides: Partial<PipelineStep> = {}): PipelineStep {
     outputTokens: 0,
     costUsd: null,
     ...overrides,
-  };
+  });
 }
 
 describe('pipeline step: turns and cache split', () => {

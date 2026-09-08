@@ -2,6 +2,8 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { basename, resolve } from 'node:path';
 import {
   AgentRoleSchema,
+  HANDOVER_PROTOCOL,
+  VERDICT_PROTOCOL,
   StruggleSchema,
   STRUGGLE,
   rosterFor,
@@ -101,6 +103,44 @@ export function registerWorkflowCommands(
           console.log(`${style.yellow('!')} ${problem.message}`);
         }
       }
+    });
+
+  workflow
+    .command('lint <id>')
+    .description('what each agent will carry on every turn, before a run pays for it')
+    .option('-p, --project <id>', 'project whose promptBudget to measure against')
+    .action(async (id: string, flags: { project?: string }) => {
+      const container = await open();
+      const found = await container.workflows.get(id);
+      const projectId = flags.project ?? (await defaultProject());
+      const budget = (await container.projects.getRef(projectId)).data.policy.promptBudget;
+
+      // The fixed frame every turn carries whatever the agent is: the two protocols an agent
+      // always ends with, plus the abilities block. The roster and the repo list vary per run
+      // and per agent, so they are not counted here — this is the floor, not the bill.
+      const scaffolding =
+        Buffer.byteLength(HANDOVER_PROTOCOL, 'utf8') + Buffer.byteLength(VERDICT_PROTOCOL, 'utf8');
+
+      const rows = lintReport(found.agents, scaffolding, budget);
+      console.log(
+        table(
+          rows.map((row) => [
+            style.bold(row.id),
+            thousands(row.prompt),
+            thousands(row.scaffolding),
+            thousands(row.total),
+            row.flags.length > 0 ? style.yellow(row.flags.join(', ')) : style.dim('—'),
+          ]),
+          ['AGENT', 'PROMPT', 'FRAME', 'PER TURN', 'FLAGS'],
+        ),
+      );
+      console.log(
+        style.dim(
+          `budget ${thousands(budget)} bytes a turn (policy.promptBudget on '${projectId}').` +
+            ' An orchestrator also carries the roster, and an agent that touches files carries' +
+            ' the repo list — neither is counted above, because both depend on the run.',
+        ),
+      );
     });
 
   workflow
@@ -1136,3 +1176,30 @@ function cacheShareLabel(cacheReadTokens: number, freshInputTokens: number): str
 /** Pad by visible width, since a dim `—` or colored cell carries invisible ANSI codes. */
 function padVisible(text: string, width: number): string {
   return ' '.repeat(Math.max(0, width - visibleLength(text))) + text;}
+
+/**
+ * What each agent in a workflow will carry on every turn, before a run pays for it.
+ *
+ * A run tells you afterwards; this tells you first. The number that matters is not the prompt
+ * but the ratio: an agent whose frame is larger than its own instructions is paying for
+ * scaffolding on every round, and the fix is usually to write the prompt properly rather than
+ * to trim the frame.
+ */
+export function lintReport(
+  agents: Array<{ id: string; name: string; role: string; prompt: string }>,
+  scaffolding: number,
+  budget: number,
+): Array<{ id: string; prompt: number; scaffolding: number; total: number; flags: string[] }> {
+  return agents.map((agent) => {
+    const prompt = Buffer.byteLength(agent.prompt, 'utf8');
+    const total = prompt + scaffolding;
+    const flags: string[] = [];
+
+    if (prompt === 0) flags.push('no prompt');
+    // The comparison the item asks for, and the one worth acting on.
+    else if (scaffolding > prompt) flags.push('frame larger than prompt');
+    if (total > budget) flags.push('over budget');
+
+    return { id: agent.id, prompt, scaffolding, total, flags };
+  });
+}

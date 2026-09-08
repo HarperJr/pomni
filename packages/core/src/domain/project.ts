@@ -32,6 +32,15 @@ export const ProjectPolicySchema = z.object({
   requireGreenGate: z.boolean().default(true),
   maxTurns: z.number().int().positive().default(200),
   maxCostUsd: z.number().positive().default(5),
+  /**
+   * Bytes of assembled system prompt one turn may carry.
+   *
+   * A ceiling on the frame, not on the picture. Every turn pays for the whole prompt again,
+   * so scaffolding that outgrows the agent's own instructions is paid for on every round of
+   * every agent — measured on one workflow here, 900 bytes of prompt inside 3,500 bytes of
+   * frame. Over budget, the least essential parts go first and the agent is told what went.
+   */
+  promptBudget: z.number().int().positive().default(8000),
 });
 export type ProjectPolicy = z.infer<typeof ProjectPolicySchema>;
 
