@@ -144,6 +144,50 @@ export function registerWorkflowCommands(
     });
 
   workflow
+    .command('signals [id]')
+    .description('what keeps going wrong in a workflow, from the runs that already happened')
+    .option('-p, --project <id>', 'project')
+    .option('--all', 'every signal, not only the ones that repeated')
+    .action(async (id: string | undefined, flags: { project?: string; all?: boolean }) => {
+      const container = await open();
+      const projectId = flags.project ?? (await defaultProject());
+      const { signals, findings } = await container.pipelines.signals(projectId, id);
+
+      if (signals.length === 0) {
+        console.log(style.dim('nothing to report — no runs, or nothing went wrong in them'));
+        return;
+      }
+
+      if (findings.length === 0) {
+        console.log(style.dim(`${signals.length} signals, none repeated across three runs yet`));
+      } else {
+        console.log(style.bold('what keeps happening'));
+        for (const finding of findings) {
+          console.log(
+            `   ${style.yellow(finding.kind.padEnd(13))} ${(finding.agentName ?? 'the run').padEnd(18)}` +
+              ` ${finding.runIds.length} runs`,
+          );
+          // The wording is the evidence, so one example is shown whole rather than summarised.
+          console.log(`      ${style.dim(truncate(finding.details[0] ?? '', 96))}`);
+        }
+        console.log();
+      }
+
+      if (!flags.all) {
+        console.log(style.dim(`${signals.length} signals in all — 'pomni workflow signals --all' lists them`));
+        return;
+      }
+
+      console.log(style.bold('every signal'));
+      for (const signal of signals) {
+        console.log(
+          `   ${style.dim(signal.runId.slice(-8))} ${signal.kind.padEnd(13)}` +
+            ` ${(signal.agentName ?? '—').padEnd(18)} ${truncate(signal.detail, 70)}`,
+        );
+      }
+    });
+
+  workflow
     .command('remove <id>')
     .alias('rm')
     .description('delete a workflow')

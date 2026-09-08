@@ -34,6 +34,7 @@ import {
   type Verdict,
 } from '../domain/pipeline.js';
 import { detectProvider } from '../domain/source.js';
+import { findings, signalsFor, type Finding, type Signal } from '../domain/signals.js';
 import { toolBriefing } from '../domain/tool.js';
 import { ulid } from '../domain/ulid.js';
 import { chooseWorkflow, entryAgent, findAgent, rosterFor, type Workflow } from '../domain/workflow.js';
@@ -428,6 +429,31 @@ export class PipelineService {
     }
 
     return { runs: runs.length, inputTokens, outputTokens, costUsd };
+  }
+
+  /**
+   * What keeps going wrong in a workflow, and what only went wrong once.
+   *
+   * Reads history rather than instrumenting the future: every fact a signal is built from is
+   * already recorded, so this works on the runs that have already happened instead of only on
+   * the ones after it ships.
+   */
+  async signals(
+    projectId: string,
+    workflowId?: string,
+  ): Promise<{ signals: Signal[]; findings: Finding[] }> {
+    const runs = await this.store.listRuns({
+      projectId,
+      ...(workflowId ? { workflowId } : {}),
+      limit: MAX_LISTED,
+    });
+
+    const all: Signal[] = [];
+    for (const run of runs) {
+      all.push(...signalsFor(run, await this.store.steps(run.id)));
+    }
+
+    return { signals: all, findings: findings(all) };
   }
 
   async list(filter: PipelineFilter): Promise<PipelineRun[]> {
