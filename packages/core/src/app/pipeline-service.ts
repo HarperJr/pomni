@@ -3,6 +3,12 @@ import {
   isOrchestrator,
   type Agent,
 } from '../domain/agent.js';
+import {
+  COMMENTS_CONTEXT_NAME,
+  COMMENT_PROTOCOL,
+  parseComments,
+  type CommentsSince,
+} from '../domain/comment.js';
 import { ConflictError, NotFoundError, ValidationError } from '../domain/errors.js';
 import { layout } from '../domain/layout.js';
 import {
@@ -61,6 +67,7 @@ import type {
   PipelineStore,
 } from '../ports/index.js';
 import type { BacklogService } from './backlog-service.js';
+import type { CommentService } from './comment-service.js';
 import type { ProjectService } from './project-service.js';
 import type { RunService } from './run-service.js';
 import type { ProviderService } from './provider-service.js';
@@ -81,6 +88,11 @@ export interface StartRunInput {
   context?: ContextFile[];
   /** Set when this run is a second attempt at an earlier one. */
   rerunOf?: string;
+  /**
+   * Where the previous attempt started, so this one's comments file can say which notes it
+   * had already seen. Only `rerun()` sets it; a first attempt has nothing to be since.
+   */
+  commentsSince?: CommentsSince;
 }
 
 export interface StartRunResult {
@@ -238,6 +250,7 @@ export class PipelineService {
     private readonly logger: Logger,
     private readonly worktrees: WorktreeService,
     private readonly forge: ForgePort,
+    private readonly comments: CommentService,
   ) {}
 
   async start(input: StartRunInput): Promise<StartRunResult> {
@@ -250,17 +263,27 @@ export class PipelineService {
     // An author who is not told which files a change is about pays to find them: on the run
     // that produced this, one spent 2.4M input tokens looking for two the item had named.
     const touched = input.itemId ? await this.touchedFiles(input.projectId, input.itemId) : null;
+    // What people and earlier agents have said about the item since it was specced. Rebuilt
+    // from the store on every attempt, never carried: a note written between two attempts must
+    // reach the second one, and one deleted between them must not survive in a copy.
+    const notes = input.itemId
+      ? await this.comments.runContext(
+          input.itemId,
+          input.commentsSince ? { since: input.commentsSince } : {},
+        )
+      : undefined;
     // Replaced, never stacked: a rerun carries the previous run's context forward, and that
     // already holds a list under this name. Appending a second one would rename it to
     // `touched-files.md (2)` and charge every agent for both copies of the same paths.
-    const context = normaliseContext(
-      touched
-        ? [
-            ...(input.context ?? []).filter((file) => file.name !== TOUCHED_FILES_CONTEXT_NAME),
-            touched,
-          ]
-        : (input.context ?? []),
-    );
+    const context = normaliseContext([
+      ...(input.context ?? []).filter(
+        (file) =>
+          (touched ? file.name !== TOUCHED_FILES_CONTEXT_NAME : true) &&
+          file.name !== COMMENTS_CONTEXT_NAME,
+      ),
+      ...(touched ? [touched] : []),
+      ...(notes ? [notes] : []),
+    ]);
 
     const attached = await this.workflows.forProject(input.projectId);
     if (attached.length === 0) {
@@ -506,6 +529,9 @@ export class PipelineService {
       itemId: previous.itemId ?? undefined,
       providerId: previous.providerId,
       rerunOf: previous.id,
+      // What the last attempt had in front of it, so a note written since then is presented as
+      // new rather than blended in with the ones it already acted on.
+      commentsSince: { at: previous.startedAt, runId: previous.id },
       context: [...carried, { name: ATTEMPT_FILE, content: describeAttempt(previous) }],
     });
   }
@@ -1264,6 +1290,11 @@ export class PipelineService {
           chunk: result.text,
         });
 
+        // Notes this agent left. Nothing waits for them: a comment is written and the round
+        // carries on in the same turn, which is the whole difference between this and asking
+        // a person — that one blocks by design, and this one must never.
+        await this.noteComments(run, step, agent, result.text);
+
         const delegations = orchestrating ? parseDelegations(result.text) : null;
         if (!delegations) {
           answer = result.text;
@@ -1728,6 +1759,8 @@ export class PipelineService {
       '',
       HANDOVER_PROTOCOL,
       '',
+      COMMENT_PROTOCOL,
+      '',
       VERDICT_PROTOCOL,
     ].join('\n');
 
@@ -1748,6 +1781,8 @@ export class PipelineService {
         ...(repoList ? ['', repoList] : []),
         '',
         HANDOVER_PROTOCOL,
+        '',
+        COMMENT_PROTOCOL,
         '',
         VERDICT_PROTOCOL,
       ].join('\n');
@@ -1805,7 +1840,12 @@ export class PipelineService {
     const protocolOnly = (input.protocol ?? '').replace(roster, '');
     const promptParts = {
       agent: bytes(agent.prompt) + bytes(input.skillPrompt ?? ''),
-      protocol: bytes(protocolOnly) + bytes(HANDOVER_PROTOCOL) + bytes(VERDICT_PROTOCOL) + bytes(abilities),
+      protocol:
+        bytes(protocolOnly) +
+        bytes(HANDOVER_PROTOCOL) +
+        bytes(COMMENT_PROTOCOL) +
+        bytes(VERDICT_PROTOCOL) +
+        bytes(abilities),
       roster: bytes(roster),
       tools: bytes(briefingSent ?? ''),
       repos: bytes(reposSent ?? ''),
@@ -2385,6 +2425,61 @@ export class PipelineService {
       'Decide it yourself on the best evidence you have, and say plainly in your final',
       'answer which question went unanswered and what you assumed.',
     ].join(' ');
+  }
+
+  /**
+   * Write the notes an agent left in its reply.
+   *
+   * On the backlog item the run started from, not on the run: a reviewer's finding outlives
+   * the attempt that found it, and the next attempt reads the item's comments as context. A
+   * run with no item has only itself to write on.
+   *
+   * Never throws. A note is something an agent said in passing, and losing the whole step
+   * because a note could not be stored would cost the work to save the remark about it.
+   */
+  private async noteComments(
+    run: PipelineRun,
+    step: PipelineStep,
+    agent: Agent,
+    text: string,
+  ): Promise<void> {
+    for (const note of parseComments(text)) {
+      try {
+        const comment = await this.comments.add({
+          subject: run.itemId ? 'item' : 'run',
+          subjectId: run.itemId ?? run.id,
+          projectId: run.projectId,
+          // The run and step it was speaking from, so a reader of the item can get back to the
+          // transcript that explains the note.
+          author: {
+            kind: 'agent',
+            agentId: agent.id,
+            agentName: agent.name,
+            runId: run.id,
+            stepId: step.id,
+          },
+          text: note.text,
+          addressedTo: note.addressedTo,
+        });
+
+        const line = `left a note on ${comment.subjectId}${
+          comment.addressedTo ? ` for ${comment.addressedTo}` : ''
+        }: ${summarise(comment.text, 120)}`;
+        this.events.emit({
+          type: 'pipeline.step.output',
+          runId: run.id,
+          stepId: step.id,
+          chunk: line,
+        });
+        this.logger.info(line);
+      } catch (error) {
+        this.logger.warn(
+          `'${agent.name}' left a note that could not be stored: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
+    }
   }
 
   /**

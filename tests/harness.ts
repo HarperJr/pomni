@@ -7,6 +7,7 @@ import { DetectorRegistry } from '@pomni/adapters';
 import {
   BacklogService,
   ChatService,
+  CommentService,
   CredentialService,
   DiscoveryService,
   DoctorService,
@@ -63,6 +64,7 @@ import {
   NoProviderProbe,
   NoopLock,
   SqliteChatStore,
+  SqliteCommentStore,
   SqlitePipelineStore,
   SqliteWorktreeStore,
   SilentLogger,
@@ -748,6 +750,8 @@ export interface TestHarness<G extends GitPort = FakeGit> extends PomniContainer
   pipelineStore: SqlitePipelineStore;
   worktreeStore: SqliteWorktreeStore;
   chatStore: SqliteChatStore;
+  commentStore: SqliteCommentStore;
+  comments: CommentService;
   git: G;
   executor: FakeExecutor;
   forge: FakeForge;
@@ -849,6 +853,15 @@ export async function createHarness<G extends GitPort = FakeGit>(
   const workflows = new WorkflowService(docs, projects, providerService, clock, events);
   const tools = new ToolService(docs, projects, credentials, executor, clock, events, logger);
   const discovery = new DiscoveryService(repos, workflows, fs);
+
+  // Shares pomni.db with the pipeline store, same as chat — one file, one set of connections.
+  const commentStore = new SqliteCommentStore(docs.absolute(layout.database));
+  const comments = new CommentService(commentStore, clock, events, logger);
+
+  // `comments` is new: PipelineService reads an item's comments into a run's context and lets
+  // an agent write one mid-run (see comments-context.test.ts / comments-agent.test.ts). Passed
+  // last so this line breaks loudly — a TypeError on the constructor's arity — until the
+  // authors add the parameter, rather than silently binding to the wrong existing one.
   const pipelines = new PipelineService(
     docs,
     pipelineStore,
@@ -865,6 +878,7 @@ export async function createHarness<G extends GitPort = FakeGit>(
     logger,
     worktrees,
     forge,
+    comments,
   );
 
   const chatStore = new SqliteChatStore(docs.absolute(layout.database));
@@ -918,6 +932,8 @@ export async function createHarness<G extends GitPort = FakeGit>(
     pipelineStore,
     worktreeStore,
     chatStore,
+    commentStore,
+    comments,
     runStore,
     logs,
     clock,
@@ -930,6 +946,7 @@ export async function createHarness<G extends GitPort = FakeGit>(
       pipelineStore.close();
       worktreeStore.close();
       chatStore.close();
+      commentStore.close();
       // Windows holds handles briefly after close; retry rather than fail the suite.
       await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     },
