@@ -17,5 +17,6 @@ export * from './lock.js';
 export * from './log-sink.js';
 export * from './output-analyzer.js';
 export * from './provider-probe.js';
+export * from './restart.js';
 export * from './run-store.js';
 export * from './worktree-store.js';

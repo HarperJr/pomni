@@ -21,7 +21,7 @@ Legend: **✓** shipped · **·** designed, not yet built.
 | Command | | Does |
 | --- | --- | --- |
 | `pomni init` | ✓ | Create `.pomni/` in the current directory. Idempotent. Warns if git is missing. |
-| `pomni serve [--port 7777] [--host] [--token] [--open]` | ✓ | Start the management server and UI. Non-loopback `--host` requires `--token` or the server refuses to start. |
+| `pomni serve [--port 7777] [--host] [--token] [--open]` | ✓ | Start the management server and UI. Non-loopback `--host` requires `--token` or the server refuses to start. Running by hand in a terminal is unsupervised — `POST /api/restart` is unavailable and the UI shows no restart button. Set `POMNI_SUPERVISED=1` when running under a supervisor (systemd, pm2, container restart policy) to enable restarts. |
 | `pomni doctor [--repair]` | · | Environment, registry and database integrity. |
 | `pomni config get/set <key> [value]` | · | Read/write `.pomni/config.yaml`. |
 

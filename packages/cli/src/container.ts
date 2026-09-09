@@ -1,4 +1,6 @@
-import { join, resolve } from 'node:path';
+import { existsSync, readFileSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { DetectorRegistry } from '@pomni/adapters';
 import {
   BacklogService,
@@ -12,6 +14,7 @@ import {
   ProviderService,
   RepoService,
   RunService,
+  SystemService,
   ToolService,
   WorkflowService,
   WorkspaceService,
@@ -33,6 +36,7 @@ import {
   HttpProviderProbe,
   InMemoryEventBus,
   NodeFsProbe,
+  NodeRestartAdapter,
   ProcessExecutor,
   SqliteChatStore,
   SqlitePipelineStore,
@@ -42,6 +46,33 @@ import {
   findWorkspaceRoot,
   type LogLevel,
 } from '@pomni/infra';
+
+/**
+ * The Pomni checkout this CLI's code was loaded from — what a restart rebuilds.
+ *
+ * Walks up from the compiled bundle (not `process.cwd()`, which is wherever the command was
+ * typed) looking for the root `package.json`, identified by its `workspaces` field, which is
+ * the one thing actually true of this repo and not of an arbitrary ancestor directory. Null
+ * when there is no such ancestor — a global npm install with no checkout — and callers must
+ * treat that as "cannot self-restart" rather than guess a directory.
+ */
+function findSelfRepoDir(fromFileUrl: string): string | null {
+  let dir = dirname(fileURLToPath(fromFileUrl));
+  for (;;) {
+    const pkgPath = join(dir, 'package.json');
+    if (existsSync(pkgPath)) {
+      try {
+        const pkg = JSON.parse(readFileSync(pkgPath, 'utf8'));
+        if (Array.isArray(pkg.workspaces)) return dir;
+      } catch {
+        // Not readable as JSON — keep walking up rather than treating it as a match.
+      }
+    }
+    const parent = dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+}
 
 export interface ContainerOptions {
   /** Explicit workspace root (the directory *containing* `.pomni`, or `.pomni` itself). */
@@ -140,6 +171,32 @@ export function createContainer(root: string, logLevel: LogLevel = 'warn'): Pomn
     worktrees,
     new ForgeClient(),
   );
+  // Empty rather than `process.cwd()` on purpose: a fallback directory that happens to look
+  // like a project would let the adapter rebuild and replace this process with the wrong
+  // code, silently. An empty path has no `package.json`, so `supervision()` has no honest
+  // answer but "unsupported" — which is the failure mode this exists to surface, not hide.
+  const selfRepoDir = findSelfRepoDir(import.meta.url);
+  if (selfRepoDir === null) {
+    logger.warn(
+      'could not locate the Pomni checkout this process is running from; restart is unsupported',
+    );
+  }
+  const restart = new NodeRestartAdapter({
+    repoDir: selfRepoDir ?? '',
+    logger,
+  });
+  const system = new SystemService(
+    selfRepoDir ?? '',
+    restart,
+    pipelines,
+    runs,
+    workspace,
+    git,
+    clock,
+    events,
+    logger,
+  );
+
   const chatStore = new SqliteChatStore(docs.absolute(layout.database));
   const chat = new ChatService(
     chatStore,
@@ -173,6 +230,7 @@ export function createContainer(root: string, logLevel: LogLevel = 'warn'): Pomn
     runs,
     doctor,
     worktrees,
+    system,
     detection,
     executor,
     runStore,

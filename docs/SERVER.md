@@ -28,6 +28,7 @@ Start it with `pomni serve`. It is not required for anything else to work.
 | Stream live run logs; cancel a run | — |
 | Browse past AI sessions, transcripts, touched files (read-only) | — |
 | Chat with a model and let it act on Pomni, guarded by confirm-before-write (§4 Chats) | Let a chat write anything outside the typed action catalogue |
+| Reload the tab when it is behind the server | Restart Pomni via HTTP if it is running in a terminal (unsupervised) |
 
 The line is mostly deliberate: the server is the surface you use when you know what you want, and
 that judgement-free path (grooming, running gates, reading history) needs no model credentials.
@@ -35,6 +36,13 @@ Chat is the one exception — it is where the server does invoke AI — but it n
 implementation of a rule: every action it proposes calls the same application service the CLI
 would, so a chat-confirmed `backlog.move` is indistinguishable in the log from one typed at a
 terminal.
+
+When `pomni serve` is started by hand in a terminal, it reports `supervision.mode: 'unsupported'`
+to `/api/health`, and the UI does not show a restart button — restarting an unsupervised process
+would require a supervisor (systemd, pm2, a container restart policy) that the HTTP request cannot
+talk to. When Pomni is run under such a supervisor, it reports `supervision.mode: 'supervised'`
+and `POST /api/restart` is available. A build failure leaves the old process intact and reports
+the output; in-flight runs block a restart until they finish or are cancelled.
 
 The seam for later is already correct — `SessionService` is in the container the server builds,
 so exposing `POST /api/sessions` when headless mode lands (M4) is a route file, not a redesign.
@@ -257,7 +265,12 @@ talking to, so they are published on the in-process bus only and never written t
 ### Meta
 
 ```
-GET    /api/health                       version, stores, watcher status
+GET    /api/health                       ok, build, root, git, initialized, server
+                                         (server: startedAtCommit, headCommit, behindRepo,
+                                          startedAt, supervision: { mode, detail })
+POST   /api/restart                      { cancelInFlight?: boolean } -> 200 with discriminated
+                                         union: unsupported | runs-in-flight | build-failed |
+                                         restarting
 GET    /api/stats?project=&since=        throughput, gate pass rate, cost per landed item
 ```
 

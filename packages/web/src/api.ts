@@ -24,6 +24,56 @@ export class ApiError extends Error {
   }
 }
 
+export type SupervisionMode = 'supervised' | 'self' | 'unsupported';
+
+export interface Supervision {
+  mode: SupervisionMode;
+  detail: string;
+}
+
+export interface BuildStepResult {
+  cmd: string;
+  exitCode: number | null;
+  output: string;
+}
+
+export interface BuildOutcome {
+  ok: boolean;
+  steps: BuildStepResult[];
+}
+
+export interface ServerIdentity {
+  startedAtCommit: string | null;
+  headCommit: string | null;
+  behindRepo: boolean;
+  startedAt: string;
+  supervision: Supervision;
+}
+
+export interface SystemHealth {
+  ok: true;
+  build: string | null;
+  root: string;
+  git: boolean;
+  initialized: boolean;
+  server: ServerIdentity;
+}
+
+export interface InFlightRun {
+  kind: 'pipeline' | 'capability';
+  id: string;
+  projectId: string;
+  itemId: string | null;
+  what: string;
+  startedAt: string;
+}
+
+export type RestartResult =
+  | { outcome: 'unsupported'; supervision: Supervision }
+  | { outcome: 'runs-in-flight'; runs: InFlightRun[] }
+  | { outcome: 'build-failed'; build: BuildOutcome }
+  | { outcome: 'restarting'; build: BuildOutcome; cancelled: InFlightRun[] };
+
 export type RepoStatus = 'linked' | 'cloning' | 'ready' | 'error' | 'missing';
 export type RepoRole = 'web' | 'api' | 'mobile' | 'desktop' | 'lib' | 'infra' | 'docs' | 'other';
 
@@ -801,7 +851,13 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
-  health: () => request<{ ok: boolean; root: string; git: boolean }>('/api/health'),
+  health: () => request<SystemHealth>('/api/health'),
+
+  restartServer: (opts?: { cancelInFlight?: boolean }) =>
+    request<RestartResult>('/api/restart', {
+      method: 'POST',
+      body: JSON.stringify(opts ?? {}),
+    }),
 
   listProjects: () => request<{ projects: ProjectSummary[] }>('/api/projects'),
 

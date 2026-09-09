@@ -19,6 +19,7 @@ import type { ToolService } from './tool-service.js';
 import type { WorkflowService } from './workflow-service.js';
 import type { ProjectService } from './project-service.js';
 import type { RepoService } from './repo-service.js';
+import type { SystemService } from './system-service.js';
 import type { WorkspaceService } from './workspace-service.js';
 import type { WorktreeService } from './worktree-service.js';
 
@@ -46,6 +47,8 @@ export interface PomniContainer {
   runs: RunService;
   worktrees: WorktreeService;
   doctor: DoctorService;
+  /** What this server is running, and replacing it with what was merged. */
+  system: SystemService;
   detection: StackDetection;
   executor: Executor;
   runStore: RunStore;
