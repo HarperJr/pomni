@@ -71,9 +71,10 @@ export function registerBacklogCommands(
     .option('-l, --label <label>', 'filter by label')
     .option('-r, --repo <id>', 'filter by repo')
     .option('-q, --query <text>', 'substring match on the title')
+    .option('--eligible', 'only items with a manual move ready — nothing outstanding, waiting on a person')
     .action(async (flags: ListFlags) => {
       const container = await open();
-      const items = await container.backlog.list({
+      const filter = {
         projectId: flags.project,
         status: parseStatusFilter(flags.status),
         type: flags.type as ItemType | undefined,
@@ -81,7 +82,35 @@ export function registerBacklogCommands(
         label: flags.label,
         repo: flags.repo,
         query: flags.query,
-      });
+      };
+
+      if (flags.eligible) {
+        const found = await container.backlog.eligibleItems(filter);
+        const rows = found
+          .map((entry) => ({ item: entry.item, moves: entry.moves.filter((move) => move.mode === 'manual') }))
+          .filter((entry) => entry.moves.length > 0);
+
+        if (rows.length === 0) {
+          console.log(style.dim('nothing is waiting on you — every manual move still has something outstanding'));
+          return;
+        }
+
+        console.log(
+          table(
+            rows.map(({ item, moves }) => [
+              style.bold(item.id),
+              statusText(item.status),
+              item.priority,
+              item.title,
+              moves.map((move) => move.label).join(', '),
+            ]),
+            ['ID', 'STATUS', 'PRI', 'TITLE', 'READY TO MOVE'],
+          ),
+        );
+        return;
+      }
+
+      const items = await container.backlog.list(filter);
 
       if (items.length === 0) {
         console.log(style.dim("nothing here — capture something with 'pomni backlog add <title>'"));
@@ -210,7 +239,8 @@ export function registerBacklogCommands(
     .command('move <id> <status>')
     .description("move an item to a new status — see 'pomni backlog flow' for what this project allows")
     .option('-p, --project <id>', 'project')
-    .option('--reason <text>', 'why (recorded in the item log)')
+    .option('--comment <text>', 'why (recorded in the item log and its history)')
+    .option('--reason <text>', 'alias for --comment; --comment wins if both are given')
     .option('-f, --force', 'skip the guards; recorded as forced')
     .action(async (id: string, status: string, flags: MoveFlags) => {
       const container = await open();
@@ -225,6 +255,7 @@ export function registerBacklogCommands(
       }
 
       const moved = await container.backlog.transition(projectId, itemId, status, {
+        comment: flags.comment,
         reason: flags.reason,
         force: flags.force,
       });
@@ -544,6 +575,7 @@ interface ListFlags {
   label?: string;
   repo?: string;
   query?: string;
+  eligible?: boolean;
 }
 
 interface EditFlags extends AddFlags {
@@ -554,6 +586,7 @@ interface EditFlags extends AddFlags {
 
 interface MoveFlags {
   project?: string;
+  comment?: string;
   reason?: string;
   force?: boolean;
 }

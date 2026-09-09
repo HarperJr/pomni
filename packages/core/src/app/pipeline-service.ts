@@ -967,12 +967,11 @@ export class PipelineService {
         finished = { ...finished, unmet: [...finished.unmet, ...merges.notes] };
         finished = await this.runGate(finished, dirOverrides);
         if (finished.itemId) {
-          // Review means "someone should look at finished work". Both halves have to hold:
-          // the gate proves the repo still builds, the verdict says the work was actually
-          // done. A green gate over an unfinished job is the more dangerous of the two,
-          // because it looks like evidence.
-          // Three halves now. Work that will not merge is not ready to review however green
-          // it is on its own — a reviewer reading it would be reading a branch that cannot land.
+          // Whether this run *finished the work* is the pipeline's own judgement and stays here:
+          // the gate proves the repo still builds, the verdict says the work was actually done,
+          // and a branch that will not merge is not reviewable however green it is on its own.
+          // A green gate over an unfinished job is the most dangerous of the three, because it
+          // looks like evidence.
           const ready =
             finished.gateStatus !== 'failed' && finished.outcome === 'done' && !merges.conflicted;
           const why = merges.conflicted
@@ -983,8 +982,15 @@ export class PipelineService {
                   finished.unmet.length > 0 ? `: ${finished.unmet.join('; ')}` : ''
                 }`;
 
+          // Where the item goes next is the *project's* judgement, and this is where the
+          // pipeline stops making it. It reports that the run finished and the gate ran, and
+          // the flow decides: on the built-in flow `in_progress -> in_review` is an `auto`
+          // arrow requiring the `default` gate, so a passing run still ends in review — as a
+          // consequence of the flow, and reachable by a person's drag and by `pomni verify`
+          // just the same. A project whose flow makes that arrow manual keeps its item where
+          // it is and sees it listed as eligible instead, which is what asking meant.
           const moved = ready
-            ? await this.moveItem(finished, 'in_review', 'agent run finished and the gate passed')
+            ? await this.advanceItem(finished)
             : await this.moveItem(finished, 'blocked', why);
           finished = { ...finished, itemStatus: moved };
         }
@@ -2548,6 +2554,29 @@ export class PipelineService {
       const message = error instanceof Error ? error.message : String(error);
       this.logger.warn(`could not move ${run.itemId} to ${to}: ${message}`);
       return `could not move to ${to}: ${message}`;
+    }
+  }
+
+  /**
+   * Tell the backlog that this run and its gate finished, and report where the item ended up.
+   *
+   * The trigger, not the decision: everything an `auto` arrow could be waiting on — the gate
+   * runs this run recorded, the agents' edits to the item body — has happened by now, and
+   * nothing else re-reads it. What moves the item, if anything moves it, is the project's flow,
+   * checked by the same guard a person's drag goes through.
+   *
+   * An item that does not move is not a failure. It stayed where it is because its flow says a
+   * person decides this one, and it now says so on the board.
+   */
+  private async advanceItem(run: PipelineRun): Promise<string | null> {
+    if (!run.itemId) return null;
+
+    try {
+      return (await this.backlog.reevaluate(run.projectId, run.itemId)).status;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.warn(`could not re-evaluate ${run.itemId}: ${message}`);
+      return `could not move: ${message}`;
     }
   }
 

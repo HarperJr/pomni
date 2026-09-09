@@ -287,6 +287,52 @@ export interface TransitionOffer {
   via: 'arrow' | 'recovery';
 }
 
+/** Who presses the button. `auto` means the item moves itself once its requirements are met. */
+export type TransitionMode = 'auto' | 'manual';
+
+/**
+ * A pointer at one requirement on one arrow — what a checklist tick, a passed gate or a written
+ * section *is*, not a sentence about it. Mirrors `RequirementRef` in
+ * `packages/core/src/domain/flow.ts`.
+ */
+export type RequirementRef =
+  | { kind: 'acceptance' }
+  | { kind: 'gate'; gate: string }
+  | { kind: 'checklist'; key: string }
+  | { kind: 'field'; field: string }
+  | { kind: 'section'; section: string }
+  | { kind: 'spec'; section: string }
+  | { kind: 'dependencies' };
+
+/** One satisfied requirement and, where it is dated on disk, when it became true. */
+export interface SatisfiedRequirement {
+  requirement: RequirementRef;
+  at: string | null;
+}
+
+/** A move an item could make right now, with everything a UI needs to offer or badge it. */
+export interface EligibleMove {
+  to: string;
+  label: string;
+  mode: TransitionMode;
+  requires: Requirements;
+  /** The last requirement to become true, or null when none of the satisfied ones is dated. */
+  because: SatisfiedRequirement | null;
+}
+
+/** One move an item has made, recorded structurally. Mirrors `TransitionRecord`. */
+export interface TransitionRecord {
+  at: string;
+  from: string;
+  to: string;
+  mode: TransitionMode;
+  /** What a person typed when they made the move. Null for an automatic move. */
+  comment: string | null;
+  /** The requirement that completed an automatic move. Null for a manual move. */
+  because: RequirementRef | null;
+  forced: boolean;
+}
+
 export interface BacklogItem {
   id: string;
   projectId: string;
@@ -307,6 +353,8 @@ export interface BacklogItem {
   blockedReason: string | null;
   /** What it was doing before it was blocked — where unblocking puts it back. */
   statusBefore: ItemStatus | null;
+  /** Every move this item has made since structured history existed, oldest first. */
+  history: TransitionRecord[];
   createdAt: string;
   updatedAt: string;
   body: string;
@@ -354,6 +402,11 @@ export interface BacklogItemDetail extends BacklogItem {
    * unmet requirements behind it.
    */
   allowedTransitions: TransitionOffer[];
+  /**
+   * Moves this item could make right now with nothing outstanding — "ready to move to X". A
+   * non-empty `auto` entry means the move has not been performed yet, not that it will not be.
+   */
+  eligible: EligibleMove[];
   /** The item's state as its project's flow describes it, or null when it is off-flow. */
   flowState: FlowState | null;
   /** True when the stored status is not a state in the project's flow. */
@@ -362,6 +415,12 @@ export interface BacklogItemDetail extends BacklogItem {
   blocking: string[];
   sections: Record<string, string>;
   acceptance: { total: number; checked: number };
+}
+
+/** One item that could move right now, with the moves it could make. Never empty `moves`. */
+export interface EligibleItem {
+  item: BacklogItem;
+  moves: EligibleMove[];
 }
 
 export type AgentRole = 'orchestrator' | 'agent';
@@ -1059,7 +1118,7 @@ export const api = {
   transitionItem: (
     projectId: string,
     itemId: string,
-    body: { to: ItemStatus; reason?: string; force?: boolean },
+    body: { to: ItemStatus; comment?: string; reason?: string; force?: boolean },
   ) =>
     request<{ item: BacklogItem }>(
       `/api/projects/${encodeURIComponent(projectId)}/items/${encodeURIComponent(itemId)}/transition`,
@@ -1081,6 +1140,24 @@ export const api = {
     request<{ plan: WavePlan }>(
       `/api/projects/${encodeURIComponent(projectId)}/items-waves`,
     ).then((result) => result.plan),
+
+  /** What the board badges "ready to move" and `pomni backlog list --eligible` answers. */
+  eligibleItems: (
+    projectId: string,
+    params?: { status?: string; type?: ItemType; priority?: Priority; label?: string; repo?: string; q?: string },
+  ) => {
+    const query = new URLSearchParams();
+    if (params?.status) query.set('status', params.status);
+    if (params?.type) query.set('type', params.type);
+    if (params?.priority) query.set('priority', params.priority);
+    if (params?.label) query.set('label', params.label);
+    if (params?.repo) query.set('repo', params.repo);
+    if (params?.q) query.set('q', params.q);
+    const qs = query.toString();
+    return request<{ eligible: EligibleItem[] }>(
+      `/api/projects/${encodeURIComponent(projectId)}/items-eligible${qs ? `?${qs}` : ''}`,
+    ).then((result) => result.eligible);
+  },
 
   tickChecklist: (projectId: string, itemId: string, body: { key: string; ticked: boolean }) =>
     request<{ item: BacklogItemDetail }>(

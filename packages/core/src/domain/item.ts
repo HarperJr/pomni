@@ -3,13 +3,22 @@ import { ValidationError } from './errors.js';
 import {
   DEFAULT_FLOW,
   EMPTY_EVIDENCE,
+  RequirementRefSchema,
+  TransitionModeSchema,
   activeStates,
   boardColumns,
   describeUnmetList,
   evaluate,
   targetsFrom,
 } from './flow.js';
-import type { Evidence, Flow, FlowState, TransitionOffer, UnmetRequirement } from './flow.js';
+import type {
+  EligibleMove,
+  Evidence,
+  Flow,
+  FlowState,
+  TransitionOffer,
+  UnmetRequirement,
+} from './flow.js';
 
 export * from './flow.js';
 
@@ -65,6 +74,91 @@ export type Priority = z.infer<typeof PrioritySchema>;
 export const EstimateSchema = z.enum(['XS', 'S', 'M', 'L', 'XL']);
 export type Estimate = z.infer<typeof EstimateSchema>;
 
+// ---------------------------------------------------------------------------
+// The transition log
+// ---------------------------------------------------------------------------
+
+/**
+ * One move, as it happened.
+ *
+ * The item's history has always been the `## Log` section of the body: a dated line of prose,
+ * written by {@link appendLog}, read by a human in a diff. That stays exactly as it is. This is
+ * the structured record beside it, and it exists because three of the things a move now carries
+ * cannot survive as prose:
+ *
+ * - `mode` — a board that wants to say "this one moved on its own" has to re-read English to
+ *   find out, and "(forced)" already showed how that ends;
+ * - `because` — a {@link RequirementRef} is a pointer at a box, and a sentence about the box is
+ *   not one;
+ * - `comment` — free text a person typed. It has newlines in it. A `- 2026-09-09 ...` line does
+ *   not.
+ *
+ * Both are written. Neither is derived from the other: the Log is what a person reads, this is
+ * what a program reads, and a reader that wants the whole history renders the Log for everything
+ * up to the day this shipped and this from there on.
+ */
+export const TransitionRecordSchema = z
+  .object({
+    /** ISO instant. Records are appended in this order and never reordered or rewritten. */
+    at: z.string(),
+    from: ItemStatusSchema,
+    to: ItemStatusSchema,
+    /**
+     * `auto` means nobody asked: the flow's arrow was `auto` and its requirements completed.
+     * `manual` means somebody asked — a person, the CLI, or an agent. It does not say *who*;
+     * naming the author is the comments item's job and it will hang off the same record.
+     */
+    mode: TransitionModeSchema.default('manual'),
+    /**
+     * What a person typed when they made the move — "moving this back, the API half is not
+     * really done". The `--reason` the CLI already takes is this same field; there is one place
+     * to write why a move happened, not two. `blockedReason` stays on the item because unblock
+     * reads it back, and is a copy of this, not a rival.
+     *
+     * Only a `manual` move has one. Nothing types a comment on the system's behalf.
+     */
+    comment: z.string().nullable().default(null),
+    /**
+     * The requirement that completed the arrow, from {@link lastSatisfied}. Only an `auto` move
+     * has one, and it may still be null when nothing satisfied was dated — see
+     * {@link SatisfiedRequirement}. Null means "not recorded", never "no requirement".
+     */
+    because: RequirementRefSchema.nullable().default(null),
+    /** `--force`: a person took responsibility for requirements that were not met. */
+    forced: z.boolean().default(false),
+  })
+  .strict()
+  .superRefine((record, ctx) => {
+    // The two rules that keep `mode` meaning one thing. Nothing on disk predates these fields,
+    // so there is no old data to be refused by them.
+    if (record.mode === 'auto') {
+      if (record.comment !== null) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['comment'],
+          message: 'an automatic move has no author, so it cannot carry a comment',
+        });
+      }
+      if (record.forced) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['forced'],
+          message:
+            'an automatic move cannot be forced — `auto` decides who presses the button, never whether the requirements apply',
+        });
+      }
+    } else if (record.because !== null) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['because'],
+        message:
+          'a manual move happened because someone asked for it, not because a requirement completed',
+      });
+    }
+  });
+
+export type TransitionRecord = z.infer<typeof TransitionRecordSchema>;
+
 export const BacklogItemSchema = z.object({
   id: z.string(),
   projectId: z.string(),
@@ -101,6 +195,16 @@ export const BacklogItemSchema = z.object({
    * the moment a checklist was completed, so the paper trail stays in the Markdown.
    */
   checklist: z.record(z.string(), z.string()).default({}),
+  /**
+   * Every move this item has made since structured history existed, oldest first. Append-only:
+   * a record is never edited or removed, because it is a claim about something that happened.
+   *
+   * Defaults to `[]`, which is what every item written before this field parses to. An empty
+   * history therefore means "no move was recorded structurally" — it does **not** mean the item
+   * never moved, and a caller that renders it as "no history" is wrong about every item that
+   * existed before this change. The `## Log` section is still the record of those moves.
+   */
+  history: z.array(TransitionRecordSchema).default([]),
   /** Set when status is `blocked`; restored on unblock. */
   blockedReason: z.string().nullable().default(null),
   statusBefore: ItemStatusSchema.nullable().default(null),
@@ -123,6 +227,16 @@ export interface BacklogItemDetail extends BacklogItem {
    * Was `ItemStatus[]`; a caller that wants the old shape reads `.map((offer) => offer.to)`.
    */
   allowedTransitions: TransitionOffer[];
+  /**
+   * Moves this item could make right now with nothing outstanding — what the board and the item
+   * page render as "ready to move to X", and what `pomni backlog list --eligible` lists. A
+   * subset of `allowedTransitions`, from `eligible(item, flow, evidence)`.
+   *
+   * Normally empty for an `auto` arrow: the same service that computes this performs the
+   * automatic move, so by the time anyone reads it the item has already gone. A non-empty `auto`
+   * entry here means the move has not been performed yet, not that it will not be.
+   */
+  eligible: EligibleMove[];
   /** The item's state as its project's flow describes it, or null when it is off-flow. */
   flowState: FlowState | null;
   /**
