@@ -339,6 +339,63 @@ export class WorkflowService {
     return updated;
   }
 
+  /**
+   * A spec rewritten to answer a finding, proposed and never applied.
+   *
+   * The spec rather than the prompt, deliberately. The prompt is derived from the spec, so
+   * editing the prompt directly makes the two disagree and the next `generatePrompt` silently
+   * throws the edit away. Amending the spec keeps the chain intact and keeps the change
+   * traceable to the sentence a person can read.
+   *
+   * Returns the proposal. Writing it is a separate call, because a model that has just been
+   * told an agent keeps failing will happily rewrite the job description into something that
+   * cannot fail because it no longer asks for anything.
+   */
+  async proposeAmendment(
+    workflowId: string,
+    agentId: string,
+    finding: { kind: string; runIds: string[]; details: string[] },
+  ): Promise<{ current: string; proposed: string }> {
+    const ref = await this.getRef(workflowId);
+    const agent = findAgent(ref.data, agentId);
+    if (!agent) throw new NotFoundError('agent', `${workflowId}/${agentId}`);
+    if (!agent.spec.trim()) {
+      throw new ValidationError(`'${agent.name}' has no spec to amend — write one first`);
+    }
+
+    const { port, model, provider } = await this.providers.portFor('high');
+    const result = await port.complete({
+      model,
+      adaptiveThinking: provider.kind !== 'claude-code',
+      effort: 'high',
+      maxTokens: 2000,
+      system: AMENDMENT_SYSTEM,
+      messages: [
+        {
+          role: 'user',
+          content: [
+            `The agent is "${agent.name}" in the "${ref.data.name}" workflow.`,
+            '',
+            '## Its spec today',
+            '',
+            agent.spec,
+            '',
+            `## What keeps happening (${finding.kind}, in ${finding.runIds.length} separate runs)`,
+            '',
+            // Whole, not summarised. The wording is the evidence, and a paraphrase of it is
+            // one more place for the reason to drift from what was actually observed.
+            ...finding.details.slice(0, 8).map((detail) => `- ${detail}`),
+          ].join('\n'),
+        },
+      ],
+    });
+
+    const proposed = stripFence(result.text).trim();
+    if (!proposed) throw new ValidationError('the model returned nothing — try again');
+
+    return { current: agent.spec, proposed };
+  }
+
   private promptBrief(workflow: Workflow, agent: Agent): string {
     const roster = agent.role === 'orchestrator' ? rosterFor(workflow, agent) : [];
     const lines = [
@@ -574,3 +631,31 @@ function stripFence(text: string): string {
   const fenced = /^```(?:[a-zA-Z]*)\n([\s\S]*?)\n```$/.exec(trimmed);
   return (fenced ? (fenced[1] ?? '') : trimmed).trim();
 }
+
+/**
+ * What the model is told when asked to amend a spec.
+ *
+ * The instruction it most needs is the one about not making the job smaller. Shown evidence
+ * that an agent keeps failing, the obvious move is to stop asking it for the thing it fails
+ * at — which reads as a fix, measures as a fix, and is a retreat.
+ */
+const AMENDMENT_SYSTEM = `You amend the job description of one agent in an automated pipeline.
+
+You are given its spec and evidence that the same thing has gone wrong across several separate
+runs. Rewrite the spec so that what went wrong is asked for explicitly.
+
+Return the whole amended spec as prose, and nothing else. No preamble, no diff, no fences.
+
+Keep everything the spec already asks for. You are adding an obligation, not trading one away:
+never narrow the job to avoid the failure. If the evidence shows the agent skipping a step, say
+that the step is part of the job and what to report about it. If it shows the agent claiming
+something it did not do, say what evidence it must have before claiming it.
+
+Write in the register of the spec you were given — short declarative sentences about what this
+agent does. Do not add headings, lists or process instructions; a spec describes a job, and the
+prompt is generated from it separately.
+
+If the evidence does not point at anything the spec could fix — a missing permission, a defect
+in the tooling, a limit outside the agent's control — return the spec unchanged. Saying that
+nothing here is a wording problem is a useful answer, and inventing wording for a permissions
+bug is not.`;

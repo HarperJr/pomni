@@ -4,6 +4,7 @@ import {
   PipelineStepSchema,
   findings,
   signalsFor,
+  since,
   type PipelineRun,
   type PipelineStep,
 } from '@pomni/core';
@@ -124,5 +125,42 @@ describe('a signal that kept happening', () => {
     const [finding] = findings(signals);
     expect(finding?.runIds).toHaveLength(3);
     expect(finding?.details[0]).toBe('did not re-run npm test');
+  });
+});
+
+describe('whether a finding kept happening after the agent changed', () => {
+  const runs = [
+    { id: 'old-1', startedAt: '2026-09-01T00:00:00.000Z' },
+    { id: 'old-2', startedAt: '2026-09-02T00:00:00.000Z' },
+    { id: 'new-1', startedAt: '2026-09-08T00:00:00.000Z' },
+  ];
+  const signal = (runId: string) => ({
+    kind: 'partial' as const,
+    runId,
+    agentId: 'a',
+    agentName: 'A',
+    detail: 'reported the work as partial',
+  });
+
+  it('splits on when the agent was last changed', () => {
+    const split = since(
+      [signal('old-1'), signal('old-2'), signal('new-1')],
+      runs,
+      '2026-09-05T00:00:00.000Z',
+    );
+    expect(split).toEqual({ before: 2, after: 1, runsAfter: 1 });
+  });
+
+  it('counts distinct runs, the same unit a finding is counted in', () => {
+    // Two signals from one run are one run. Counting signals here and runs in the finding
+    // puts two different things on one line and reads as a contradiction.
+    const split = since([signal('new-1'), signal('new-1')], runs, '2026-09-05T00:00:00.000Z');
+    expect(split.after).toBe(1);
+  });
+
+  it('says nothing has been tried when no run has happened since', () => {
+    const split = since([signal('old-1')], runs, '2026-09-09T00:00:00.000Z');
+    // An amendment nobody has exercised is not an amendment that worked.
+    expect(split).toEqual({ before: 1, after: 0, runsAfter: 0 });
   });
 });
