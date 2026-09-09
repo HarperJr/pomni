@@ -9,11 +9,15 @@ import {
   checklistEntries,
   compareItems,
   countAcceptance,
+  describeRequirement,
   describeUnmetList,
+  eligible,
   evaluate,
   findState,
+  hasRequirements,
   isOffFlow,
   newItemBody,
+  nextAutoMove,
   nextOrder,
   parseSections,
   pickNext,
@@ -23,6 +27,7 @@ import {
   type BacklogItem,
   type BacklogItemDetail,
   type ChecklistEntry,
+  type EligibleMove,
   type Estimate,
   type Evidence,
   type Flow,
@@ -32,6 +37,7 @@ import {
   type ItemType,
   type Priority,
   type TransitionOffer,
+  type TransitionRecord,
   type UnmetRequirement,
 } from '../domain/item.js';
 import { layout } from '../domain/layout.js';
@@ -69,9 +75,44 @@ export interface UpdateItemInput {
 }
 
 export interface TransitionOptions {
+  /**
+   * What the person making the move typed — "moving this back, the API half is not really
+   * done". Stored on the move's {@link TransitionRecord} as `comment`, written into the Log
+   * line beside it, and kept as `blockedReason` when the move is into `blocked`.
+   */
+  comment?: string;
+  /**
+   * The older name for {@link comment}, kept because every surface already passes it and the
+   * two were always the same thing: one place to write why a move happened, not two. `comment`
+   * wins when both are given.
+   */
   reason?: string;
   /** Skip the guards. Recorded in the log, so a forced move is visible afterwards. */
   force?: boolean;
+}
+
+/**
+ * One item that could move right now, with the moves it could make.
+ *
+ * The item is carried whole rather than as an id: every caller that lists these — `pomni
+ * backlog list --eligible`, the board's "ready to move" badge — draws the item beside the
+ * moves, and a second fetch per item to get its title is the shape this exists to avoid.
+ */
+export interface EligibleItem {
+  item: BacklogItem;
+  /** Never empty; an item with nothing outstanding to report is not returned at all. */
+  moves: EligibleMove[];
+}
+
+/** The automatic move being performed, as {@link nextAutoMove} described it. */
+interface AutoMove {
+  to: ItemStatus;
+  /**
+   * The requirement that completed the arrow, straight from the domain's `lastSatisfied` —
+   * never composed from whatever event happened to trigger the re-evaluation. The event and
+   * the requirement are different facts, and only one of them is evidence.
+   */
+  because: TransitionRecord['because'];
 }
 
 /**
@@ -233,7 +274,11 @@ export class BacklogService {
       ifMatch: ifMatch ?? ref.rev,
     });
     this.events.emit({ type: 'item.changed', projectId, itemId });
-    return next;
+    // An edit is a trigger: this is where an acceptance criterion gets ticked, a required field
+    // gets filled in and a Plan section gets written. The item as it now stands is returned, so
+    // a caller that edited its way into an automatic move is told the item moved rather than
+    // being handed the status it had a moment ago.
+    return this.reevaluate(projectId, itemId);
   }
 
   /**
@@ -259,9 +304,31 @@ export class BacklogService {
     to: ItemStatus,
     options: TransitionOptions = {},
   ): Promise<BacklogItem> {
+    return this.performTransition(projectId, itemId, to, options, null);
+  }
+
+  /**
+   * The move itself. `auto` is what separates a person's drag from the system's own move, and
+   * it is deliberately not on {@link TransitionOptions}: nothing outside this class can mark a
+   * move automatic, because the only thing entitled to is {@link reevaluate}, which got the
+   * move from `nextAutoMove`.
+   *
+   * Note what `auto` does *not* do. It picks the words in the log and the fields on the record;
+   * it does not reach the guard below, which runs identically either way. There is one status
+   * write in this service and this is it — an automatic move that could not pass
+   * `assertTransition` throws exactly as a person's would.
+   */
+  private async performTransition(
+    projectId: string,
+    itemId: string,
+    to: ItemStatus,
+    options: TransitionOptions,
+    auto: AutoMove | null,
+  ): Promise<BacklogItem> {
     const ref = await this.getRef(projectId, itemId);
     const item = ref.data;
     const from = item.status;
+    const comment = options.comment ?? options.reason;
 
     // Moving to the status you are already in is nothing — except into `blocked`, which is the
     // one state that carries a reason. A second run that fails for a new reason was silently
@@ -270,10 +337,10 @@ export class BacklogService {
     // log had no trace that a second run had happened at all. A stale reason is worse than no
     // reason, because it is read as current.
     if (from === to) {
-      if (to !== RESERVED_BLOCKED || !options.reason || options.reason === item.blockedReason) {
+      if (to !== RESERVED_BLOCKED || !comment || comment === item.blockedReason) {
         return item;
       }
-      return this.reblock(projectId, ref, options.reason);
+      return this.reblock(projectId, ref, comment);
     }
 
     // Resolved per call, never cached across calls: the flow can be edited underneath us.
@@ -301,17 +368,39 @@ export class BacklogService {
 
     const now = this.clock.iso();
     const date = now.slice(0, 10);
-    const note = options.reason ? `${describe(from, to)} — ${options.reason}` : describe(from, to);
+    // The Log is one line of prose, so a comment with newlines in it is flattened for this
+    // purpose only — the record below keeps what was typed, verbatim.
+    const note = auto
+      ? `${describe(from, to)}, automatic${
+          auto.because ? ` — ${describeRequirement(auto.because)}` : ''
+        }`
+      : comment
+        ? `${describe(from, to)} — ${oneLine(comment)}`
+        : describe(from, to);
     // A forced move is only auditable if it records what it went past.
     const waivedNote =
       waived.length > 0 ? ` — unmet: ${describeUnmetList(waived).join('; ')}` : '';
+
+    // Written alongside the Log line, never instead of it: the Log is what a person reads in a
+    // diff, this is what a board reads to say "this one moved on its own". The three fields the
+    // domain refuses to see together are kept apart by the branches, not by hope.
+    const record: TransitionRecord = {
+      at: now,
+      from,
+      to,
+      mode: auto ? 'auto' : 'manual',
+      comment: auto ? null : (comment ?? null),
+      because: auto ? auto.because : null,
+      forced: auto ? false : options.force === true,
+    };
 
     const next = BacklogItemSchema.parse({
       ...item,
       status: to,
       // Remember where we came from so unblocking can put it back.
       statusBefore: to === RESERVED_BLOCKED ? from : null,
-      blockedReason: to === RESERVED_BLOCKED ? (options.reason ?? 'blocked') : null,
+      blockedReason: to === RESERVED_BLOCKED ? (comment ?? 'blocked') : null,
+      history: [...item.history, record],
       updatedAt: now,
       body: appendLog(
         item.body,
@@ -323,6 +412,89 @@ export class BacklogService {
     await this.docs.write(layout.backlogItem(projectId, itemId), next, { ifMatch: ref.rev });
     this.events.emit({ type: 'item.transitioned', projectId, itemId, from, to });
     return next;
+  }
+
+  /**
+   * Re-evaluate one item and perform its automatic move, if it has one.
+   *
+   * The single re-evaluation path. Everything that could have changed the answer comes here —
+   * {@link update} when the item is edited, {@link tickChecklist} when a box is ticked, and the
+   * pipeline when an agent run or a gate run finishes — so an item advances the same way
+   * whether the change arrived from the UI, the CLI or an agent.
+   *
+   * **Where the chain stops.** This method calls {@link nextAutoMove} exactly once and performs
+   * at most `AUTO_MOVES_PER_EVENT` (one) move, and the move it performs goes through
+   * {@link performTransition}, which does not call back here. There is no loop and no recursion
+   * to bound — the bound is that the only caller of `performTransition` that re-evaluates is a
+   * *trigger*, and a transition is not one. An item therefore advances at most one state per
+   * triggering event, so a flow whose every arrow is `auto` walks one step and waits for the
+   * next event, and a cycle of `auto` arrows cannot spin.
+   *
+   * Returns the item as it now stands: moved, or unchanged when nothing was automatic.
+   */
+  async reevaluate(projectId: string, itemId: string): Promise<BacklogItem> {
+    const item = (await this.getRef(projectId, itemId)).data;
+    const project = (await this.projects.getRef(projectId)).data;
+    const flow = flowOf(project);
+
+    const move = nextAutoMove(
+      { id: item.id, status: item.status },
+      flow,
+      await this.evidenceFor(item, project, flow),
+    );
+    if (!move) return item;
+
+    // Deliberately not `move.requires` or anything else the domain already decided: the arrow
+    // is asked for by name and judged again from scratch below, on evidence read again. What
+    // `nextAutoMove` bought is *which* arrow and *why* it completed, never permission.
+    return this.performTransition(projectId, itemId, move.to, {}, {
+      to: move.to,
+      because: move.because?.requirement ?? null,
+    });
+  }
+
+  /**
+   * Items with a move they could make right now and nothing outstanding — what `pomni backlog
+   * list --eligible` answers "what is waiting on me" with, and what the board reads to badge a
+   * card "ready to move to X".
+   *
+   * A separate method rather than a flag on {@link list}: eligibility is not a property of the
+   * stored item, it costs a run-store read per item to work out, and the answer a caller needs
+   * is *which* moves — which does not fit in `BacklogItem[]`. `filter` is the same
+   * {@link ItemFilter} `list` takes, so `--eligible` composes with `-s`, `--label` and the rest.
+   *
+   * Items are in board order and an `auto` move may appear: it means the move has not been
+   * performed yet, because no event has re-evaluated the item since its requirements completed.
+   */
+  async eligibleItems(filter: ItemFilter): Promise<EligibleItem[]> {
+    const items = await this.list(filter);
+    const byProject = new Map<string, { project: Project; flow: Flow; siblings: BacklogItem[] }>();
+
+    const found: EligibleItem[] = [];
+    for (const item of items) {
+      let context = byProject.get(item.projectId);
+      if (!context) {
+        const project = (await this.projects.getRef(item.projectId)).data;
+        context = {
+          project,
+          flow: flowOf(project),
+          // Read once per project rather than per item: `dependencyEvidence` resolves against
+          // the whole backlog, and doing that per item is the backlog read squared.
+          siblings: await this.list({ projectId: item.projectId }),
+        };
+        byProject.set(item.projectId, context);
+      }
+
+      // Nothing guarded leaves this state, so `eligible` would return [] — and finding that out
+      // the slow way costs this item's gate a run-store read for an answer already known.
+      if (!guardsLeaving(context.flow, item.status)) continue;
+
+      const evidence = await this.evidenceFor(item, context.project, context.flow, context.siblings);
+      const moves = eligible({ id: item.id, status: item.status }, context.flow, evidence);
+      if (moves.length > 0) found.push({ item, moves });
+    }
+
+    return found;
   }
 
   /**
@@ -386,7 +558,10 @@ export class BacklogService {
       const next = BacklogItemSchema.parse({ ...item, checklist, body, updatedAt: now });
       await this.docs.write(layout.backlogItem(projectId, itemId), next, { ifMatch: ref.rev });
       this.events.emit({ type: 'item.changed', projectId, itemId });
-      return this.detail(next);
+      // Ticking the last box of a definition of done is the event an `auto` arrow is most often
+      // waiting on, so the detail returned is of the item *after* that move — a UI redrawing
+      // from this response draws where the item actually is.
+      return this.detail(await this.reevaluate(projectId, itemId));
     });
   }
 
@@ -551,16 +726,17 @@ export class BacklogService {
     const flow = flowOf(project);
     const blockedBy = item.dependsOn.filter((id) => byId.get(id)?.status !== 'done');
     // Every gate on a move out of here, so each button knows whether it would work. An item
-    // standing off-flow has only recovery moves, which require nothing. Dependencies are
-    // resolved unconditionally rather than per arrow: the sibling list is already read.
-    const evidence = await this.evidence(item, project, gatesLeaving(flow, item.status), {
-      total: item.dependsOn.length,
-      unfinished: blockedBy,
-    });
+    // standing off-flow has only recovery moves, which require nothing. The sibling list is
+    // already read, so the dependency resolution comes off it rather than reading it again.
+    const evidence = await this.evidenceFor(item, project, flow, siblings);
 
     return {
       ...item,
       allowedTransitions: transitionOffers(item, flow, evidence),
+      // The same call, on the same evidence, that `reevaluate` filters for its automatic move —
+      // so what the item page offers as "ready to move to X" and what the system would do
+      // unasked are two readings of one answer.
+      eligible: eligible({ id: item.id, status: item.status }, flow, evidence),
       flowState: findState(flow, item.status),
       offFlow: isOffFlow(flow, item.status),
       blockedBy,
@@ -621,17 +797,34 @@ export class BacklogService {
     };
   }
 
+  /**
+   * The evidence for every move out of where this item stands — what {@link detail},
+   * {@link reevaluate} and {@link eligibleItems} all judge on, so the three cannot disagree
+   * about what is true of an item at one moment.
+   *
+   * Dependencies are resolved unconditionally here rather than per arrow: all three callers ask
+   * about every arrow out of the state, so at least one of them was going to need them. Pass
+   * `siblings` when the backlog has already been read.
+   */
+  private async evidenceFor(
+    item: BacklogItem,
+    project: Project,
+    flow: Flow,
+    siblings?: BacklogItem[],
+  ): Promise<Evidence> {
+    return this.evidence(
+      item,
+      project,
+      gatesLeaving(flow, item.status),
+      siblings ? dependencyEvidence(item, siblings) : await this.dependencyEvidence(item),
+    );
+  }
+
   /** `dependsOn` resolved against its siblings. One list read, so only taken when asked for. */
   private async dependencyEvidence(
     item: BacklogItem,
   ): Promise<{ total: number; unfinished: string[] }> {
-    const byId = new Map(
-      (await this.list({ projectId: item.projectId })).map((other) => [other.id, other]),
-    );
-    return {
-      total: item.dependsOn.length,
-      unfinished: item.dependsOn.filter((id) => byId.get(id)?.status !== 'done'),
-    };
+    return dependencyEvidence(item, await this.list({ projectId: item.projectId }));
   }
 
   /**
@@ -768,6 +961,31 @@ function gatesLeaving(flow: Flow, from: string): string[] {
     if (gate) gates.add(gate);
   }
   return [...gates];
+}
+
+/** Whether any arrow out of this state guards anything — the cheap precondition for eligibility. */
+function guardsLeaving(flow: Flow, from: string): boolean {
+  return targetsFrom(flow, from).some((to) => {
+    const requires = requirementsFor(flow, from, to);
+    return requires !== null && hasRequirements(requires);
+  });
+}
+
+/** `dependsOn` against a backlog already in hand. Done is done; everything else is unfinished. */
+function dependencyEvidence(
+  item: BacklogItem,
+  siblings: BacklogItem[],
+): { total: number; unfinished: string[] } {
+  const byId = new Map(siblings.map((other) => [other.id, other]));
+  return {
+    total: item.dependsOn.length,
+    unfinished: item.dependsOn.filter((id) => byId.get(id)?.status !== 'done'),
+  };
+}
+
+/** A comment is free text with newlines in it; a Log entry is one dated line. */
+function oneLine(text: string): string {
+  return text.replace(/\s+/g, ' ').trim();
 }
 
 function describe(from: ItemStatus, to: ItemStatus): string {

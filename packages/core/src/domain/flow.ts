@@ -135,6 +135,30 @@ export const RequirementsSchema = z
 
 export type Requirements = z.infer<typeof RequirementsSchema>;
 
+/**
+ * A pointer at *one* requirement on one arrow, so a log line can say which thing became true
+ * last. Deliberately not {@link UnmetRequirement}: that one groups (all the missing sections in
+ * one member, all the failing repos of a gate in one member) because it is written to be read
+ * as a refusal. This one names a single box.
+ *
+ * Every identifier here already exists on disk and is stable across a reword:
+ * `checklist.key` is the key the tick is stored under in `item.checklist`, `gate` is the
+ * project's gate name, `field` is the frontmatter field name, `section` is the `## Heading`
+ * exactly as the requirement spelled it. Nothing new is minted — a requirement has no id of its
+ * own and giving it one would be a second name for a thing that is already named.
+ */
+export const RequirementRefSchema = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('acceptance') }).strict(),
+  z.object({ kind: z.literal('gate'), gate: z.string().min(1) }).strict(),
+  z.object({ kind: z.literal('checklist'), key: z.string().min(1) }).strict(),
+  z.object({ kind: z.literal('field'), field: z.string().min(1) }).strict(),
+  z.object({ kind: z.literal('section'), section: z.string().min(1) }).strict(),
+  z.object({ kind: z.literal('spec'), section: z.string().min(1) }).strict(),
+  z.object({ kind: z.literal('dependencies') }).strict(),
+]);
+
+export type RequirementRef = z.infer<typeof RequirementRefSchema>;
+
 export const NO_REQUIREMENTS: Requirements = {
   acceptance: false,
   gate: null,
@@ -173,11 +197,35 @@ export function sectionIsWritten(text: string | undefined): boolean {
 // The flow
 // ---------------------------------------------------------------------------
 
+/**
+ * Who presses the button, never whether the rules apply.
+ *
+ * - `manual` — the move waits for someone to ask for it. When its requirements are all met the
+ *   item becomes *eligible* and says so, and that is all that happens.
+ * - `auto` — the same requirements, checked the same way, and when they are all met the item
+ *   moves without being asked.
+ *
+ * `manual` is the default and is what every flow already on disk parses to, so nothing that was
+ * written before this key existed starts moving on its own.
+ *
+ * Mode is not a permission. A person, the CLI or an agent asking for a move on a `manual` arrow
+ * is allowed exactly as before — mode only decides whether the system moves an item *unasked*.
+ */
+export const TransitionModeSchema = z.enum(['auto', 'manual']);
+export type TransitionMode = z.infer<typeof TransitionModeSchema>;
+
 export const FlowTransitionSchema = z
   .object({
     from: z.string().min(1),
     to: z.string().min(1),
     requires: RequirementsSchema.default({}),
+    /**
+     * `.default('manual')` rather than `.optional()`: a transition written to disk before this
+     * key existed has no `mode`, and `.default` fills it during the same `safeParse` the doc
+     * store runs on every read. The parsed value is always one of the two — no caller ever sees
+     * `undefined` and has to pick a fallback of its own.
+     */
+    mode: TransitionModeSchema.default('manual'),
     /**
      * The sentence a refusal on this arrow leads with, before the unmet requirements are
      * listed beneath it — "cannot go to review — the gate is not green". It replaces the
@@ -293,6 +341,40 @@ export const FlowSchema = z
       }
       seen.add(edge);
 
+      if (transition.mode === 'auto') {
+        // An `auto` arrow fires "as soon as its requirements are all met". With no requirements
+        // that moment is *arrival*, so the item would leave the state in the same breath it
+        // entered — and a row of such arrows is exactly the misconfiguration that walks an item
+        // from backlog to done. Refuse it at load, where it is one line to fix.
+        if (!hasRequirements(transition.requires)) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ['transitions', index, 'mode'],
+            message: `${edge} is 'auto' but requires nothing, so it would fire the moment an item reaches '${transition.from}' — give it a requirement or make it manual`,
+          });
+        }
+
+        // `blocked` carries a reason someone wrote and `cancelled` is a decision; neither is a
+        // conclusion evidence can reach on its own.
+        if (transition.to === RESERVED_BLOCKED || transition.to === RESERVED_CANCELLED) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ['transitions', index, 'mode'],
+            message: `nothing may move an item to '${transition.to}' automatically — that is a person's decision`,
+          });
+        }
+
+        // Leaving `blocked` restores `statusBefore`. An auto arrow out of it would race that
+        // restore and throw away the reason the item was blocked for.
+        if (transition.from === RESERVED_BLOCKED) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ['transitions', index, 'mode'],
+            message: `an item leaves '${RESERVED_BLOCKED}' when someone unblocks it, so ${edge} cannot be 'auto'`,
+          });
+        }
+      }
+
       const keys = new Set<string>();
       transition.requires.checklist.forEach((entry, position) => {
         if (keys.has(entry.key)) {
@@ -364,13 +446,29 @@ const BUILT_IN_GUARDS: Record<string, { requires: Requirements; message?: string
   },
 };
 
+/**
+ * The one arrow the built-in flow takes on its own, written as an edge rather than keyed on
+ * `to` the way {@link BUILT_IN_GUARDS} is.
+ *
+ * Pomni shipped with the pipeline moving an item to `in_review` when the gate went green. That
+ * behaviour is kept, but as a property of the arrow instead of a line in `pipeline-service` —
+ * so the same move is now available to `pomni verify` and to a person's drag, and the pipeline
+ * asks for it like anyone else.
+ *
+ * Keyed on the edge because `BUILT_IN_GUARDS` is keyed on the destination: `blocked -> in_review`
+ * carries the same gate requirement, and a blocked item must not walk out of `blocked` on its
+ * own the moment a run passes.
+ */
+const BUILT_IN_AUTO_ARROWS = new Set(['in_progress->in_review']);
+
 function arrows(from: string, targets: string[]): FlowTransition[] {
   return targets.map((to) => {
+    const mode: TransitionMode = BUILT_IN_AUTO_ARROWS.has(`${from}->${to}`) ? 'auto' : 'manual';
     const guard = BUILT_IN_GUARDS[to];
-    if (!guard) return { from, to, requires: NO_REQUIREMENTS };
+    if (!guard) return { from, to, mode, requires: NO_REQUIREMENTS };
     return guard.message === undefined
-      ? { from, to, requires: guard.requires }
-      : { from, to, requires: guard.requires, message: guard.message };
+      ? { from, to, mode, requires: guard.requires }
+      : { from, to, mode, requires: guard.requires, message: guard.message };
   });
 }
 
@@ -443,6 +541,16 @@ export function requirementsFor(flow: Flow, from: string, to: string): Requireme
   if (from === to) return NO_REQUIREMENTS;
   if (isOffFlow(flow, from)) return flow.recover.includes(to) ? NO_REQUIREMENTS : null;
   return flow.transitions.find((t) => t.from === from && t.to === to)?.requires ?? null;
+}
+
+/**
+ * Who performs this move. `manual` for anything that is not a declared arrow — staying put and
+ * stepping back onto the flow from an off-flow status are both decisions, and no requirement was
+ * crossed to reach them, so there is nothing for `auto` to have waited on.
+ */
+export function modeFor(flow: Flow, from: string, to: string): TransitionMode {
+  if (from === to || isOffFlow(flow, from)) return 'manual';
+  return flow.transitions.find((t) => t.from === from && t.to === to)?.mode ?? 'manual';
 }
 
 /**
@@ -602,6 +710,18 @@ export interface TransitionOffer {
   via: 'arrow' | 'recovery';
 }
 
+/**
+ * The single predicate. Every path that asks "may this move happen" reaches this function:
+ * {@link evaluate}, and through it `assertTransition`, {@link transitionOffers} and
+ * {@link eligible}. Exported so a caller can check one arrow's requirements without composing
+ * a whole `TransitionCheck` — never so a caller can write its own version of the question.
+ *
+ * Empty means every requirement on the arrow is satisfied.
+ */
+export function unmetRequirements(requires: Requirements, evidence: Evidence): UnmetRequirement[] {
+  return unmetFor(requires, evidence);
+}
+
 function unmetFor(requires: Requirements, evidence: Evidence): UnmetRequirement[] {
   const unmet: UnmetRequirement[] = [];
 
@@ -736,6 +856,206 @@ export function transitionOffers(
     };
   });
 }
+
+// ---------------------------------------------------------------------------
+// Eligibility
+// ---------------------------------------------------------------------------
+
+/**
+ * One satisfied requirement and, where the evidence is dated on disk, when it became true.
+ *
+ * `at` is null for most kinds and that is honest rather than lazy: an acceptance checkbox, a
+ * written section and a filled field carry no timestamp anywhere in the stored item, so there is
+ * no instant to report. Only two kinds are dated — a checklist tick (`item.checklist` stores the
+ * ISO instant as the value) and a gate run (`finishedAt`) — and they are the two that most often
+ * complete a move.
+ */
+export interface SatisfiedRequirement {
+  requirement: RequirementRef;
+  /** ISO instant, or null when nothing on disk dates this requirement. */
+  at: string | null;
+}
+
+function latest(times: string[]): string | null {
+  return times.length === 0 ? null : (times.reduce((a, b) => (a >= b ? a : b)) as string);
+}
+
+/**
+ * Which of an arrow's requirements are currently satisfied, in the order {@link unmetRequirements}
+ * walks them.
+ *
+ * This function never decides whether a move is allowed — {@link unmetRequirements} does, and it
+ * is the only thing that does. This one is asked *after* that answer came back clean, and only to
+ * say which box was the last to be ticked. Requirements decide whether; this decides what to
+ * write down about it.
+ */
+export function satisfiedRequirements(
+  requires: Requirements,
+  evidence: Evidence,
+): SatisfiedRequirement[] {
+  const satisfied: SatisfiedRequirement[] = [];
+
+  if (requires.acceptance) {
+    const { total, checked } = evidence.acceptance;
+    if (total > 0 && checked >= total) {
+      satisfied.push({ requirement: { kind: 'acceptance' }, at: null });
+    }
+  }
+
+  if (requires.gate !== null) {
+    const gate = requires.gate;
+    const runs = evidence.gates.filter((run) => run.gate === gate);
+    if (runs.length > 0 && runs.every((run) => run.passed)) {
+      // The gate became true when its *last* capability finished, not its first.
+      const times = runs.map((run) => run.finishedAt).filter((at): at is string => at !== null);
+      satisfied.push({ requirement: { kind: 'gate', gate }, at: latest(times) });
+    }
+  }
+
+  // Per box, not per checklist: "the last thing to be satisfied" is a box someone ticked, and
+  // the tick carries the instant it happened.
+  for (const entry of requires.checklist) {
+    const at = evidence.checklist[entry.key];
+    if (at !== undefined) satisfied.push({ requirement: { kind: 'checklist', key: entry.key }, at });
+  }
+
+  for (const field of requires.fields) {
+    if (isFieldSet(evidence.fields[field])) {
+      satisfied.push({ requirement: { kind: 'field', field }, at: null });
+    }
+  }
+
+  if (requires.spec !== null) {
+    const gaps = specGaps({ sections: evidence.sections, title: evidence.title }, requires.spec);
+    const failed = new Set(gaps.map((gap) => gap.section));
+    for (const section of requires.spec.sections) {
+      if (!failed.has(section)) satisfied.push({ requirement: { kind: 'spec', section }, at: null });
+    }
+  }
+
+  for (const section of requires.sections) {
+    if (sectionIsWritten(evidence.sections[section])) {
+      satisfied.push({ requirement: { kind: 'section', section }, at: null });
+    }
+  }
+
+  if (requires.dependencies) {
+    const resolved = evidence.dependencies;
+    if (resolved !== null && resolved.unfinished.length === 0) {
+      satisfied.push({ requirement: { kind: 'dependencies' }, at: null });
+    }
+  }
+
+  return satisfied;
+}
+
+/**
+ * The requirement that completed this arrow, or null when nothing that was satisfied carries a
+ * date. Null is a real answer and must be stored as one: guessing "probably the last section
+ * someone wrote" would put a claim with no evidence behind it into an item's permanent history.
+ *
+ * Ties go to the earlier one in requirement order, so two runs finishing in the same second give
+ * the same answer on every machine.
+ */
+export function lastSatisfied(
+  requires: Requirements,
+  evidence: Evidence,
+): SatisfiedRequirement | null {
+  let best: SatisfiedRequirement | null = null;
+  for (const entry of satisfiedRequirements(requires, evidence)) {
+    if (entry.at === null) continue;
+    if (best === null || entry.at > (best.at as string)) best = entry;
+  }
+  return best;
+}
+
+/** A move this item could make right now, with everything a caller needs to make it. */
+export interface EligibleMove {
+  to: string;
+  label: string;
+  /** Whose move it is. `auto` means nobody has to press anything. */
+  mode: TransitionMode;
+  requires: Requirements;
+  /**
+   * The last requirement to become true, or null when none of the satisfied ones is dated. What
+   * an automatic move records as `because`.
+   */
+  because: SatisfiedRequirement | null;
+}
+
+/**
+ * Where this item could go right now — the states whose arrow exists *and* whose requirements are
+ * all satisfied.
+ *
+ * Built on {@link evaluate}, not on a second reading of the requirements: a state is returned iff
+ * `evaluate(item, flow, to, evidence).ok`, which is the same call `assertTransition` makes when a
+ * person drags the item. There is no way for the two to disagree, because there is only one of
+ * them.
+ *
+ * Two exclusions, both deliberate:
+ *
+ * - Arrows that require nothing are left out. "Ready to move to cancelled, nothing outstanding"
+ *   has always been true and is not news; `pomni backlog list --eligible` answers "what is
+ *   waiting on me", and an unguarded arrow was never waiting on anything. A caller that wants
+ *   every drawable move, satisfied or not, already has {@link transitionOffers}.
+ * - Recovery moves for an off-flow item are left out, for the same reason and because
+ *   {@link modeFor} makes them manual regardless.
+ *
+ * Returned in flow declaration order, so "the first eligible auto move" is the same move on every
+ * machine and on every rerun.
+ */
+export function eligible(
+  item: EvaluatedItem,
+  flow: Flow,
+  evidence: Evidence = EMPTY_EVIDENCE,
+): EligibleMove[] {
+  if (isOffFlow(flow, item.status)) return [];
+
+  const moves: EligibleMove[] = [];
+  for (const to of targetsFrom(flow, item.status)) {
+    const requires = requirementsFor(flow, item.status, to);
+    if (requires === null || !hasRequirements(requires)) continue;
+    if (!evaluate(item, flow, to, evidence).ok) continue;
+    moves.push({
+      to,
+      label: stateLabel(flow, to),
+      mode: modeFor(flow, item.status, to),
+      requires,
+      because: lastSatisfied(requires, evidence),
+    });
+  }
+  return moves;
+}
+
+/**
+ * The one move the system may make for this item without being asked, or null.
+ *
+ * Defined as a filter over {@link eligible}, which is what makes "an automatic move can never
+ * reach a state `eligible` would not have returned" true by construction rather than by two
+ * functions agreeing. A service performing an automatic move calls this and nothing else.
+ *
+ * Returns *one* move, never a list and never a chain: the domain has no notion of a triggering
+ * event, so how often this is called is the caller's to bound. See the note on
+ * {@link AUTO_MOVES_PER_EVENT}.
+ */
+export function nextAutoMove(
+  item: EvaluatedItem,
+  flow: Flow,
+  evidence: Evidence = EMPTY_EVIDENCE,
+): EligibleMove | null {
+  return eligible(item, flow, evidence).find((move) => move.mode === 'auto') ?? null;
+}
+
+/**
+ * How many automatic moves one triggering event may perform. The bound itself is the application
+ * layer's — the domain is handed one item and one flow and is never told that an event happened,
+ * so it cannot count them. What the domain does is make the bound expressible: {@link eligible}
+ * looks exactly one arrow ahead and there is deliberately no transitive-reachability helper here
+ * for a service to reach for. Do not add one.
+ *
+ * Named so the service and its tests spell the same number.
+ */
+export const AUTO_MOVES_PER_EVENT = 1;
 
 // ---------------------------------------------------------------------------
 // English
@@ -874,6 +1194,29 @@ export function describeUnmet(unmet: UnmetRequirement): string {
       const verb = unmet.unfinished.length === 1 ? 'is' : 'are';
       return `depends on ${commaList(unmet.unfinished)}, which ${verb} not done`;
     }
+  }
+}
+
+/**
+ * One requirement named, for the half of a sentence that follows "moved automatically —". The
+ * log line a service composes reads "in_progress → in_review, automatic — gate `default` passed".
+ */
+export function describeRequirement(ref: RequirementRef): string {
+  switch (ref.kind) {
+    case 'acceptance':
+      return 'every acceptance criterion ticked';
+    case 'gate':
+      return `gate \`${ref.gate}\` passed`;
+    case 'checklist':
+      return `checklist box '${ref.key}' ticked`;
+    case 'field':
+      return `${ref.field} filled in`;
+    case 'section':
+      return `'${ref.section}' written`;
+    case 'spec':
+      return `${ref.section} specified`;
+    case 'dependencies':
+      return 'every dependency finished';
   }
 }
 

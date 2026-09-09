@@ -37,6 +37,8 @@ const UpdateItemBody = z.object({
 
 const TransitionBody = z.object({
   to: ItemStatusSchema,
+  comment: z.string().optional(),
+  /** Older alias for `comment`; kept because every existing caller already passes it. */
   reason: z.string().optional(),
   force: z.boolean().optional(),
 });
@@ -121,7 +123,7 @@ export async function itemRoutes(app: FastifyInstance, container: PomniContainer
         request.params.id,
         request.params.itemId,
         body.to,
-        { reason: body.reason, force: body.force },
+        { comment: body.comment, reason: body.reason, force: body.force },
       );
       return { item };
     },
@@ -203,6 +205,21 @@ export async function itemRoutes(app: FastifyInstance, container: PomniContainer
   app.get<{ Params: { id: string } }>('/api/projects/:id/items-waves', async (request) => ({
     plan: await container.backlog.waves(request.params.id),
   }));
+
+  app.get<{ Params: { id: string } }>('/api/projects/:id/items-eligible', async (request) => {
+    const query = ListQuery.parse(request.query);
+    return {
+      eligible: await container.backlog.eligibleItems({
+        projectId: request.params.id,
+        status: parseStatus(query.status),
+        type: query.type,
+        priority: query.priority,
+        label: query.label,
+        repo: query.repo,
+        query: query.q,
+      }),
+    };
+  });
 }
 
 function parseStatus(value: string | undefined): ItemStatus[] | ItemStatus | undefined {
