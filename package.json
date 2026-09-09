@@ -29,6 +29,7 @@
     "pomni": "node packages/cli/bin/pomni.mjs",
     "serve": "node packages/cli/bin/pomni.mjs serve --open",
     "clean": "tsc --build --clean",
+    "mirror": "node scripts/mirror.mjs",
     "typecheck:web": "tsc -p packages/web --noEmit"
   },
   "devDependencies": {
