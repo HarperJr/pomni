@@ -749,6 +749,10 @@ export async function main(argv: string[]): Promise<void> {
     .action(async (options: { port: string; host: string; token?: string; open?: boolean }) => {
       const container = await open();
 
+      // Reads the commit this process is running, once, before it serves anything — the
+      // baseline `/api/health` compares HEAD against to say the server is behind the repo.
+      await container.system.boot();
+
       // Replay events written by other Pomni processes onto this bus, so a run started from
       // a terminal shows up live in the browser. This is what makes the server a peer.
       const source = new FileEventSource(container.events, join(container.root, 'events.ndjson'));

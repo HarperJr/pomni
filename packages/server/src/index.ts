@@ -126,7 +126,7 @@ export async function startServer(
   }
 
   const app = await createApp(container, options);
-  await app.listen({ host, port });
+  await listenWithHandover(app, host, port);
 
   const address = app.addresses()[0];
   const actualPort = address?.port ?? port;
@@ -139,6 +139,39 @@ export async function startServer(
     url: `http://${displayHost}:${actualPort}`,
     close: () => app.close(),
   };
+}
+
+const RESTART_AWAIT_PORT_ENV = 'POMNI_RESTART_AWAIT_PORT';
+const PORT_RETRY_TIMEOUT_MS = 15_000;
+const PORT_RETRY_INTERVAL_MS = 250;
+
+/**
+ * A successor spawned by a restart starts while its predecessor is still holding the port —
+ * that is how the handover avoids a gap where nothing is listening. `POMNI_RESTART_AWAIT_PORT`
+ * says this process is that successor, so `EADDRINUSE` is expected and worth retrying rather
+ * than a reason to give up. The env var is cleared once read so any process this one spawns
+ * does not inherit a retry meant for this handover alone.
+ */
+async function listenWithHandover(app: FastifyInstance, host: string, port: number): Promise<void> {
+  const awaitPort = process.env[RESTART_AWAIT_PORT_ENV] === '1';
+  delete process.env[RESTART_AWAIT_PORT_ENV];
+
+  if (!awaitPort) {
+    await app.listen({ host, port });
+    return;
+  }
+
+  const deadline = Date.now() + PORT_RETRY_TIMEOUT_MS;
+  for (;;) {
+    try {
+      await app.listen({ host, port });
+      return;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== 'EADDRINUSE' || Date.now() >= deadline) throw error;
+      await new Promise((resolve) => setTimeout(resolve, PORT_RETRY_INTERVAL_MS));
+    }
+  }
 }
 
 function defaultWebRoot(): string {

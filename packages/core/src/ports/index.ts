@@ -359,6 +359,7 @@ export interface RunStore {
 }
 
 export * from './llm.js';
+export * from './restart.js';
 
 // ---------------------------------------------------------------------------
 // Pipeline store
@@ -570,6 +571,14 @@ export type PomniEvent =
       error: string | null;
     }
   | { type: 'chat.turn.finished'; chatId: string; messageId: string }
+  /**
+   * This process is about to be replaced. Deliberately not durable: it is a fact about one
+   * process, and replaying it out of `.pomni/events.ndjson` into a server that just started
+   * would tell that server it is going away.
+   */
+  | { type: 'system.restarting' }
+  /** The successor could not be started, so this process is still the one serving. */
+  | { type: 'system.restart.failed'; detail: string }
   | { type: 'worktree.taken'; projectId: string; repoId: string; runId: string; path: string }
   | {
       type: 'worktree.released';

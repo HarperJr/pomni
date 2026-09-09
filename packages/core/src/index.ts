@@ -42,6 +42,7 @@ export * from './app/chat-service.js';
 export * from './app/discovery-service.js';
 export * from './app/pipeline-service.js';
 export * from './app/provider-service.js';
+export * from './app/system-service.js';
 export * from './app/tool-service.js';
 export * from './app/workflow-service.js';
 export * from './app/workspace-service.js';

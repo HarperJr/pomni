@@ -4,6 +4,8 @@ import type { FastifyInstance } from 'fastify';
 
 const BrowseQuery = z.object({ path: z.string().optional() });
 
+const RestartBody = z.object({ cancelInFlight: z.boolean().optional() });
+
 /**
  * Which web bundle this server would serve right now.
  *
@@ -33,15 +35,17 @@ async function servedBuild(): Promise<string | null> {
 }
 
 export async function systemRoutes(app: FastifyInstance, container: PomniContainer): Promise<void> {
-  app.get('/api/health', async () => ({
-    ok: true,
-    // The hashed asset name of the bundle on disk. It changes when the web is rebuilt, which
-    // is the thing a person wants to know: is the page in front of me the current one?
-    build: await servedBuild(),
-    root: container.root,
-    git: await container.git.isAvailable(),
-    initialized: await container.workspace.isInitialized(),
-  }));
+  app.get('/api/health', async () => container.system.health({ build: await servedBuild() }));
+
+  /**
+   * Rebuild and replace this process, or say why it did not. Every outcome — including the
+   * refusals — is a 200 carrying the discriminated union: the browser renders each arm, it
+   * does not catch an error to find out which one happened.
+   */
+  app.post('/api/restart', async (request) => {
+    const body = RestartBody.parse(request.body ?? {});
+    return container.system.restartServer(body);
+  });
 
   /**
    * Directory picker for "add a local repo". Read-only, loopback-only by virtue of the

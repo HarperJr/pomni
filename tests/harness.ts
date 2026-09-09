@@ -48,6 +48,10 @@ import {
   type ToolLoopHooks,
   type VcsInfo,
   type WorktreeRef,
+  SystemService,
+  type BuildOutcome,
+  type RestartPort,
+  type Supervision,
 } from '@pomni/core';
 import {
   DefaultCredentialStore,
@@ -554,6 +558,36 @@ export class FakeExecutor implements Executor {
   }
 }
 
+/**
+ * A restart port that never spawns a process, never runs a real build, and never lets a
+ * successor come up mid-test. `replace()` records that it was called and then hangs, exactly
+ * as the real port does on success — the caller never awaits it, only checks whether it fired.
+ */
+export class FakeRestartPort implements RestartPort {
+  supervisionResult: Supervision = { mode: 'self', detail: 'fake: no supervisor, can self-replace' };
+  buildResult: BuildOutcome = { ok: true, steps: [] };
+  supervisionCalls = 0;
+  buildCalls = 0;
+  replaceCalls: Array<{ graceMs?: number } | undefined> = [];
+
+  async supervision(): Promise<Supervision> {
+    this.supervisionCalls += 1;
+    return this.supervisionResult;
+  }
+
+  async build(): Promise<BuildOutcome> {
+    this.buildCalls += 1;
+    return this.buildResult;
+  }
+
+  async replace(options?: { graceMs?: number }): Promise<never> {
+    this.replaceCalls.push(options);
+    // Never resolves — a real successful replace never returns either, because this process
+    // is gone by the time it would. A test that cares reads `replaceCalls`, not the promise.
+    return new Promise<never>(() => {});
+  }
+}
+
 /** Keeps run output in memory so tests can assert on it without touching disk. */
 export class MemoryLogSink implements LogSink {
   logs = new Map<string, string>();
@@ -717,6 +751,7 @@ export interface TestHarness<G extends GitPort = FakeGit> extends PomniContainer
   git: G;
   executor: FakeExecutor;
   forge: FakeForge;
+  restart: FakeRestartPort;
   logs: MemoryLogSink;
   clock: FixedClock;
   dir: string;
@@ -851,6 +886,11 @@ export async function createHarness<G extends GitPort = FakeGit>(
 
   await workspace.init();
 
+  const restart = new FakeRestartPort();
+  // The checkout `system` reports on. Not tracked as a git repo by default, matching a
+  // tarball install — a test that wants `behindRepo` calls `git.trackRepo(dir, ...)` itself.
+  const system = new SystemService(dir, restart, pipelines, runs, workspace, git, clock, events, logger);
+
   return {
     root,
     dir,
@@ -868,9 +908,11 @@ export async function createHarness<G extends GitPort = FakeGit>(
     runs,
     worktrees,
     doctor,
+    system,
     detection,
     executor,
     forge,
+    restart,
     llm,
     llmFactory,
     pipelineStore,

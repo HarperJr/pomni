@@ -1,7 +1,8 @@
 import { QueryClient, QueryClientProvider, useQuery, useQueryClient } from '@tanstack/react-query';
-import { useEffect, useState, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { BrowserRouter, Link, Navigate, Route, Routes, useLocation } from 'react-router-dom';
+import { api, type RestartResult, type SystemHealth } from './api';
 import { CredentialsPage, ProjectPage, ProjectsPage } from './pages';
 import { RUNNING_PIPELINES_KEY } from './components';
 import { ItemPage } from './items';
@@ -195,24 +196,88 @@ function SectionLink({ section, children }: { section: Section; children: ReactN
   );
 }
 
+type RunsInFlightResult = Extract<RestartResult, { outcome: 'runs-in-flight' }>;
+type BuildFailedResult = Extract<RestartResult, { outcome: 'build-failed' }>;
+
+/** What the footer shows below its strip while a restart needs a decision or is under way. */
+type RestartPanel =
+  | { kind: 'confirm'; runs: RunsInFlightResult['runs'] }
+  | { kind: 'build-failed'; build: BuildFailedResult['build'] }
+  | { kind: 'unsupported'; detail: string }
+  | { kind: 'timed-out' };
+
+const RESTART_POLL_TIMEOUT_MS = 90_000;
+const RESTART_POLL_INTERVAL_MS = 2_000;
+
+function shortCommit(commit: string | null): string {
+  return commit ? commit.slice(0, 7) : 'unknown';
+}
+
 /**
  * A quiet strip for the state of the tool itself.
  *
  * Its first job is the reload: Pomni rebuilds its own web while you are looking at it, and
  * until now the instruction was "press Ctrl+Shift+R" — a keyboard shortcut standing in for a
  * missing button. It has room for whatever belongs here next.
+ *
+ * There are two kinds of stale, and only one of them fixes with a browser reload: the tab
+ * can be behind the bundle the server is serving, or the server itself can be behind the repo
+ * because nothing rebuilt and relaunched it since the last merge. The footer says which.
  */
 function Footer() {
   const [loaded] = useState(() => document.querySelector('script[src*="assets/"]')?.getAttribute('src') ?? '');
+  const [panel, setPanel] = useState<RestartPanel | null>(null);
+  const [pollingSince, setPollingSince] = useState<string | null>(null);
+  const [restarting, setRestarting] = useState(false);
+  const pollGeneration = useRef(0);
 
   const health = useQuery({
     queryKey: ['health'],
-    queryFn: () => fetch('/api/health').then((response) => response.json() as Promise<{ build?: string | null }>),
-    refetchInterval: 30_000,
+    queryFn: () => api.health(),
+    refetchInterval: pollingSince ? false : 30_000,
   });
 
+  useEffect(() => {
+    if (pollingSince === null) return;
+
+    const generation = ++pollGeneration.current;
+    const deadline = Date.now() + RESTART_POLL_TIMEOUT_MS;
+
+    const tick = async () => {
+      if (pollGeneration.current !== generation) return;
+      try {
+        const response = await fetch('/api/health');
+        if (response.ok) {
+          const data = (await response.json()) as SystemHealth;
+          if (data.server.startedAt !== pollingSince) {
+            window.location.reload();
+            return;
+          }
+        }
+      } catch {
+        // The old process is gone and the new one has not opened its port yet. Expected —
+        // keep polling rather than treating it as failure.
+      }
+      if (pollGeneration.current !== generation) return;
+      if (Date.now() >= deadline) {
+        setPollingSince(null);
+        setPanel({ kind: 'timed-out' });
+        return;
+      }
+      setTimeout(() => void tick(), RESTART_POLL_INTERVAL_MS);
+    };
+
+    void tick();
+    return () => {
+      pollGeneration.current++;
+    };
+  }, [pollingSince]);
+
   const build = health.data?.build ?? null;
-  const stale = Boolean(build && loaded && !loaded.includes(build));
+  const server = health.data?.server ?? null;
+  const tabStale = Boolean(build && loaded && !loaded.includes(build));
+  const serverBehind = Boolean(server?.behindRepo);
+  const unsupported = server?.supervision.mode === 'unsupported';
 
   const reload = async () => {
     // A plain reload can be served the cached document, which is the one case that matters
@@ -225,14 +290,146 @@ function Footer() {
     window.location.reload();
   };
 
+  const requestRestart = async (cancelInFlight?: boolean) => {
+    if (!server) return;
+    setPanel(null);
+    setRestarting(true);
+    const startedAt = server.startedAt;
+    try {
+      const result = await api.restartServer(cancelInFlight ? { cancelInFlight: true } : undefined);
+      switch (result.outcome) {
+        case 'unsupported':
+          setPanel({ kind: 'unsupported', detail: result.supervision.detail });
+          return;
+        case 'runs-in-flight':
+          setPanel({ kind: 'confirm', runs: result.runs });
+          return;
+        case 'build-failed':
+          setPanel({ kind: 'build-failed', build: result.build });
+          return;
+        case 'restarting':
+          setPollingSince(startedAt);
+          return;
+      }
+    } finally {
+      setRestarting(false);
+    }
+  };
+
+  const statusLabel = (() => {
+    if (pollingSince !== null) return 'waiting for the server to come back';
+    if (tabStale && serverBehind) return 'your tab is behind the server, and the server is behind the repo';
+    if (tabStale) return 'your tab is behind the server';
+    if (serverBehind) return 'the server is behind the repo';
+    return null;
+  })();
+
   return (
-    <div className="footer">
-      <span className="dim mono">{build ?? 'build unknown'}</span>
-      {stale && <span className="tag warn">a newer build is on the server</span>}
-      <div className="spacer" />
-      <button className={stale ? 'primary' : 'ghost'} onClick={() => void reload()}>
-        Reload
-      </button>
+    <div className="footer-wrap">
+      {panel && (
+        <div className="footer-panel">
+          {panel.kind === 'confirm' && (
+            <>
+              <p>
+                Restarting would kill {panel.runs.length === 1 ? 'a run' : 'these runs'} mid-step, leaving its
+                worktree owned by a process that no longer exists:
+              </p>
+              <ul className="footer-runs">
+                {panel.runs.map((run) => (
+                  <li key={run.id}>
+                    <span className="tag">{run.kind}</span> {run.what}
+                    <span className="dim"> — started {new Date(run.startedAt).toLocaleString()}</span>
+                  </li>
+                ))}
+              </ul>
+              <div className="footer-panel-actions">
+                <button className="ghost" onClick={() => setPanel(null)}>
+                  Never mind
+                </button>
+                <button className="danger" onClick={() => void requestRestart(true)}>
+                  Cancel {panel.runs.length === 1 ? 'that run' : 'those runs'} and restart
+                </button>
+              </div>
+            </>
+          )}
+          {panel.kind === 'build-failed' && (
+            <>
+              <p>
+                The build failed, so the old server is still the one running. Nothing was restarted.
+              </p>
+              {panel.build.steps
+                .filter((step) => step.exitCode !== 0)
+                .map((step, index) => (
+                  <div key={index}>
+                    <div className="dim mono">
+                      {step.cmd} — exit {step.exitCode ?? 'unknown'}
+                    </div>
+                    <pre className="log">{step.output}</pre>
+                  </div>
+                ))}
+              <div className="footer-panel-actions">
+                <button className="ghost" onClick={() => setPanel(null)}>
+                  Dismiss
+                </button>
+              </div>
+            </>
+          )}
+          {panel.kind === 'unsupported' && (
+            <>
+              <p>{panel.detail}</p>
+              <div className="footer-panel-actions">
+                <button className="ghost" onClick={() => setPanel(null)}>
+                  Dismiss
+                </button>
+              </div>
+            </>
+          )}
+          {panel.kind === 'timed-out' && (
+            <>
+              <p>The server did not come back within 90 seconds. It may still be starting, or it may need a look.</p>
+              <div className="footer-panel-actions">
+                <button className="ghost" onClick={() => setPanel(null)}>
+                  Dismiss
+                </button>
+                <button className="primary" onClick={() => void reload()}>
+                  Reload anyway
+                </button>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
+      <div className="footer">
+        <span className="dim mono">{build ?? 'build unknown'}</span>
+        {server && (
+          <span className="dim mono">
+            running {shortCommit(server.startedAtCommit)}
+            {serverBehind && <> — repo is at {shortCommit(server.headCommit)}</>}
+          </span>
+        )}
+        {statusLabel && <span className="tag warn">{statusLabel}</span>}
+        <div className="spacer" />
+        {pollingSince !== null ? (
+          <span className="dim">restarting…</span>
+        ) : (
+          <>
+            {tabStale && (
+              <button className={serverBehind ? 'ghost' : 'primary'} onClick={() => void reload()}>
+                Reload
+              </button>
+            )}
+            {serverBehind && !unsupported && (
+              <button className="primary" disabled={restarting} onClick={() => void requestRestart()}>
+                {restarting ? 'Restarting…' : 'Restart'}
+              </button>
+            )}
+            {serverBehind && unsupported && !panel && (
+              <span className="dim">{server?.supervision.detail}</span>
+            )}
+          </>
+        )}
+      </div>
     </div>
   );
 }
