@@ -837,6 +837,7 @@ export async function createHarness<G extends GitPort = FakeGit>(
 
   const doctor = new DoctorService(projects, repos, executor, git, worktrees);
   // Tests are single-process: the lock adds latency without exercising anything.
+  const commentStore = new SqliteCommentStore(docs.absolute(layout.database));
   const backlog = new BacklogService(
     docs,
     projects,
@@ -846,6 +847,9 @@ export async function createHarness<G extends GitPort = FakeGit>(
     events,
     worktrees,
     logger,
+    // Without this the item's activity is its transitions alone, and every test about a
+    // comment sitting next to a move reads as unimplemented rather than unwired.
+    commentStore,
   );
   const llm = new FakeLlm();
   const llmFactory = new FakeLlmFactory(llm);
@@ -855,7 +859,6 @@ export async function createHarness<G extends GitPort = FakeGit>(
   const discovery = new DiscoveryService(repos, workflows, fs);
 
   // Shares pomni.db with the pipeline store, same as chat — one file, one set of connections.
-  const commentStore = new SqliteCommentStore(docs.absolute(layout.database));
   const comments = new CommentService(commentStore, clock, events, logger);
 
   // `comments` is new: PipelineService reads an item's comments into a run's context and lets

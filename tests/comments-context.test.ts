@@ -15,6 +15,15 @@ async function seed(): Promise<string> {
     spec: 'Owns the question.',
     prompt: 'You lead.',
   });
+  // An orchestrator with nobody to delegate to is not a runnable workflow, and every test
+  // here starts a run. Without this the whole file fails on the seed rather than on anything
+  // it means to assert.
+  await harness.workflows.addAgent('discovery', {
+    id: 'analyst',
+    name: 'Analyst',
+    spec: 'Answers questions.',
+    prompt: 'You analyse.',
+  });
   await harness.workflows.attach('acme', 'discovery');
   const item = await harness.backlog.create('acme', { title: 'Wireframes' });
   return item.id;

@@ -117,8 +117,16 @@ describe('commentsContext', () => {
   });
 
   it('drops rows written on a run, keeping only what was written on the item', () => {
-    const onItem = makeComment({ id: 'a', subject: 'item' });
-    const onRun = makeComment({ id: 'b', subject: 'run', subjectId: 'run-1' });
+    // Distinct text, or the assertion below cannot fail: `makeComment` gives every comment
+    // the same words, so asserting the run one is absent while the item one is present would
+    // be asserting that a string is missing from itself.
+    const onItem = makeComment({ id: 'a', subject: 'item', text: 'written on the item' });
+    const onRun = makeComment({
+      id: 'b',
+      subject: 'run',
+      subjectId: 'run-1',
+      text: 'written on the run',
+    });
     const file = commentsContext([onRun, onItem]);
     expect(file?.content).toContain(onItem.text);
     expect(file?.content).not.toContain(onRun.text);
