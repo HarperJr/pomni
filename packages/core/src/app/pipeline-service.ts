@@ -53,6 +53,7 @@ import {
   type WorktreeProbe,
 } from '../domain/worktree.js';
 import { KNOWN_EDITORS } from '../domain/config.js';
+import { flowOf } from '../domain/project.js';
 import type { Artifact, ArtifactDiff } from '../domain/pipeline.js';
 import type { ProjectPolicy } from '../domain/project.js';
 import type { Provider } from '../domain/provider.js';
@@ -95,6 +96,11 @@ export interface StartRunInput {
   context?: ContextFile[];
   /** Set when this run is a second attempt at an earlier one. */
   rerunOf?: string;
+  /**
+   * What asked for this run, when it was not a person asking directly. `flow:ready` is the
+   * project's own flow, because an item entered that state.
+   */
+  startedBy?: string;
   /**
    * Where the previous attempt started, so this one's comments file can say which notes it
    * had already seen. Only `rerun()` sets it; a first attempt has nothing to be since.
@@ -372,6 +378,7 @@ export class PipelineService {
         providerId: provider.id,
         itemId: input.itemId ?? null,
         rerunOf: input.rerunOf ?? null,
+        startedBy: input.startedBy ?? null,
         // Filled in by `deliver()` when there is a commit to point at. Null until then, which
         // is honest: a run that has not committed has no branch worth naming.
         branch: null,
@@ -424,6 +431,70 @@ export class PipelineService {
 
     this.owned.add(run.id);
     return { run, completion: this.execute(run, chosen, workspace, taken.dirs, isolated) };
+  }
+
+  /**
+   * Start the workflow a column names, when an item enters it.
+   *
+   * The board's answer to "every run is launched by a person typing a command, even when the
+   * rule is obvious". An item reaching `ready` should be picked up; an item reaching
+   * `in_review` should be reviewed. `onEnter` is where a project says so once.
+   *
+   * Null whenever nothing should start, and each of those cases is a decision:
+   *
+   * - **The state names no workflow.** The default, and the built-in flow names none anywhere.
+   *   An agent run costs real money; starting one has to be something somebody wrote down.
+   * - **A run of that same workflow is already going for this item.** An item dragged in and
+   *   out of a column must not spawn a run each time. Deliberately *that workflow* rather than
+   *   any run: a dev run ending is what moves the item to review, and its row still says
+   *   `running` at that moment — a wider guard would break the chain it is meant to protect.
+   * - **The workflow is not attached to the project, or is not ready to run.** Reported and
+   *   skipped rather than thrown: the move already happened and was correct, and failing it
+   *   afterwards would leave the board disagreeing with the flow over something neither did
+   *   wrong.
+   *
+   * The task is the item's own title and body, exactly as a person starting a run from the
+   * board would get: one task, composed in one place, whoever asked for it.
+   */
+  async onItemEntered(
+    projectId: string,
+    itemId: string,
+    to: string,
+  ): Promise<StartRunResult | null> {
+    const project = await this.projects.getRef(projectId).catch(() => null);
+    if (!project) return null;
+
+    const state = flowOf(project.data).states.find((entry) => entry.name === to);
+    if (!state?.onEnter) return null;
+
+    const item = await this.backlog.get(projectId, itemId).catch(() => null);
+    if (!item) return null;
+
+    const running = await this.store.listRuns({ projectId, status: 'running' });
+    if (running.some((run) => run.itemId === itemId && run.workflowId === state.onEnter)) {
+      this.logger.debug(
+        `'${to}' names ${state.onEnter}, and ${itemId} already has one running — not starting a second`,
+      );
+      return null;
+    }
+
+    try {
+      return await this.start({
+        projectId,
+        itemId,
+        workflowId: state.onEnter,
+        task: [item.title, '', item.body].join('\n').trim(),
+        startedBy: `flow:${to}`,
+      });
+    } catch (error) {
+      // The move stands. A column naming a workflow that cannot run is a configuration
+      // problem to fix, not a reason to undo work that was correctly moved.
+      this.logger.warn(
+        `'${to}' names workflow '${state.onEnter}' but it did not start for ${itemId}: ` +
+          (error instanceof Error ? error.message : String(error)),
+      );
+      return null;
+    }
   }
 
   async get(id: string): Promise<PipelineRunDetail> {

@@ -126,6 +126,9 @@ export async function startServer(
   }
 
   const app = await createApp(container, options);
+  const unwatch = watchFlow(container);
+  app.addHook('onClose', async () => unwatch());
+
   await listenWithHandover(app, host, port);
 
   const address = app.addresses()[0];
@@ -139,6 +142,41 @@ export async function startServer(
     url: `http://${displayHost}:${actualPort}`,
     close: () => app.close(),
   };
+}
+
+/**
+ * Start the workflow a column names, whenever an item enters it.
+ *
+ * Wired here, in the server, because this is the process that can own a run. A run outlives
+ * the request that asked for it, and the alternative — a one-shot CLI process starting one and
+ * exiting — produces exactly the orphan a run marked `running` with a dead pid is.
+ *
+ * It listens rather than being called from the transition route, so it fires for every move
+ * this process makes: the board, the item page, the CLI talking to this server, and an agent
+ * moving its own item mid-run.
+ *
+ * Nothing is awaited. The move has already happened and its response must not wait on an
+ * agent run that takes ten minutes; the run announces itself on the same event stream the
+ * board is already watching.
+ */
+function watchFlow(container: PomniContainer): () => void {
+  return container.events.subscribe((event) => {
+    if (event.type !== 'item.transitioned') return;
+
+    void container.pipelines
+      .onItemEntered(event.projectId, event.itemId, event.to)
+      .then((started) => {
+        if (started) {
+          container.logger.info(
+            `${event.to} names a workflow: started ${started.run.id} for ${event.itemId}`,
+          );
+          // The failure is already recorded on the run; this keeps an unhandled rejection from
+          // taking the server down with it.
+          started.completion.catch(() => undefined);
+        }
+      })
+      .catch((error: unknown) => container.logger.error('flow trigger failed', error));
+  });
 }
 
 const RESTART_AWAIT_PORT_ENV = 'POMNI_RESTART_AWAIT_PORT';

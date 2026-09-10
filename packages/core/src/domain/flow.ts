@@ -39,6 +39,18 @@ export interface FlowState {
   board: boolean;
   /** Counts as live work for "active items" and "what should I pick up next". */
   active: boolean;
+  /**
+   * A workflow to run when an item enters this state, or null to run nothing.
+   *
+   * The board's answer to "every run today is launched by a person typing a command, even when
+   * the rule is obvious". An item reaching `ready` should be picked up; an item reaching
+   * `in_review` should be reviewed — and saying so once, here, is better than remembering to
+   * type it every time.
+   *
+   * Off by default, and per state rather than per project: an agent run costs real money, and a
+   * setting that starts one has to be something somebody wrote down on purpose.
+   */
+  onEnter: string | null;
 }
 
 function defaultLabel(name: string): string {
@@ -52,6 +64,7 @@ const FlowStateObjectSchema = z
     label: z.string().min(1).optional(),
     board: z.boolean().default(true),
     active: z.boolean().default(true),
+    onEnter: z.string().min(1).nullable().default(null),
   })
   .strict();
 
@@ -60,7 +73,7 @@ export const FlowStateSchema = z
   .union([z.string().regex(STATE_NAME, 'a state name must look like `in_review`'), FlowStateObjectSchema])
   .transform((value): FlowState =>
     typeof value === 'string'
-      ? { name: value, label: defaultLabel(value), board: true, active: true }
+      ? { name: value, label: defaultLabel(value), board: true, active: true, onEnter: null }
       : { ...value, label: value.label ?? defaultLabel(value.name) },
   );
 
@@ -394,7 +407,9 @@ export const FlowSchema = z
 // ---------------------------------------------------------------------------
 
 function state(name: string, board: boolean, active: boolean): FlowState {
-  return { name, label: defaultLabel(name), board, active };
+  // The built-in flow starts nothing on its own. Somebody has to write the rule down before
+  // Pomni spends money without being asked, and that is what `onEnter` is for.
+  return { name, label: defaultLabel(name), board, active, onEnter: null };
 }
 
 function requiring(partial: Partial<Requirements>): Requirements {

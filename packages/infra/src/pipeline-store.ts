@@ -51,8 +51,8 @@ export class SqlitePipelineStore implements PipelineStore {
       `INSERT INTO pipeline_runs (id, project_id, workflow_id, workflow_name, provider_id,
                                   item_id, rerun_of, task, context, status, pid, result, error,
                                   gate_status, gate_summary, item_status, outcome, unmet,
-                                  started_at, ended_at, duration_ms, cost_usd, branch)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                                  started_at, ended_at, duration_ms, cost_usd, branch, started_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       run.id,
       run.projectId,
@@ -79,6 +79,7 @@ export class SqlitePipelineStore implements PipelineStore {
       // Bound defensively. This method takes a record from outside, and `undefined` is not a
       // value SQLite can bind — it fails with a parameter number and no clue which field.
       run.branch ?? null,
+      run.startedBy ?? null,
     );
   }
 
@@ -370,6 +371,7 @@ interface RunRow {
   provider_id: string;
   item_id: string | null;
   rerun_of: string | null;
+  started_by: string | null;
   branch: string | null;
   task: string;
   context: string | null;
@@ -431,6 +433,7 @@ function toRun(row: RunRow): PipelineRun {
     providerId: row.provider_id,
     itemId: row.item_id,
     rerunOf: row.rerun_of ?? null,
+    startedBy: row.started_by ?? null,
     branch: row.branch ?? null,
     task: row.task,
     context: toContext(row.context),
@@ -657,6 +660,8 @@ const MIGRATIONS: string[] = [
   `ALTER TABLE pipeline_steps ADD COLUMN cache_creation_tokens INTEGER NOT NULL DEFAULT 0;`,
 
   `ALTER TABLE pipeline_steps ADD COLUMN sent_bytes INTEGER NOT NULL DEFAULT 0;`,
+
+  `ALTER TABLE pipeline_runs ADD COLUMN started_by TEXT;`,
 ];
 
 function migrate(db: SqliteDatabase): void {
