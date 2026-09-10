@@ -1666,3 +1666,111 @@ button.link:hover { text-decoration: underline; }
   padding: 1px 8px;
   font-size: 12px;
 }
+
+/* ---------------------------------------------------------------------------
+   The board
+   --------------------------------------------------------------------------- */
+
+/*
+ * Columns scroll sideways as a set and each scrolls down on its own. A board is the one
+ * screen where the number of columns is the project's decision rather than the layout's, so
+ * it has to survive four of them and eleven.
+ */
+.board {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  overflow-x: auto;
+  padding-bottom: 6px;
+}
+
+.board-column {
+  flex: 0 0 260px;
+  max-height: 70vh;
+  overflow-y: auto;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px;
+}
+
+/* While a card is held: where it can go, and where it cannot. Said with more than colour —
+   a shut column fades its contents, which reads without seeing the border at all. */
+.board-column-open {
+  border-color: var(--accent);
+}
+
+.board-column-shut {
+  opacity: 0.45;
+}
+
+.board-column-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 4px 8px;
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.board-empty {
+  padding: 10px 4px;
+  color: var(--text-dim);
+  text-align: center;
+}
+
+.board-card {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px 10px;
+  margin-bottom: 8px;
+  cursor: grab;
+}
+
+.board-card-held {
+  opacity: 0.5;
+  cursor: grabbing;
+}
+
+.board-card a {
+  color: inherit;
+  text-decoration: none;
+}
+
+.board-card-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+  margin-top: 6px;
+}
+
+.board-ready {
+  color: var(--ok);
+}
+
+.board-outstanding {
+  color: var(--text-dim);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.board-card-moves {
+  margin-top: 6px;
+}
+
+.board-card-moves .ghost {
+  padding: 1px 8px;
+  font-size: 12px;
+}
+
+.board-menu {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  margin-top: 4px;
+}

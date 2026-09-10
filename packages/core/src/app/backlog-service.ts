@@ -115,6 +115,20 @@ export interface EligibleItem {
 }
 
 /**
+ * One card on a board, and every move it could be asked to make.
+ *
+ * Only the id: unlike {@link EligibleItem}, a board already has the items — it drew the
+ * columns from them — and sending each one twice is the shape this avoids.
+ *
+ * The transitions carry their own `ok` and `unmet`, so a board can grey a column, explain a
+ * refusal and summarise what is outstanding from one answer instead of three.
+ */
+export interface BoardMoves {
+  itemId: string;
+  transitions: TransitionOffer[];
+}
+
+/**
  * One thing that happened to an item: a move, or something somebody said about it.
  *
  * Display-only, and assembled by this service rather than stored. `TransitionRecordSchema`
@@ -545,6 +559,49 @@ export class BacklogService {
     }
 
     return found;
+  }
+
+  /**
+   * Every move every item on a board could be asked to make, and what stands in the way.
+   *
+   * The board asks three questions of each card — which columns will accept it, what is
+   * outstanding for the next one, and why a drop was refused — and all three are the same
+   * answer: `transitionOffers`. Answering them per card is one request per card and, worse,
+   * one backlog read and one gate read per card; this reads the project once and the gates
+   * once, the way {@link eligibleItems} already does.
+   *
+   * Deliberately not folded into {@link list}. A `BacklogItem` is what is stored, and this is
+   * a computation over the whole project that costs run-store reads — a caller drawing a
+   * simple list must not pay for it by accident.
+   *
+   * Off-flow items are included and answer with their recovery moves, because an item nobody
+   * can move is exactly the one a person opens the board to rescue.
+   */
+  async boardMoves(filter: ItemFilter): Promise<BoardMoves[]> {
+    const items = await this.list(filter);
+    const byProject = new Map<string, { project: Project; flow: Flow; siblings: BacklogItem[] }>();
+
+    const board: BoardMoves[] = [];
+    for (const item of items) {
+      let context = byProject.get(item.projectId);
+      if (!context) {
+        const project = (await this.projects.getRef(item.projectId)).data;
+        context = {
+          project,
+          flow: flowOf(project),
+          siblings: await this.list({ projectId: item.projectId }),
+        };
+        byProject.set(item.projectId, context);
+      }
+
+      const evidence = await this.evidenceFor(item, context.project, context.flow, context.siblings);
+      board.push({
+        itemId: item.id,
+        transitions: transitionOffers(item, context.flow, evidence),
+      });
+    }
+
+    return board;
   }
 
   /**

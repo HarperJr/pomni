@@ -3,7 +3,7 @@ import { useQueries, useQuery } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
 import { api } from './api';
 import { Alert, RUNNING_PIPELINES_KEY, RunningBadge, errorMessage } from './components';
-import { ItemStatusBadge } from './items';
+import { Board } from './board';
 
 /**
  * What is open, everywhere: every project on the left with its open count, the selected
@@ -143,46 +143,13 @@ export function TrackerPage() {
               </div>
             </div>
           ) : (
-            <div className="grid">
-              {itemsData.map((item) => {
-                const itemRuns = (running.data ?? []).filter((run) => run.itemId === item.id);
-                const [itemRun] = itemRuns;
-                return (
-                  <Link
-                    key={item.id}
-                    className="project-card"
-                    to={
-                      itemRun
-                        ? `/p/${item.projectId}/console/${itemRun.id}`
-                        : `/p/${item.projectId}/items/${item.id}`
-                    }
-                  >
-                    <h3>{item.title}</h3>
-                    <div className="dim mono">{item.id}</div>
-                    <div className="tags" style={{ marginTop: 8 }}>
-                      <ItemStatusBadge status={item.status} />
-                      <span className="tag">{item.priority}</span>
-                      <span className="tag">{item.type}</span>
-                      {item.repos.map((repo) => (
-                        <span key={repo} className="tag">{repo}</span>
-                      ))}
-                      {waveByItem.has(item.id) && (
-                        <span className="tag">wave {waveByItem.get(item.id)}</span>
-                      )}
-                      {waitingOnByItem.has(item.id) && (
-                        <span
-                          className="tag warn"
-                          title={`waiting on ${waitingOnByItem.get(item.id)!.join(', ')}`}
-                        >
-                          waiting
-                        </span>
-                      )}
-                    </div>
-                    <RunningBadge runs={itemRuns} />
-                  </Link>
-                );
-              })}
-            </div>
+            <Board
+              projectId={selected}
+              items={itemsData}
+              running={running.data ?? []}
+              waves={waveByItem}
+              waitingOn={waitingOnByItem}
+            />
           )}
         </div>
       </div>

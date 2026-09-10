@@ -417,6 +417,17 @@ export interface BacklogItemDetail extends BacklogItem {
   acceptance: { total: number; checked: number };
 }
 
+/**
+ * One card on the board, and every move it could be asked to make.
+ *
+ * Mirrors `BoardMoves` in `packages/core/src/app/backlog-service.ts`. Only the id: the board
+ * already has the items, having drawn its columns from them.
+ */
+export interface BoardMoves {
+  itemId: string;
+  transitions: TransitionOffer[];
+}
+
 /** One item that could move right now, with the moves it could make. Never empty `moves`. */
 export interface EligibleItem {
   item: BacklogItem;
@@ -1185,6 +1196,14 @@ export const api = {
       `/api/projects/${encodeURIComponent(projectId)}/items/${encodeURIComponent(itemId)}`,
       { method: 'DELETE' },
     ),
+
+  /** Every move every card could make, in one request. See `BoardMoves`. */
+  boardMoves: (projectId: string, status?: string) =>
+    request<{ board: BoardMoves[] }>(
+      `/api/projects/${encodeURIComponent(projectId)}/items-board${
+        status ? `?status=${encodeURIComponent(status)}` : ''
+      }`,
+    ).then((result) => result.board),
 
   getItemFlow: (projectId: string) =>
     request<{ flow: Flow }>(`/api/projects/${encodeURIComponent(projectId)}/items-flow`).then(
