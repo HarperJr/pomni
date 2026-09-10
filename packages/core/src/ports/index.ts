@@ -1,6 +1,7 @@
 import type { ZodType, ZodTypeDef } from 'zod';
 import type { Capability, CapabilityMap } from '../domain/capability.js';
 import type { Chat, ChatFilter, ChatMessage } from '../domain/chat.js';
+import type { Comment, CommentAuthor, CommentFilter } from '../domain/comment.js';
 import type { Credential } from '../domain/credential.js';
 import type { VcsInfo } from '../domain/repo.js';
 import type {
@@ -441,6 +442,43 @@ export interface ChatStore {
 }
 
 // ---------------------------------------------------------------------------
+// Comment store
+// ---------------------------------------------------------------------------
+
+/**
+ * Notes on items and runs. SQLite beside the pipeline and chat stores — an append-only log
+ * nobody edits by hand, which is the opposite of what `.pomni/**.yaml` is for.
+ *
+ * There is no `update`, deliberately. A comment's text is immutable: what an agent was told is
+ * part of the record of why it did what it did, so the only writes after an insert are the
+ * three fields that settle it — resolved, and deleted, each with its own method saying so.
+ */
+export interface CommentStore {
+  insert(comment: Comment): Promise<void>;
+  get(id: string): Promise<Comment | null>;
+  /** Ordered by `id`. Tombstones hidden unless `includeDeleted`. */
+  list(filter: CommentFilter): Promise<Comment[]>;
+  /**
+   * An item's live comments, oldest first — what a run started from it is given as context.
+   * Never returns a deleted one, `includeDeleted` or not: there is no reader of this that
+   * would want a retracted note put in front of an agent.
+   */
+  forRunContext(itemId: string): Promise<Comment[]>;
+  /** Addressed to somebody and still unanswered. What the item shows as waiting on a person. */
+  outstanding(itemId: string): Promise<Comment[]>;
+  /** Every comment an agent wrote from this run, wherever it landed. */
+  byAuthorRun(runId: string): Promise<Comment[]>;
+  /** No-op when already resolved; refuses a comment that was never addressed to anyone. */
+  markResolved(
+    id: string,
+    resolution: { at: string; by: CommentAuthor; byCommentId: string | null },
+  ): Promise<void>;
+  /** A tombstone: the text stays on the row and no reader shows it. */
+  markDeleted(id: string, deletion: { at: string; by: CommentAuthor }): Promise<void>;
+  close(): void;
+}
+
+// ---------------------------------------------------------------------------
 // Advisory lock
 // ---------------------------------------------------------------------------
 
@@ -550,6 +588,29 @@ export type PomniEvent =
       status: string;
       summary: string | null;
     }
+  /**
+   * A note was written, or withdrawn. The comment itself is not on the event: the store is
+   * where a comment lives, and a browser told which one changed re-reads the list it is
+   * showing. Putting the text here would copy every note into `.pomni/events.ndjson` as well.
+   */
+  | {
+      type: 'comment.added';
+      commentId: string;
+      subject: string;
+      subjectId: string;
+      projectId: string;
+      /** So a badge can say "an agent wrote this" without reading the comment first. */
+      authorKind: string;
+      /** Set when the note asks a named person something. Null otherwise. */
+      addressedTo: string | null;
+    }
+  | {
+      type: 'comment.deleted';
+      commentId: string;
+      subject: string;
+      subjectId: string;
+      projectId: string;
+    }
   | { type: 'chat.changed'; chatId: string }
   | { type: 'chat.removed'; chatId: string }
   | { type: 'chat.message.chunk'; chatId: string; messageId: string; text: string }
@@ -634,6 +695,8 @@ export const DURABLE_EVENT_TYPES: ReadonlySet<string> = new Set([
   'item.changed',
   'item.transitioned',
   'item.removed',
+  'comment.added',
+  'comment.deleted',
   'worktree.taken',
   'worktree.released',
 ]);

@@ -40,11 +40,21 @@ import {
   type TransitionRecord,
   type UnmetRequirement,
 } from '../domain/item.js';
+import { isDeleted, type Comment } from '../domain/comment.js';
 import { layout } from '../domain/layout.js';
 import { flowOf, type Project } from '../domain/project.js';
 import type { Repo } from '../domain/repo.js';
 import { planWaves, type WavePlan } from '../domain/schedule.js';
-import type { Clock, DocRef, DocStore, EventBus, Lock, Logger, RunStore } from '../ports/index.js';
+import type {
+  Clock,
+  CommentStore,
+  DocRef,
+  DocStore,
+  EventBus,
+  Lock,
+  Logger,
+  RunStore,
+} from '../ports/index.js';
 import type { ProjectService } from './project-service.js';
 import type { WorktreeService } from './worktree-service.js';
 
@@ -104,6 +114,38 @@ export interface EligibleItem {
   moves: EligibleMove[];
 }
 
+/**
+ * One thing that happened to an item: a move, or something somebody said about it.
+ *
+ * Display-only, and assembled by this service rather than stored. `TransitionRecordSchema`
+ * stays `.strict()` and gains nothing — a comment is not part of a transition, and a record
+ * that grew a comment field would be claiming otherwise.
+ */
+export type ItemActivityEntry =
+  | { at: string; kind: 'transition'; transition: TransitionRecord }
+  | { at: string; kind: 'comment'; comment: Comment };
+
+/**
+ * The item detail, with its history and its notes merged.
+ *
+ * An extension rather than a change to `BacklogItemDetail`: the merge is composed here, out of
+ * two stores, and the domain type describes what an item *is*.
+ */
+export interface BacklogItemDetailWithActivity extends BacklogItemDetail {
+  /** Moves and comments, oldest first. */
+  activity: ItemActivityEntry[];
+}
+
+/**
+ * A deleted note as the history shows it: it happened, and what it said is not readable.
+ *
+ * The text is still on the row — deleting is not rewriting the record an agent acted on — but
+ * nothing that renders the item puts it back on a page.
+ */
+function withheld(comment: Comment): Comment {
+  return { ...comment, text: '_this note was deleted_', attachments: [] };
+}
+
 /** The automatic move being performed, as {@link nextAutoMove} described it. */
 interface AutoMove {
   to: ItemStatus;
@@ -139,6 +181,14 @@ export class BacklogService {
     private readonly events: EventBus,
     private readonly worktrees: WorktreeService,
     private readonly logger: Logger,
+    /**
+     * Where the item's notes are read from, for {@link BacklogItemDetailWithActivity.activity}.
+     *
+     * Optional because an item is readable without them: a surface wired before comments
+     * existed still gets its detail, with an activity list of transitions alone. Nothing else
+     * in this service reads or writes comments — {@link CommentService} owns that.
+     */
+    private readonly comments?: CommentStore,
   ) {}
 
   /**
@@ -242,7 +292,7 @@ export class BacklogService {
     return items.filter((item) => matches(item, filter)).sort(compareItems);
   }
 
-  async get(projectId: string, itemId: string): Promise<BacklogItemDetail> {
+  async get(projectId: string, itemId: string): Promise<BacklogItemDetailWithActivity> {
     const ref = await this.readRef(projectId, itemId);
     if (!ref) throw new NotFoundError('item', `${projectId}/${itemId}`);
     return this.detail(ref.data);
@@ -718,7 +768,7 @@ export class BacklogService {
 
   // -------------------------------------------------------------------------
 
-  private async detail(item: BacklogItem): Promise<BacklogItemDetail> {
+  private async detail(item: BacklogItem): Promise<BacklogItemDetailWithActivity> {
     const siblings = await this.list({ projectId: item.projectId });
     const byId = new Map(siblings.map((other) => [other.id, other]));
 
@@ -745,7 +795,52 @@ export class BacklogService {
         .map((other) => other.id),
       sections: parseSections(item.body),
       acceptance: countAcceptance(item.body),
+      activity: await this.activity(item),
     };
+  }
+
+  /**
+   * The item's moves and its notes in one list, oldest first.
+   *
+   * "Moved to blocked" and "blocked because Figma was unreachable" are the same event told
+   * twice, and reading them in two places is how the second one gets lost. Assembled here and
+   * never stored: `TransitionRecord` is a claim about something that happened and gains
+   * nothing from this, and a merge kept on disk would be a second copy to keep in step.
+   *
+   * A deleted note still appears — a deletion is itself part of the history — with its text
+   * withheld rather than its existence hidden.
+   */
+  private async activity(item: BacklogItem): Promise<ItemActivityEntry[]> {
+    const entries: ItemActivityEntry[] = item.history.map((transition) => ({
+      at: transition.at,
+      kind: 'transition' as const,
+      transition,
+    }));
+
+    // Unreadable comments cost the item its notes, never its page: everything else on the
+    // detail is already assembled and correct.
+    const comments = this.comments
+      ? await this.comments
+          .list({ subject: 'item', subjectId: item.id, includeDeleted: true })
+          .catch((error: unknown) => {
+            this.logger.warn(
+              `could not read comments for '${item.id}': ${
+                error instanceof Error ? error.message : String(error)
+              }`,
+            );
+            return [] as Comment[];
+          })
+      : [];
+
+    for (const comment of comments) {
+      entries.push({
+        at: comment.createdAt,
+        kind: 'comment',
+        comment: isDeleted(comment) ? withheld(comment) : comment,
+      });
+    }
+
+    return entries.sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0));
   }
 
   // -------------------------------------------------------------------------

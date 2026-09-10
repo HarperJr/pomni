@@ -6,6 +6,7 @@ import {
   BacklogService,
   ChatService,
   CredentialService,
+  CommentService,
   DiscoveryService,
   DoctorService,
   NotInitializedError,
@@ -41,6 +42,7 @@ import {
   SqliteChatStore,
   SqlitePipelineStore,
   SqliteRunStore,
+  SqliteCommentStore,
   SqliteWorktreeStore,
   SystemClock,
   findWorkspaceRoot,
@@ -136,6 +138,7 @@ export function createContainer(root: string, logLevel: LogLevel = 'warn'): Pomn
   // the other worktree wiring below.
   const pipelineStore = new SqlitePipelineStore(docs.absolute(layout.database));
   const worktreeStore = new SqliteWorktreeStore(docs.absolute(layout.database));
+  const commentStore = new SqliteCommentStore(docs.absolute(layout.database));
   const worktrees = new WorktreeService(
     docs,
     worktreeStore,
@@ -154,6 +157,7 @@ export function createContainer(root: string, logLevel: LogLevel = 'warn'): Pomn
   const workflows = new WorkflowService(docs, projects, providerService, clock, events);
   const tools = new ToolService(docs, projects, credentials, executor, clock, events, logger);
   const discovery = new DiscoveryService(repos, workflows, fs);
+  const comments = new CommentService(commentStore, clock, events, logger);
   const pipelines = new PipelineService(
     docs,
     pipelineStore,
@@ -170,6 +174,7 @@ export function createContainer(root: string, logLevel: LogLevel = 'warn'): Pomn
     logger,
     worktrees,
     new ForgeClient(),
+    comments,
   );
   // Empty rather than `process.cwd()` on purpose: a fallback directory that happens to look
   // like a project would let the adapter rebuild and replace this process with the wrong
