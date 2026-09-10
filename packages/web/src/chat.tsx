@@ -10,6 +10,7 @@ import {
   type ProviderStatus,
 } from './api';
 import { Alert, errorMessage } from './components';
+import { Markdown } from './markdown';
 
 // ---------------------------------------------------------------------------
 // Conversation list + shell
@@ -506,7 +507,7 @@ function MessageRow({
         </div>
       )}
 
-      {message.text && <div className="chat-message-text wrap">{message.text}</div>}
+      {message.text && <Markdown className="chat-message-text" source={message.text} />}
 
       {message.actions.map((action) => (
         <ActionCard key={action.id} chatId={chatId} messageId={message.id} action={action} />

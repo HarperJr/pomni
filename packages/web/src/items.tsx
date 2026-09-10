@@ -16,6 +16,7 @@ import {
   type UnmetRequirement,
 } from './api';
 import { Alert, Dialog, errorMessage } from './components';
+import { Markdown } from './markdown';
 
 const COLUMN_LABEL: Record<string, string> = {
   backlog: 'Backlog',
@@ -424,6 +425,7 @@ export function ItemPage() {
   // lands while the draft differs just moves `savedBody` forward — the draft, and its dirty
   // state against the new baseline, are left alone.
   const [bodyDraft, setBodyDraft] = useState('');
+  const [reading, setReading] = useState(false);
   const [savedBody, setSavedBody] = useState<string | undefined>(undefined);
   const [savedRev, setSavedRev] = useState<string | undefined>(undefined);
   useEffect(() => {
@@ -613,6 +615,15 @@ export function ItemPage() {
           Spec
           <div className="spacer" />
           {bodyDirty && <span className="dim spec-dirty">unsaved changes</span>}
+          {/* The draft, not the saved body: a preview of something other than what you are
+              typing is a preview of the wrong thing. */}
+          <button
+            className="ghost"
+            style={{ padding: '3px 12px', fontSize: 12 }}
+            onClick={() => setReading((was) => !was)}
+          >
+            {reading ? 'Edit' : 'Preview'}
+          </button>
           <button
             className="primary"
             style={{ padding: '3px 12px', fontSize: 12 }}
@@ -638,12 +649,16 @@ export function ItemPage() {
             before deciding what to do.
           </Alert>
         )}
-        <textarea
-          className="mono spec-body-editor"
-          value={bodyDraft}
-          onChange={(event) => setBodyDraft(event.target.value)}
-          spellCheck={false}
-        />
+        {reading ? (
+          <Markdown className="spec-body-preview" source={bodyDraft} />
+        ) : (
+          <textarea
+            className="mono spec-body-editor"
+            value={bodyDraft}
+            onChange={(event) => setBodyDraft(event.target.value)}
+            spellCheck={false}
+          />
+        )}
       </div>
 
       {showLatest && (
@@ -652,7 +667,7 @@ export function ItemPage() {
           onClose={() => setShowLatest(false)}
           footer={<button onClick={() => setShowLatest(false)}>Close</button>}
         >
-          <pre className="spec-body-preview">{data.body}</pre>
+          <Markdown className="md-panel" source={data.body} />
         </Dialog>
       )}
     </>

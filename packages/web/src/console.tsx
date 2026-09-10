@@ -15,6 +15,7 @@ import {
   type WorkflowDetail,
 } from './api';
 import { Alert, Dialog, errorMessage } from './components';
+import { Markdown } from './markdown';
 
 const ACTIVE: StepStatus[] = ['pending', 'running'];
 
@@ -846,16 +847,19 @@ export function ConsolePage() {
             )}
 
             {selected && shown.length === 0 && (
-              <pre className="log">
-                {data.steps.find((step) => step.id === selected)?.output ??
-                  'This agent has not replied yet.'}
-              </pre>
+              <Markdown
+                className="md-panel"
+                source={
+                  data.steps.find((step) => step.id === selected)?.output ??
+                  'This agent has not replied yet.'
+                }
+              />
             )}
 
             {shown.map((line, index) => (
               <div className="log-entry" key={index}>
                 <div className="log-agent">{line.agentName || agentFor(data, line.stepId)}</div>
-                <pre className="log">{line.text}</pre>
+                <Markdown className="md-panel" source={line.text} />
               </div>
             ))}
             <div ref={bottom} />
@@ -893,9 +897,15 @@ export function ConsolePage() {
       {(data.result || data.error) && (
         <div className="card">
           <div className="card-head">{data.error ? 'Failed' : 'Result'}</div>
-          <pre className="log" style={{ maxHeight: 'none' }}>
-            {data.error ?? data.result}
-          </pre>
+          {/* The error is a sentence from the system, not markdown an agent wrote — it keeps
+              its exact shape. The result is prose and is read as such. */}
+          {data.error ? (
+            <pre className="log" style={{ maxHeight: 'none' }}>
+              {data.error}
+            </pre>
+          ) : (
+            <Markdown className="md-panel" source={data.result ?? ''} />
+          )}
         </div>
       )}
     </>
