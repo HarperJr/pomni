@@ -374,6 +374,19 @@ export interface PipelineStore {
   insertStep(step: PipelineStep): Promise<void>;
   updateStep(id: string, step: PipelineStep): Promise<void>;
   steps(runId: string): Promise<PipelineStep[]>;
+  /**
+   * Dollars per token on this model, from every step that recorded both a cost and its
+   * tokens. Null when none has.
+   *
+   * Measured rather than looked up. A price list is a second copy of something the provider
+   * already tells us on every result, and it is the copy that goes stale — silently, and in
+   * the direction that makes a ceiling too generous. This one is wrong only in the way the
+   * last few runs were wrong.
+   *
+   * It is an average, so it says nothing about the next turn in particular. That is enough
+   * for what it is for: deciding whether a session has spent about as much as it was allowed.
+   */
+  rate(model: string): Promise<number | null>;
   putArtifacts(artifacts: Artifact[]): Promise<void>;
   artifacts(runId: string): Promise<Artifact[]>;
   insertQuestion(question: Question): Promise<void>;

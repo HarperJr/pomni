@@ -31,6 +31,18 @@ export const ProjectPolicySchema = z.object({
   autoMergeRequest: z.boolean().default(false),
   requireGreenGate: z.boolean().default(true),
   maxTurns: z.number().int().positive().default(200),
+  /**
+   * Dollars one run may spend, checked between its steps and between the turns inside one.
+   *
+   * What it promises, precisely: the ceiling is crossed by at most the cost of one turn. A
+   * turn already in flight cannot be un-billed, and the mid-session check works from this
+   * model's measured cost per token rather than from the provider's own figure, which only
+   * arrives at the end. So a $10 ceiling stops at around $10, not at exactly $10.
+   *
+   * It once meant much less than that. The check sat only between steps, and one step spent
+   * $7.77 on a run that was at $8.12 of $10 when that step was admitted — $16.37 against a
+   * stated $10, with every check in the system satisfied.
+   */
   maxCostUsd: z.number().positive().default(5),
   /**
    * Bytes of assembled system prompt one turn may carry.

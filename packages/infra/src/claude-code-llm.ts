@@ -14,6 +14,7 @@ import {
   type LlmRequest,
   type LlmResult,
   type LlmToolSpec,
+  type LlmUsage,
   type ToolGrant,
   type ToolLoopHooks,
 } from '@pomni/core';
@@ -260,8 +261,23 @@ export class ClaudeCodeLlm implements LlmPort {
     if (!this.options.cwd) args.push('--disallowedTools', ...textOnlyDisallowed(this.options));
 
     try {
-      const raw = await this.run(args, request.signal, undefined, prompt);
-      const { result: parsed, actions } = readStream(raw);
+      const watch = watcher(request.onTurn);
+      const raw = await this.run(args, request.signal, undefined, prompt, watch.line);
+      const { result: parsed, actions, said } = readStream(raw);
+
+      // Killed part-way for money. There is no result frame — that is the frame the CLI
+      // prints last — so the answer is what the session had already said, the usage is what
+      // we counted on the way, and the cost is simply not known here.
+      if (watch.stoppedBy) {
+        return {
+          actions,
+          text: said.trim(),
+          stopReason: 'stopped',
+          stoppedBy: watch.stoppedBy,
+          usage: watch.used,
+          turns: watch.used.turns,
+        };
+      }
 
       if (parsed.is_error) {
         throw new Error(parsed.result?.trim() || 'the Claude Code session reported an error');
@@ -333,11 +349,20 @@ export class ClaudeCodeLlm implements LlmPort {
     }
   }
 
+  /**
+   * Spawn the CLI and collect what it prints.
+   *
+   * `onLine` sees each complete line as it arrives, and returning anything from it kills the
+   * session and resolves with what was printed up to then. Resolving rather than rejecting is
+   * the point: a session stopped on purpose has done real work, and throwing it away to
+   * report the stop would cost more than the stop saved.
+   */
   private run(
     args: string[],
     signal?: AbortSignal,
     timeoutMs?: number,
     stdin?: string,
+    onLine?: (line: string) => string | null,
   ): Promise<string> {
     return new Promise<string>((resolve, reject) => {
       const child = spawn('claude', spawnArgs(args), {
@@ -383,8 +408,26 @@ export class ClaudeCodeLlm implements LlmPort {
       };
       signal?.addEventListener('abort', onAbort, { once: true });
 
+      // Lines already handed to `onLine`. A frame arrives across several chunks, so the tail
+      // of the buffer is only a whole line once a newline turns up after it.
+      let watched = 0;
       child.stdout.on('data', (chunk: Buffer) => {
         stdout += chunk.toString();
+        if (!onLine || settled) return;
+
+        const end = stdout.lastIndexOf('\n');
+        if (end < watched) return;
+
+        const lines = stdout.slice(watched, end).split(/\r?\n/);
+        watched = end + 1;
+
+        for (const line of lines) {
+          const stop = onLine(line);
+          if (!stop) continue;
+          child.kill();
+          finish(null, stdout);
+          return;
+        }
       });
       child.stderr.on('data', (chunk: Buffer) => {
         stderr += chunk.toString();
@@ -414,13 +457,105 @@ export class ClaudeCodeLlm implements LlmPort {
 }
 
 /**
+ * Watches a session's turns as they stream, so the caller can stop it part-way.
+ *
+ * Usage is counted per request rather than per frame. One request prints several assistant
+ * frames — thinking, then text, then a tool call — each carrying that request's usage in
+ * full, so adding up frames multiplies a turn by however many times the model paused to
+ * speak. `request_id` is what makes them one turn, and it is also the honest definition of a
+ * turn here: one call to the model, one bill.
+ *
+ * The count is only as good as what the CLI prints, and the last request in flight when we
+ * kill it has printed nothing. That request is billed and not counted. It is also the reason
+ * this can only promise "one turn over" — not "never over".
+ */
+export function watcher(onTurn?: (used: LlmUsage & { turns: number }) => string | null): {
+  line(line: string): string | null;
+  stoppedBy: string | null;
+  used: LlmUsage & { turns: number };
+} {
+  const byRequest = new Map<string, LlmUsage>();
+
+  const watch = {
+    stoppedBy: null as string | null,
+    used: {
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheCreationTokens: 0,
+      turns: 0,
+    },
+    line(line: string): string | null {
+      if (!onTurn || watch.stoppedBy) return watch.stoppedBy;
+
+      const trimmed = line.trim();
+      if (!trimmed.startsWith('{')) return null;
+
+      let frame: StreamFrame;
+      try {
+        frame = JSON.parse(trimmed) as StreamFrame;
+      } catch {
+        return null;
+      }
+
+      const usage = frame.message?.usage;
+      if (frame.type !== 'assistant' || !usage || !frame.request_id) return null;
+      // Same request seen again: already counted, and nothing new to decide on.
+      if (byRequest.has(frame.request_id)) return null;
+
+      byRequest.set(frame.request_id, {
+        inputTokens: usage.input_tokens ?? 0,
+        outputTokens: usage.output_tokens ?? 0,
+        cacheReadTokens: usage.cache_read_input_tokens ?? 0,
+        cacheCreationTokens: usage.cache_creation_input_tokens ?? 0,
+      });
+
+      watch.used = { ...total(byRequest.values()), turns: byRequest.size };
+      watch.stoppedBy = onTurn(watch.used);
+      return watch.stoppedBy;
+    },
+  };
+
+  return watch;
+}
+
+function total(usages: Iterable<LlmUsage>): LlmUsage {
+  const sum: LlmUsage = {
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheCreationTokens: 0,
+  };
+  for (const usage of usages) {
+    sum.inputTokens += usage.inputTokens;
+    sum.outputTokens += usage.outputTokens;
+    sum.cacheReadTokens += usage.cacheReadTokens;
+    sum.cacheCreationTokens += usage.cacheCreationTokens;
+  }
+  return sum;
+}
+
+/**
  * Read a streamed session: the final result, and everything it did to get there.
  *
  * Each line is its own JSON object. Anything unparseable is skipped rather than thrown on —
  * a malformed frame should cost us one action in a log, not the whole answer.
  */
-export function readStream(raw: string): { result: ClaudeResult; actions: AgentAction[] } {
+export function readStream(raw: string): {
+  result: ClaudeResult;
+  actions: AgentAction[];
+  /**
+   * Everything the session said in prose, in order.
+   *
+   * Normally redundant — the result frame repeats the last of it — and the only answer there
+   * is when a session was killed before that frame. Kept whole rather than just the last
+   * block: a session stopped mid-thought is being read by someone deciding whether to raise
+   * the ceiling, and the earlier paragraphs are most of what tells them.
+   */
+  said: string;
+} {
   const actions: AgentAction[] = [];
+  const spoken: string[] = [];
   // A result names the call it answers, and the two arrive in different frames, so the calls
   // have to be findable by id when their answer turns up.
   const byId = new Map<string, AgentAction>();
@@ -440,6 +575,11 @@ export function readStream(raw: string): { result: ClaudeResult; actions: AgentA
     if (frame.type === 'result') result = frame as ClaudeResult;
 
     for (const block of frame.message?.content ?? []) {
+      if (frame.type === 'assistant' && block.type === 'text' && block.text?.trim()) {
+        spoken.push(block.text.trim());
+        continue;
+      }
+
       if (block.type === 'tool_use' && block.name) {
         const action: AgentAction = {
           tool: block.name,
@@ -466,7 +606,7 @@ export function readStream(raw: string): { result: ClaudeResult; actions: AgentA
   }
 
   // No result line at all: the CLI printed something else, which is still an answer.
-  return { result: result ?? parse(raw), actions };
+  return { result: result ?? parse(raw), actions, said: spoken.join('\n\n') };
 }
 
 /**
@@ -530,11 +670,20 @@ function describeCall(tool: string, input: Record<string, unknown>): string {
 
 interface StreamFrame {
   type?: string;
+  /** Which call to the model this frame belongs to. Several frames share one. */
+  request_id?: string;
   message?: {
+    usage?: {
+      input_tokens?: number;
+      output_tokens?: number;
+      cache_read_input_tokens?: number;
+      cache_creation_input_tokens?: number;
+    };
     content?: Array<{
       type?: string;
       id?: string;
       name?: string;
+      text?: string;
       input?: Record<string, unknown>;
       tool_use_id?: string;
       is_error?: boolean;

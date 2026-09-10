@@ -647,6 +647,22 @@ export class FakeLlm implements LlmPort {
   usageQueue: LlmUsage[] = [];
 
   /**
+   * Usage to report turn by turn *inside* one call, so a caller's mid-session check can be
+   * exercised.
+   *
+   * Each entry is one turn's own usage; the fake accumulates them the way a streaming
+   * provider's frames do and consults `onTurn` after each. A caller that stops gets what a
+   * real stopped session looks like — the text so far, `stoppedBy` set, and no cost, because
+   * the frame carrying the cost is the one that never arrives.
+   *
+   * Empty by default, so every other test sees a call that reports its usage once at the end.
+   */
+  turnUsage: LlmUsage[] = [];
+
+  /** What a session stopped part-way had already said. */
+  partialText = 'as far as it got';
+
+  /**
    * Awaited before every answer. A test that needs to see a run while it is still `running`
    * holds this open, does its asserting, then releases it. Unset by default, so every other
    * test stays synchronous.
@@ -663,6 +679,31 @@ export class FakeLlm implements LlmPort {
     // after the fact cannot show what this call was actually given.
     this.calls.push({ ...request, messages: [...request.messages] });
     if (this.gate) await this.gate();
+
+    if (request.onTurn && this.turnUsage.length > 0) {
+      const used = {
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+        turns: 0,
+      };
+
+      for (const turn of this.turnUsage) {
+        used.inputTokens += turn.inputTokens;
+        used.outputTokens += turn.outputTokens;
+        used.cacheReadTokens += turn.cacheReadTokens;
+        used.cacheCreationTokens += turn.cacheCreationTokens;
+        used.turns += 1;
+
+        const stopped = request.onTurn(used);
+        if (!stopped) continue;
+
+        const { turns, ...usage } = used;
+        return { text: this.partialText, stopReason: 'stopped', stoppedBy: stopped, usage, turns };
+      }
+    }
+
     return {
       text: this.replies.shift() ?? this.reply,
       stopReason: 'end_turn',
