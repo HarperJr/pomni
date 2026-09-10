@@ -87,6 +87,19 @@ export async function pipelineRoutes(
     run: await container.pipelines.cancel(request.params.runId),
   }));
 
+  /**
+   * One file's diff, asked for when someone opens that row.
+   *
+   * A file at a time on purpose. A run that touched forty files would otherwise send forty
+   * diffs to render a list of forty names, and nobody opens forty of them.
+   */
+  app.get<{ Params: { runId: string; artifactId: string } }>(
+    '/api/pipelines/:runId/artifacts/:artifactId/diff',
+    async (request) => ({
+      diff: await container.pipelines.diff(request.params.runId, request.params.artifactId),
+    }),
+  );
+
   /** Run a finished run again, carrying forward why it ended. */
   app.post<{ Params: { runId: string } }>('/api/pipelines/:runId/rerun', async (request, reply) => {
     const { run, completion } = await container.pipelines.rerun(request.params.runId);

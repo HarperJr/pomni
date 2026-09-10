@@ -166,6 +166,22 @@ export interface GitPort {
   testRemote(url: string, auth?: GitAuth): Promise<void>;
   /** Files changed in the working copy, as `{ path, change }`. Empty when clean. */
   changes(dir: string): Promise<Array<{ path: string; change: string }>>;
+  /**
+   * The unified diff for one file, as text.
+   *
+   * `range` picks what it is a diff *of*: absent means the working copy against the index and
+   * HEAD, which is what a run still in flight has; `master...feature/x` is what a finished run
+   * left on its branch, which is the only copy once the worktree has been removed.
+   *
+   * Bounded. A diff is going to a browser, and a generated file can be a megabyte on its own;
+   * `truncated` says the text is the first part of a longer diff rather than the whole of it.
+   * Empty text with `truncated: false` means the file genuinely did not change.
+   */
+  diff(
+    dir: string,
+    path: string,
+    options?: { range?: string; maxBytes?: number },
+  ): Promise<{ text: string; truncated: boolean }>;
   /** True when `refs/heads/<branch>` exists in this repository. */
   branchExists(dir: string, branch: string): Promise<boolean>;
   /**

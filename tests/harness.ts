@@ -227,6 +227,9 @@ export class FakeGit implements GitPort {
     this.fetched.push(dir);
   }
 
+  /** Every `diff` asked for, so a test can assert which range was used. */
+  diffs: Array<{ dir: string; path: string; range: string | undefined }> = [];
+
   async testRemote(): Promise<void> {}
 
   /**
@@ -250,6 +253,55 @@ export class FakeGit implements GitPort {
       if (!now.has(path)) changes.push({ path, change: 'deleted' });
     }
     return changes.sort((a, b) => a.path.localeCompare(b.path));
+  }
+
+  /**
+   * A unified diff for one file, built from the same before-and-after this fake already keeps.
+   *
+   * Real enough for the things a caller decides on — the `+++`/`---` headers, `+` and `-`
+   * lines, an empty answer for a file that did not change, and truncation — without being a
+   * diff algorithm. Every line of the old file is removed and every line of the new one added,
+   * which is what git produces anyway when a small file changes throughout.
+   *
+   * `range` is accepted and ignored: this fake has one version of a directory, and a test that
+   * cares which range was asked for should read `diffs` instead.
+   */
+  async diff(
+    dir: string,
+    path: string,
+    options: { range?: string; maxBytes?: number } = {},
+  ): Promise<{ text: string; truncated: boolean }> {
+    this.diffs.push({ dir, path, range: options.range });
+
+    const entry = this.worktrees.get(dirKey(dir));
+    const before = entry?.base.get(path);
+    const now = await snapshot(dir);
+    const after = now.get(path);
+
+    if (before === after) return { text: '', truncated: false };
+
+    const lines = [
+      `diff --git a/${path} b/${path}`,
+      `--- ${before === undefined ? '/dev/null' : `a/${path}`}`,
+      `+++ ${after === undefined ? '/dev/null' : `b/${path}`}`,
+      '@@',
+      ...(before ?? '').split('\n').filter(Boolean).map((line) => `-${line}`),
+      ...(after ?? '').split('\n').filter(Boolean).map((line) => `+${line}`),
+    ];
+
+    const text = lines.join('\n');
+    const maxBytes = options.maxBytes ?? Number.POSITIVE_INFINITY;
+    if (Buffer.byteLength(text, 'utf8') <= maxBytes) return { text, truncated: false };
+
+    const kept: string[] = [];
+    let size = 0;
+    for (const line of lines) {
+      const cost = Buffer.byteLength(line, 'utf8') + 1;
+      if (size + cost > maxBytes) break;
+      kept.push(line);
+      size += cost;
+    }
+    return { text: kept.join('\n'), truncated: true };
   }
 
   async supportsWorktrees(): Promise<boolean> {
@@ -458,6 +510,9 @@ export class FakeGit implements GitPort {
     if (entry) {
       entry.base = await snapshot(dir);
       entry.head = `commit${this.commits.length + 1}`;
+      // The branch outlives the directory, which is the whole point of committing: the
+      // worktree row is deleted the moment the tree comes away, and the work is still there.
+      this.declaredBranches.add(entry.branch);
     }
     this.commits.push({ dir, message: options.message });
     return { committed: true, head: entry?.head ?? 'committed' };

@@ -416,6 +416,24 @@ export const ArtifactSchema = z.object({
 });
 export type Artifact = z.infer<typeof ArtifactSchema>;
 
+/**
+ * One file's change, on its way to a browser.
+ *
+ * `source` is not decoration: a `worktree` diff is what is sitting uncommitted in a run still
+ * going, and a `branch` diff is what a finished run committed. They can differ, and a reader
+ * deciding whether to merge something needs to know which one they are looking at.
+ */
+export interface ArtifactDiff {
+  path: string;
+  /** `added`, `modified`, `deleted` — whatever the run recorded when it captured the file. */
+  change: string | null;
+  source: 'worktree' | 'branch';
+  /** Unified diff text. Empty means the file is genuinely unchanged in this source. */
+  text: string;
+  /** True when `text` is the first part of a longer diff rather than the whole of it. */
+  truncated: boolean;
+}
+
 /** How much text a set of context files adds to every agent's prompt. */
 export function contextBytes(files: ContextFile[]): number {
   return files.reduce((total, file) => total + Buffer.byteLength(file.content, 'utf8'), 0);

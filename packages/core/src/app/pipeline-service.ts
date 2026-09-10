@@ -50,7 +50,7 @@ import {
   worktreeEligibility,
   type WorktreeProbe,
 } from '../domain/worktree.js';
-import type { Artifact } from '../domain/pipeline.js';
+import type { Artifact, ArtifactDiff } from '../domain/pipeline.js';
 import type { ProjectPolicy } from '../domain/project.js';
 import type { Provider } from '../domain/provider.js';
 import type { ResolvedRepo } from '../domain/repo.js';
@@ -426,6 +426,72 @@ export class PipelineService {
       artifacts: await this.store.artifacts(id),
       questions: await this.store.questions(id),
     };
+  }
+
+  /**
+   * What one file in a run's artifacts actually changed, as a unified diff.
+   *
+   * Fetched a file at a time, on request. A run that touched forty files would otherwise put
+   * forty diffs on the wire to render a list of forty names, and nobody opens forty of them.
+   *
+   * Where it comes from depends on whether the run is still going, and the two answers are
+   * different things rather than two ways of getting the same one:
+   *
+   * - **In flight**: the worktree still exists and the change is sitting in it uncommitted.
+   *   That is the only place it is, so the diff is the working copy's own.
+   * - **Finished**: the worktree has been removed — that is what a clean delivery does — and
+   *   the change lives on the branch the run committed it to. `base...branch` is what that
+   *   branch added, which is what someone reviewing the run is asking about.
+   *
+   * A run that committed nothing and has no worktree left has nowhere to answer from, and
+   * says so rather than returning an empty diff, which would read as "nothing changed".
+   */
+  async diff(runId: string, artifactId: string): Promise<ArtifactDiff> {
+    const run = await this.get(runId);
+    const artifact = run.artifacts.find((entry) => entry.id === artifactId);
+
+    if (!artifact) throw new NotFoundError(`artifact on run ${runId}`, artifactId);
+    if (artifact.kind !== 'file' || !artifact.path) {
+      throw new ValidationError(`artifact '${artifactId}' is not a file`);
+    }
+
+    const repos = (await this.repos.listResolved(run.projectId)).filter(
+      (repo) => repo.workingDirExists,
+    );
+
+    const held = await this.worktrees.list({ runId: run.id, status: 'active' });
+    for (const worktree of held) {
+      const diff = await this.git.diff(worktree.path, artifact.path);
+      return { path: artifact.path, change: artifact.change, source: 'worktree', ...diff };
+    }
+
+    if (!run.branch) {
+      throw new ValidationError(
+        `run ${runId} has no worktree left and committed nothing, so there is no diff to show` +
+          ` for '${artifact.path}'`,
+      );
+    }
+
+    for (const repo of repos) {
+      if (!(await this.git.branchExists(repo.workingDir, run.branch))) continue;
+
+      // Three dots: what the branch added, not everything that has happened on the base since
+      // it was cut. A run is answerable for the first and not the second.
+      // The branch the run was cut from. `HEAD` is the honest fallback when the repo has
+      // never reported one: it diffs against whatever the clone has checked out, which is
+      // what a person looking at that directory would compare against themselves.
+      const base = repo.vcs?.defaultBranch ?? 'HEAD';
+      const diff = await this.git.diff(repo.workingDir, artifact.path, {
+        range: `${base}...${run.branch}`,
+      });
+      return { path: artifact.path, change: artifact.change, source: 'branch', ...diff };
+    }
+
+    throw new NotFoundError(
+      `a repo holding '${run.branch}', without which there is nowhere to read` +
+        ` '${artifact.path}' from`,
+      run.projectId,
+    );
   }
 
   /**

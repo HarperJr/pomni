@@ -689,6 +689,21 @@ export function workLocation(
   return { kind: 'unknown' };
 }
 
+/**
+ * One file's change, on its way to the panel.
+ *
+ * `source` is not decoration: a `worktree` diff is what is sitting uncommitted in a run still
+ * going, and a `branch` diff is what a finished run committed. They can differ, and a reader
+ * deciding whether to merge needs to know which one they are looking at.
+ */
+export interface ArtifactDiff {
+  path: string;
+  change: string | null;
+  source: 'worktree' | 'branch';
+  text: string;
+  truncated: boolean;
+}
+
 export interface Artifact {
   id: string;
   runId: string;
@@ -1443,6 +1458,11 @@ export const api = {
 
   doctor: (projectId: string) =>
     request<{ report: DoctorReport }>(`/api/projects/${encodeURIComponent(projectId)}/doctor`),
+
+  artifactDiff: (runId: string, artifactId: string) =>
+    request<{ diff: ArtifactDiff }>(
+      `/api/pipelines/${encodeURIComponent(runId)}/artifacts/${encodeURIComponent(artifactId)}/diff`,
+    ),
 
   listWorktrees: (projectId: string) =>
     request<{ worktrees: Array<{ worktree: Worktree; state: WorktreeState; detail: string }> }>(
