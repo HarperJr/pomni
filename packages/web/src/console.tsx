@@ -5,6 +5,7 @@ import {
   api,
   workLocation,
   type Artifact,
+  type ArtifactDiff,
   type ContextFile,
   type Question,
   type PipelineRun,
@@ -887,7 +888,7 @@ export function ConsolePage() {
         </div>
       )}
 
-      {data.artifacts.length > 0 && <Artifacts artifacts={data.artifacts} />}
+      {data.artifacts.length > 0 && <Artifacts runId={data.id} artifacts={data.artifacts} />}
 
       {(data.result || data.error) && (
         <div className="card">
@@ -1073,7 +1074,7 @@ function kindOf(tool: string): string {
   return 'read';
 }
 
-function Artifacts({ artifacts }: { artifacts: Artifact[] }) {
+function Artifacts({ runId, artifacts }: { runId: string; artifacts: Artifact[] }) {
   const files = artifacts.filter((artifact) => artifact.kind === 'file');
   const reports = artifacts.filter((artifact) => artifact.kind === 'report');
   const links = reports.filter((artifact) => artifact.change === 'merge request');
@@ -1099,17 +1100,109 @@ function Artifacts({ artifacts }: { artifacts: Artifact[] }) {
         </div>
       ))}
 
-      {files.map((file) => (
-        <div className="row" key={file.id}>
-          <div className="grow">
-            <span className="mono">{file.path}</span>
-          </div>
-          <span className="tag">{file.change}</span>
+      {files.length > 0 && (
+        // Bounded and scrolling, so the page is the same length whether a run touched two
+        // files or two hundred. The count in the header is what says how many.
+        <div className="file-list">
+          {files.map((file) => (
+            <FileRow key={file.id} runId={runId} file={file} />
+          ))}
         </div>
-      ))}
+      )}
     </div>
   );
 }
+
+/**
+ * A file's change, in the two words that fit in a row.
+ *
+ * Kept apart from the tag's colour rather than relying on it: `added` and `deleted` are the
+ * two a reader scans for, and a colour alone is not something everyone can scan by.
+ */
+const CHANGE_CLASS: Record<string, string> = {
+  added: 'change-added',
+  modified: 'change-modified',
+  deleted: 'change-deleted',
+};
+
+/** One file row: its path, what happened to it, and its diff once someone asks for it. */
+function FileRow({ runId, file }: { runId: string; file: Artifact }) {
+  const [open, setOpen] = useState(false);
+
+  // `enabled` is the whole reason this is a query per row rather than one for the panel: a
+  // run that touched forty files fetches nothing until a row is opened, and then one thing.
+  const diff = useQuery({
+    queryKey: ['artifact-diff', file.id],
+    queryFn: () => api.artifactDiff(runId, file.id).then((result) => result.diff),
+    enabled: open,
+    staleTime: Number.POSITIVE_INFINITY,
+  });
+
+  return (
+    <div className="file-entry">
+      <button className="row file-row" onClick={() => setOpen((was) => !was)} type="button">
+        <span className="dim mono caret">{open ? '▾' : '▸'}</span>
+        <span className="grow mono truncate">{file.path}</span>
+        <span className={`tag ${CHANGE_CLASS[file.change ?? ''] ?? ''}`}>{file.change}</span>
+      </button>
+
+      {open && (
+        <div className="file-diff">
+          {diff.isPending && <div className="dim">reading the diff…</div>}
+          {diff.isError && <div className="dim">{errorMessage(diff.error)}</div>}
+          {diff.data && <Diff diff={diff.data} />}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * A unified diff, coloured.
+ *
+ * No syntax highlighting and no library: a diff is read for which lines moved, and the three
+ * prefixes git already writes say that. `---` and `+++` are headers rather than changes and
+ * have to be told apart from `-` and `+`, or every diff appears to start by deleting a file.
+ */
+function Diff({ diff }: { diff: ArtifactDiff }) {
+  if (!diff.text.trim()) {
+    return (
+      <div className="dim">
+        nothing changed here{diff.source === 'branch' ? ' on the run’s branch' : ''}
+      </div>
+    );
+  }
+
+  return (
+    <>
+      <pre className="diff">
+        {diff.text.split('\n').map((line, index) => (
+          <div className={diffClass(line)} key={index}>
+            {line || ' '}
+          </div>
+        ))}
+      </pre>
+      {diff.truncated && (
+        <div className="dim">…truncated — this is the first part of a longer diff</div>
+      )}
+      <div className="dim">
+        {diff.source === 'worktree'
+          ? 'uncommitted, in the worktree this run is using'
+          : 'as committed on this run’s branch'}
+      </div>
+    </>
+  );
+}
+
+function diffClass(line: string): string {
+  if (line.startsWith('+++') || line.startsWith('---')) return 'diff-head';
+  if (line.startsWith('@@')) return 'diff-hunk';
+  if (line.startsWith('+')) return 'diff-add';
+  if (line.startsWith('-')) return 'diff-del';
+  if (line.startsWith('diff --git') || line.startsWith('index ')) return 'diff-head';
+  return '';
+}
+
 
 /**
  * A question the run is stopped on, and the box to answer it in.

@@ -495,6 +495,79 @@ describe.skipIf(!HAS_GIT)('advancing a clone to its upstream', () => {
   });
 });
 
+describe.skipIf(!HAS_GIT)('a file’s diff, from real git', () => {
+  let dir: string;
+  const cli = new GitCli();
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'pomni-diff-'));
+    await makeGitRepo(dir);
+  });
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true, maxRetries: 5 });
+  });
+
+  it('shows a file the agent created, which has nothing to be different from', async () => {
+    await writeFile(join(dir, 'added.ts'), 'export const added = true;\n');
+
+    const diff = await cli.diff(dir, 'added.ts');
+
+    // The case the plain command answers with silence — which reads as "unchanged" for the
+    // one kind of change that is entirely new.
+    expect(diff.text).toContain('+export const added = true;');
+    expect(diff.truncated).toBe(false);
+  });
+
+  it('shows a file the agent edited, and says nothing about one it did not touch', async () => {
+    await writeFile(join(dir, 'kept.ts'), 'export const kept = 1;\n');
+    await git(dir, 'add', '-A');
+    await git(dir, 'commit', '-m', 'first');
+    await writeFile(join(dir, 'kept.ts'), 'export const kept = 2;\n');
+
+    const changed = await cli.diff(dir, 'kept.ts');
+    expect(changed.text).toContain('-export const kept = 1;');
+    expect(changed.text).toContain('+export const kept = 2;');
+
+    const untouched = await cli.diff(dir, 'README.md');
+    expect(untouched.text).toBe('');
+    expect(untouched.truncated).toBe(false);
+  });
+
+  it('cuts an oversized diff on a line boundary and says it was cut', async () => {
+    const generated = Array.from({ length: 400 }, (_, line) => `export const n${line} = ${line};`);
+    await writeFile(join(dir, 'generated.ts'), `${generated.join('\n')}\n`);
+
+    const whole = await cli.diff(dir, 'generated.ts');
+    expect(whole.truncated).toBe(false);
+
+    const cut = await cli.diff(dir, 'generated.ts', { maxBytes: 400 });
+    expect(cut.truncated).toBe(true);
+    expect(Buffer.byteLength(cut.text, 'utf8')).toBeLessThanOrEqual(400);
+
+    // Whole lines only. Half a line of a unified diff renders as a change nobody made — a cut
+    // `-` line reads as the deletion of something else.
+    const last = cut.text.split('\n').at(-1) as string;
+    expect(whole.text.split('\n')).toContain(last);
+  });
+
+  it('shows what a branch added, when asked for a range', async () => {
+    // `makeGitRepo` leaves a committed repository, so there is already a base to branch from.
+    const base = (await git(dir, 'rev-parse', '--abbrev-ref', 'HEAD')).stdout.trim();
+
+    await git(dir, 'checkout', '-b', 'feature/POMN-1/main');
+    await writeFile(join(dir, 'on-branch.ts'), 'export const onBranch = true;\n');
+    await git(dir, 'add', '-A');
+    await git(dir, 'commit', '-m', 'on the branch');
+    await git(dir, 'checkout', base);
+
+    // Read from the repository with the branch not checked out — which is where a finished
+    // run's work is, once its worktree has been taken away.
+    const diff = await cli.diff(dir, 'on-branch.ts', { range: `${base}...feature/POMN-1/main` });
+    expect(diff.text).toContain('+export const onBranch = true;');
+  });
+});
+
 describe.skipIf(HAS_GIT)('real git', () => {
   it.skip('is not on PATH on this machine, so the real-git worktree tests did not run', () => {});
 });

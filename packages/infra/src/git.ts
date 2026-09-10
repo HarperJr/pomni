@@ -43,6 +43,37 @@ const FALLBACK_IDENTITY = [
   'user.email=pomni@localhost',
 ];
 
+
+/**
+ * How much diff text one file may send to a browser.
+ *
+ * 200 kB is far more than anyone reads and far less than a generated file's diff. The point
+ * is that the number exists: without it one lockfile in a run's artifacts is a megabyte on
+ * the wire for a panel nobody opened deliberately.
+ */
+const MAX_DIFF_BYTES = 200 * 1024;
+
+/**
+ * Cut a diff to a size, on a line boundary, and say that it was cut.
+ *
+ * On a line boundary because half a line of a unified diff renders as a change that was never
+ * made — a truncated `-` line reads as a deletion of something else.
+ */
+function truncate(text: string, maxBytes: number): { text: string; truncated: boolean } {
+  if (Buffer.byteLength(text, 'utf8') <= maxBytes) return { text, truncated: false };
+
+  const kept: string[] = [];
+  let size = 0;
+  for (const line of text.split('\n')) {
+    const cost = Buffer.byteLength(line, 'utf8') + 1;
+    if (size + cost > maxBytes) break;
+    kept.push(line);
+    size += cost;
+  }
+
+  return { text: kept.join('\n'), truncated: true };
+}
+
 export class GitCli implements GitPort {
   async isAvailable(): Promise<boolean> {
     try {
@@ -117,6 +148,37 @@ export class GitCli implements GitPort {
       changes.push({ path, change: describeChange(code) });
     }
     return changes;
+  }
+
+  async diff(
+    dir: string,
+    path: string,
+    options: { range?: string; maxBytes?: number } = {},
+  ): Promise<{ text: string; truncated: boolean }> {
+    const maxBytes = options.maxBytes ?? MAX_DIFF_BYTES;
+
+    const args = ['-C', dir, 'diff'];
+    if (options.range) args.push(options.range);
+    args.push('--', path);
+
+    const result = await this.run(args, {});
+    if (result.code !== 0) {
+      throw new GitError(`git diff failed: ${firstUsefulLine(result.stderr)}`);
+    }
+
+    let text = result.stdout;
+
+    // A file the agent created and never staged has nothing to be different from, so the
+    // command above says nothing at all — which reads as "unchanged" for the one kind of
+    // change that is entirely new. Comparing it with nothing is how git is asked that.
+    if (!text.trim() && !options.range) {
+      // `--no-index` exits 1 when the two differ, which is the case we are asking about, so
+      // only a code above that is a failure.
+      const added = await this.run(['-C', dir, 'diff', '--no-index', '--', '/dev/null', path], {});
+      if (added.code <= 1) text = added.stdout;
+    }
+
+    return truncate(text, maxBytes);
   }
 
   async fetch(dir: string, auth?: GitAuth): Promise<void> {

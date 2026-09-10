@@ -1561,3 +1561,94 @@ button.link:hover { text-decoration: underline; }
   gap: 8px;
   justify-content: flex-end;
 }
+
+/* ---------------------------------------------------------------------------
+   A run's changed files
+   --------------------------------------------------------------------------- */
+
+/*
+ * Bounded and scrolling. A run that touched two hundred files used to make the console page
+ * two hundred rows longer and push everything else off screen; the count in the panel header
+ * is what tells you how many there are.
+ */
+.file-list {
+  max-height: 340px;
+  overflow-y: auto;
+  border-top: 1px solid var(--border);
+}
+
+.file-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  background: none;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  padding: 6px 12px;
+  text-align: left;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.file-row:hover {
+  background: var(--surface-2);
+}
+
+.file-entry:last-child .file-row {
+  border-bottom: 0;
+}
+
+.caret {
+  width: 10px;
+  flex: none;
+}
+
+/* Change kinds, named as well as coloured: colour alone is not something everyone can scan by. */
+.change-added {
+  color: var(--ok);
+  border-color: var(--ok);
+}
+
+.change-deleted {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+
+.change-modified {
+  color: var(--warn);
+  border-color: var(--warn);
+}
+
+.file-diff {
+  padding: 8px 12px 10px 30px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-2);
+}
+
+/*
+ * The diff itself scrolls sideways rather than wrapping. A wrapped diff line stops lining up
+ * with the ones around it, which is the one thing a diff is read for.
+ */
+.diff {
+  margin: 0 0 6px;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 17px;
+  overflow-x: auto;
+  white-space: pre;
+}
+
+.diff-add {
+  color: var(--ok);
+}
+
+.diff-del {
+  color: var(--danger);
+}
+
+.diff-hunk,
+.diff-head {
+  color: var(--text-dim);
+}
