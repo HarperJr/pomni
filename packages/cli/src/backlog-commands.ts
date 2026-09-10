@@ -242,6 +242,10 @@ export function registerBacklogCommands(
     .option('--comment <text>', 'why (recorded in the item log and its history)')
     .option('--reason <text>', 'alias for --comment; --comment wins if both are given')
     .option('-f, --force', 'skip the guards; recorded as forced')
+    .option(
+      '--no-run',
+      'move the item without starting the workflow the destination names, if it names one',
+    )
     .action(async (id: string, status: string, flags: MoveFlags) => {
       const container = await open();
       const [projectId, itemId] = await resolve(container, id, flags.project, defaultProject);
@@ -260,6 +264,36 @@ export function registerBacklogCommands(
         force: flags.force,
       });
       console.log(`${style.green('moved')} ${moved.id} → ${statusText(moved.status, stateLabel(flow, moved.status))}`);
+
+      // A state may name a workflow to run on arrival. Awaited rather than left in the
+      // background: this process is the only thing keeping the run alive, and exiting on it
+      // would leave a row saying `running` with a dead pid behind it. Announced before it
+      // starts, because a command called `move` should not quietly spend ten minutes.
+      if (flags.run === false) return;
+
+      const entered = flow.states.find((state) => state.name === moved.status);
+      if (!entered?.onEnter) return;
+
+      console.log(
+        style.dim(
+          `${moved.status} names workflow '${entered.onEnter}' — starting it. ` +
+            'Pass --no-run to move without it.',
+        ),
+      );
+
+      const started = await container.pipelines.onItemEntered(projectId, itemId, moved.status);
+      if (!started) {
+        console.log(style.dim('  nothing started — see the warning above, or a run is already going'));
+        return;
+      }
+
+      console.log(`${style.green('started')} ${started.run.id}  ${started.run.workflowName}`);
+      const finished = await started.completion;
+      console.log(
+        finished.status === 'passed'
+          ? `${style.green(finished.status)} ${finished.id}`
+          : `${style.red(finished.status)} ${finished.id}  ${style.dim(finished.error ?? '')}`,
+      );
     });
 
   backlog
@@ -589,6 +623,8 @@ interface MoveFlags {
   comment?: string;
   reason?: string;
   force?: boolean;
+  /** `--no-run` sets this false; commander leaves it true otherwise. */
+  run?: boolean;
 }
 
 function list(value: string | undefined): string[] | undefined {

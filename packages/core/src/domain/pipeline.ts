@@ -187,6 +187,17 @@ export const PipelineRunSchema = z.object({
   /** The run this one is a second attempt at, so a retry is traceable to what it retried. */
   rerunOf: z.string().nullable().default(null),
   /**
+   * What asked for this run, when it was not asked for directly.
+   *
+   * `flow:ready` means the project's own flow started it because an item entered that state.
+   * Null means a person or an agent asked for it in as many words — which is every run before
+   * this field existed, and is why null is the default rather than an unknown.
+   *
+   * Recorded because a run that starts itself is the one somebody will want to explain, and
+   * "why is this costing me money" is not a question a log line answers three days later.
+   */
+  startedBy: z.string().nullable().default(null),
+  /**
    * The branch, or branches, this run's work was committed on.
    *
    * On the run rather than derived from its worktree rows. A row exists if and only if its

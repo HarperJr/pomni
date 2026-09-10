@@ -91,6 +91,7 @@ describe('a database whose schema diverged from this one', () => {
       providerId: 'p',
       itemId: null,
       rerunOf: null,
+      startedBy: null,
       branch: null,
       task: 't',
       context: [],
