@@ -28,6 +28,7 @@ import {
   type ExecResult,
   type Executor,
   type FastForwardResult,
+  type DesktopPort,
   type ForgePort,
   type GitAuth,
   type GitPort,
@@ -560,6 +561,35 @@ async function exists(path: string): Promise<boolean> {
  * A forge that records what it was asked to open. Answers null until a test says otherwise,
  * which is the ordinary case — no token, or a project that did not ask for merge requests.
  */
+/**
+ * A stand-in for the machine Pomni is running on.
+ *
+ * Records what would have been launched instead of launching it, which is the only way to test
+ * this at all — a passing test must not open an editor on the machine running the suite.
+ *
+ * `installed` is what pretends to be on PATH, and it is empty by default: a machine with no
+ * editor is the case the button has to handle gracefully, and defaults should make the awkward
+ * case the one you see first.
+ */
+export class FakeDesktop implements DesktopPort {
+  installed = new Set<string>();
+  opened: Array<{ command: string; path: string }> = [];
+  revealed: string[] = [];
+
+  async canRun(command: string): Promise<boolean> {
+    return this.installed.has(command);
+  }
+
+  async open(command: string, path: string): Promise<void> {
+    if (!this.installed.has(command)) throw new Error(`'${command}' is not on PATH`);
+    this.opened.push({ command, path });
+  }
+
+  async reveal(path: string): Promise<void> {
+    this.revealed.push(path);
+  }
+}
+
 export class FakeForge implements ForgePort {
   asked: OpenMergeRequestInput[] = [];
   /** What to answer. Null models a forge that could not be reached or does not know this host. */
@@ -851,6 +881,7 @@ export interface TestHarness<G extends GitPort = FakeGit> extends PomniContainer
   git: G;
   executor: FakeExecutor;
   forge: FakeForge;
+  desktop: FakeDesktop;
   restart: FakeRestartPort;
   logs: MemoryLogSink;
   clock: FixedClock;
@@ -885,6 +916,7 @@ export async function createHarness<G extends GitPort = FakeGit>(
   const executor = new FakeExecutor();
   const logs = new MemoryLogSink();
   const forge = new FakeForge();
+  const desktop = new FakeDesktop();
   const runStore = new SqliteRunStore(docs.absolute(layout.database));
 
   const workspace = new WorkspaceService(docs, fs);
@@ -978,6 +1010,9 @@ export async function createHarness<G extends GitPort = FakeGit>(
     worktrees,
     forge,
     comments,
+    fs,
+    workspace,
+    desktop,
   );
 
   const chatStore = new SqliteChatStore(docs.absolute(layout.database));
@@ -1025,6 +1060,7 @@ export async function createHarness<G extends GitPort = FakeGit>(
     detection,
     executor,
     forge,
+    desktop,
     restart,
     llm,
     llmFactory,

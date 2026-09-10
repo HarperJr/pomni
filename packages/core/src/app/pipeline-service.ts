@@ -13,6 +13,7 @@ import { ConflictError, NotFoundError, ValidationError } from '../domain/errors.
 import { layout } from '../domain/layout.js';
 import {
   contextBytes,
+  fileUrl,
   HUMAN_AGENT_ID,
   parseVerdict,
   VERDICT_PROTOCOL,
@@ -46,19 +47,23 @@ import { ulid } from '../domain/ulid.js';
 import { chooseWorkflow, entryAgent, findAgent, rosterFor, type Workflow } from '../domain/workflow.js';
 import {
   itemBranch,
+  resolveInside,
   runBranch,
   worktreeEligibility,
   type WorktreeProbe,
 } from '../domain/worktree.js';
+import { KNOWN_EDITORS } from '../domain/config.js';
 import type { Artifact, ArtifactDiff } from '../domain/pipeline.js';
 import type { ProjectPolicy } from '../domain/project.js';
 import type { Provider } from '../domain/provider.js';
 import type { ResolvedRepo } from '../domain/repo.js';
 import type {
   Clock,
+  DesktopPort,
   DocStore,
   EventBus,
   ForgePort,
+  FsProbe,
   GitPort,
   MergeRequestRef,
   LlmMessage,
@@ -70,6 +75,7 @@ import type {
 import type { BacklogService } from './backlog-service.js';
 import type { CommentService } from './comment-service.js';
 import type { ProjectService } from './project-service.js';
+import type { WorkspaceService } from './workspace-service.js';
 import type { RunService } from './run-service.js';
 import type { ProviderService } from './provider-service.js';
 import type { ToolService } from './tool-service.js';
@@ -252,6 +258,9 @@ export class PipelineService {
     private readonly worktrees: WorktreeService,
     private readonly forge: ForgePort,
     private readonly comments: CommentService,
+    private readonly fs: FsProbe,
+    private readonly pomni: WorkspaceService,
+    private readonly desktop: DesktopPort,
   ) {}
 
   async start(input: StartRunInput): Promise<StartRunResult> {
@@ -459,10 +468,19 @@ export class PipelineService {
       (repo) => repo.workingDirExists,
     );
 
+    // Where the same file can be read on the forge, when the run left something there to read.
+    // Offered beside the local diff rather than instead of it: one is what this machine has,
+    // the other is what everybody else can see.
+    const remoteOf = (repo: ResolvedRepo): string | null =>
+      repo.source.kind === 'git' ? repo.source.url : (repo.vcs?.remote ?? null);
+    const url = fileUrl(repos[0] ? remoteOf(repos[0]) : null, run.branch, artifact.path);
+    const editor = await this.editor();
+    const about = { path: artifact.path, change: artifact.change, url, editor };
+
     const held = await this.worktrees.list({ runId: run.id, status: 'active' });
     for (const worktree of held) {
       const diff = await this.git.diff(worktree.path, artifact.path);
-      return { path: artifact.path, change: artifact.change, source: 'worktree', ...diff };
+      return { ...about, source: 'worktree', ...diff };
     }
 
     if (!run.branch) {
@@ -484,13 +502,112 @@ export class PipelineService {
       const diff = await this.git.diff(repo.workingDir, artifact.path, {
         range: `${base}...${run.branch}`,
       });
-      return { path: artifact.path, change: artifact.change, source: 'branch', ...diff };
+      return { ...about, source: 'branch', ...diff };
     }
 
     throw new NotFoundError(
       `a repo holding '${run.branch}', without which there is nowhere to read` +
         ` '${artifact.path}' from`,
       run.projectId,
+    );
+  }
+
+  /**
+   * Open one of a run's files on the machine Pomni is running on.
+   *
+   * This starts a program, so it is worth being exact about what it will and will not do.
+   *
+   * The caller names an **artifact**, never a path. The path comes from the run's own record
+   * of what it changed, joined to a working directory this project resolved itself. A request
+   * cannot ask for a file that is not in a run's artifacts, and cannot describe a file at all.
+   *
+   * The join is then checked rather than trusted: `..` inside a recorded path would climb out
+   * of the repo, and a symlinked working directory would resolve elsewhere, so the resolved
+   * result must still sit inside the resolved directory or nothing is opened. That check is
+   * the reason this is a method and not three lines in a route.
+   *
+   * What is opened is the file **as it is on disk now**. For a run still in flight that is
+   * exactly what it wrote. For a finished run whose branch is not checked out, it is the base
+   * version — or nothing at all, if the run created it — and that says so rather than opening
+   * the wrong thing quietly.
+   */
+  async openArtifact(runId: string, artifactId: string, mode: 'editor' | 'reveal'): Promise<void> {
+    const { path } = await this.locate(runId, artifactId);
+
+    if (!(await this.fs.exists(path))) {
+      throw new NotFoundError(
+        'that file on disk — the run may have created it on a branch that is not checked out',
+        path,
+      );
+    }
+
+    if (mode === 'reveal') {
+      await this.desktop.reveal(path);
+      return;
+    }
+
+    const command = await this.editor();
+    if (!command) {
+      throw new ValidationError(
+        'no editor is configured and none of ' +
+          KNOWN_EDITORS.join(', ') +
+          " is on PATH. Set one with 'pomni workspace edit --editor <command>'.",
+      );
+    }
+
+    await this.desktop.open(command, path);
+  }
+
+  /**
+   * The editor that would be used, or null when there is none.
+   *
+   * Asked before anything is offered, so the button can say what it will do instead of failing
+   * when pressed. A configured command still has to be findable: a setting naming an editor
+   * that has since been uninstalled is worth reporting as "no editor", not as an error later.
+   */
+  private async editor(): Promise<string | null> {
+    const configured = (await this.pomni.config()).editor.command;
+    if (configured) return (await this.desktop.canRun(configured)) ? configured : null;
+
+    for (const candidate of KNOWN_EDITORS) {
+      if (await this.desktop.canRun(candidate)) return candidate;
+    }
+    return null;
+  }
+
+  /**
+   * Where one of a run's files is on this machine, and which directory vouches for it.
+   *
+   * The same two sources as `diff`, in the same order and for the same reason: a run in flight
+   * has a worktree and a finished one has only the repo it delivered to.
+   */
+  private async locate(runId: string, artifactId: string): Promise<{ path: string; dir: string }> {
+    const run = await this.get(runId);
+    const artifact = run.artifacts.find((entry) => entry.id === artifactId);
+
+    if (!artifact) throw new NotFoundError(`artifact on run ${runId}`, artifactId);
+    if (artifact.kind !== 'file' || !artifact.path) {
+      throw new ValidationError(`artifact '${artifactId}' is not a file`);
+    }
+
+    const held = await this.worktrees.list({ runId: run.id, status: 'active' });
+    const repos = (await this.repos.listResolved(run.projectId)).filter(
+      (repo) => repo.workingDirExists,
+    );
+
+    const dirs = [
+      ...held.map((worktree) => worktree.path),
+      ...repos.map((repo) => repo.workingDir),
+    ];
+
+    for (const dir of dirs) {
+      const contained = resolveInside(this.fs.resolve(dir), artifact.path);
+      if (contained) return { path: contained, dir };
+    }
+
+    throw new ValidationError(
+      `'${artifact.path}' does not resolve to somewhere inside a directory this project owns,` +
+        ' so it will not be opened',
     );
   }
 

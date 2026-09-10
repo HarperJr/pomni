@@ -209,6 +209,34 @@ export function isPomniOwned(path: string, worktreesRoot: string): boolean {
   return target.startsWith(`${root}/`);
 }
 
+/**
+ * Join a repo-relative path onto a directory, and refuse if the result leaves it.
+ *
+ * Null rather than a throw, because "outside" is an answer a caller may have several of — a
+ * project with three repos asks this three times and expects two nulls.
+ *
+ * The comparison is the same normalising one `isPomniOwned` uses, so `..` inside the relative
+ * path is resolved before it is checked rather than after it is used. The path handed back is
+ * the joined one in its original case: the check folds case because Windows does, and opening
+ * a file needs the name the filesystem actually has.
+ */
+export function resolveInside(base: string, relative: string): string | null {
+  if (!base || !relative) return null;
+
+  // An absolute path is not a relative one, and joining it produces something that looks
+  // contained and is not the file that was named: `C:/Windows/x` under a repo becomes
+  // `<repo>/C:/Windows/x`, which passes every check below by accident. A drive letter, a
+  // leading separator or a UNC prefix all mean the caller is not describing a repo-relative
+  // path, and the honest answer to that is no rather than a reinterpretation of it.
+  if (/^([a-z]:|[\\/])/i.test(relative)) return null;
+
+  const joined = `${base.replace(/[\\/]+$/, '')}/${relative.replace(/^[\\/]+/, '')}`;
+  const root = normalisePath(base);
+  if (root === '') return null;
+
+  return normalisePath(joined).startsWith(`${root}/`) ? joined : null;
+}
+
 /** `isPomniOwned`, as a guard. Throws ValidationError with the path it refused. */
 export function assertPomniOwned(path: string, worktreesRoot: string): void {
   if (!isPomniOwned(path, worktreesRoot)) {

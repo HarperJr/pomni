@@ -84,6 +84,30 @@ export interface FsProbe {
 }
 
 // ---------------------------------------------------------------------------
+// The machine Pomni is running on
+// ---------------------------------------------------------------------------
+
+/**
+ * Running something on the user's own computer.
+ *
+ * The narrowest port here, deliberately. Everything else Pomni does happens inside `.pomni`
+ * or inside a repo; this launches a program, which is the one thing that cannot be undone by
+ * deleting a file. Two verbs, no arguments the caller composes, and no shell anywhere in the
+ * implementation — a caller cannot express "run this command line" through it even by mistake.
+ */
+export interface DesktopPort {
+  /**
+   * Whether a program of this name can be found on PATH. Never throws: not finding one is an
+   * answer, and it is the common answer on a machine with no editor installed.
+   */
+  canRun(command: string): Promise<boolean>;
+  /** Open one file with one program. The path is an argument, never part of a command line. */
+  open(command: string, path: string): Promise<void>;
+  /** Show one file in the machine's own file manager, with it selected where that is possible. */
+  reveal(path: string): Promise<void>;
+}
+
+// ---------------------------------------------------------------------------
 // Git
 // ---------------------------------------------------------------------------
 

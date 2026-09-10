@@ -1,6 +1,7 @@
 import type {
   EventBus,
   Executor,
+  DesktopPort,
   FsProbe,
   GitPort,
   Logger,
@@ -55,5 +56,7 @@ export interface PomniContainer {
   events: EventBus;
   fs: FsProbe;
   git: GitPort;
+  /** Launching a program on this machine. The one port whose mistakes are visible on a screen. */
+  desktop: DesktopPort;
   logger: Logger;
 }
