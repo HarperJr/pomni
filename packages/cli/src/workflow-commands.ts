@@ -992,11 +992,12 @@ ${item.body}`;
             thousands(step.inputTokens + step.outputTokens),
             cacheShareLabel(step.cacheReadTokens, step.freshInputTokens),
             step.promptBytes > 0 ? thousands(step.promptBytes) : style.dim('—'),
+            perTurn(step),
             // Null and zero are different facts. A provider that reports no cost did not run
             // for free, and printing $0.00 would say it did.
             step.costUsd === null ? style.dim('not reported') : `$${step.costUsd.toFixed(2)}`,
           ]),
-          ['AGENT', '', 'TOKENS', 'CACHE', 'PROMPT', 'COST'],
+          ['AGENT', '', 'TOKENS', 'CACHE', 'PROMPT', 'PER TURN', 'COST'],
         ),
       );
 
@@ -1005,6 +1006,7 @@ ${item.body}`;
       console.log(
         `${thousands(detail.inputTokens + detail.outputTokens)} tokens · ${spent} · ${detail.steps.length} steps`,
       );
+      console.log(carried(detail.steps));
 
       if (detail.itemId) {
         const item = await container.pipelines.itemSpend(projectId, detail.itemId);
@@ -1312,6 +1314,49 @@ function spent(
 
   const cost = run.costUsd ? ` $${run.costUsd.toFixed(2)}` : '';
   return `${thousands(tokens)}${style.dim(cost)}`;
+}
+
+/**
+ * Tokens a turn of this step was billed for.
+ *
+ * The number that says why a run costs what it does, and it is not the one anybody guesses.
+ * Measured over the 20 recorded steps on this board: a step takes 26 turns at the median and
+ * as many as 82, and each turn is billed for around 79,000 tokens — of which about 2,500 are
+ * fresh and the rest is the session re-reading its own cached context.
+ *
+ * Unknown for a step from before turns were counted; `0` there means "not measured", and
+ * dividing by it would invent a number.
+ */
+function perTurn(step: { inputTokens: number; outputTokens: number; turns: number }): string {
+  if (step.turns <= 0) return style.dim('—');
+  return thousands(Math.round((step.inputTokens + step.outputTokens) / step.turns));
+}
+
+/**
+ * How much of what a run was billed for it was actually handed.
+ *
+ * Two numbers that should be close and are not. `sentBytes` is every byte Pomni put on the
+ * wire — system prompt plus the whole conversation, on every call. The tokens are what came
+ * back on the bill. A provider running its own tool loop re-sends everything it has read on
+ * each internal turn, and that reading never passes through here, so the gap is the size of
+ * what the sessions went and fetched for themselves.
+ *
+ * Deliberately not a ratio. Bytes and tokens are different units and dividing them would
+ * produce a figure that looks like a measurement; these are two facts side by side, and the
+ * reader can see which one is large.
+ */
+function carried(steps: Array<{ sentBytes: number; inputTokens: number; turns: number }>): string {
+  const sent = steps.reduce((total, step) => total + step.sentBytes, 0);
+  if (sent === 0) return style.dim('what each turn carried was not measured on this run');
+
+  const turns = steps.reduce((total, step) => total + step.turns, 0);
+  const input = steps.reduce((total, step) => total + step.inputTokens, 0);
+  const each = turns > 0 ? ` · ${thousands(Math.round(input / turns))} input tokens per turn` : '';
+
+  return style.dim(
+    `Pomni handed over ${thousands(Math.round(sent / 1024))} kB across ${steps.length} steps${each}` +
+      ' — the rest of what was billed is what the sessions read themselves',
+  );
 }
 
 /** 1234567 -> 1 234 567. Long token counts are unreadable without it. */

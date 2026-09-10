@@ -1178,6 +1178,7 @@ export class PipelineService {
       durationMs: null,
       cacheCreationTokens: 0,
       promptBytes: session.promptBytes,
+      sentBytes: 0,
       promptParts: session.promptParts,
       turns: 0,
       inputTokens: 0,
@@ -1225,6 +1226,7 @@ export class PipelineService {
     let cacheReadTokens = 0;
     let cacheCreationTokens = 0;
     let freshInputTokens = 0;
+    let sentBytes = 0;
     /** The sentence a mid-turn stop gave, when one happened. Null on every other path. */
     let stoppedMidTurn: string | null = null;
 
@@ -1262,6 +1264,9 @@ export class PipelineService {
       // Everything this orchestrator has been told so far, in the order it was told. Passed
       // down rather than kept, so the next delegate starts from what the last one settled.
       const reported: AgentReport[] = [];
+      // Where each round's results landed in `history`, and what that round says in short.
+      // Used to shrink the rounds nobody is still working from; see `condense`.
+      const settled: Array<{ index: number; digest: string }> = [];
       let answer = '';
       let escalations = 0;
 
@@ -1283,6 +1288,18 @@ export class PipelineService {
           answer = stoppedAnswer(budget.stopped as string);
           break;
         }
+
+        // Older rounds shrink to what they concluded. Every turn pays for the whole
+        // conversation again, and a round's full text is only worth that price while the
+        // orchestrator is still working from it.
+        condense(history, settled);
+
+        // Counted before the call, on exactly what the call is about to carry. Measured here
+        // rather than added up from the parts afterwards, so it cannot drift from what was
+        // sent — and summed across rounds, because an orchestrator pays for its whole
+        // conversation again on every one of them.
+        sentBytes +=
+          bytes(prompt) + history.reduce((total, message) => total + bytes(message.content), 0);
 
         const result = await port.complete({
           model,
@@ -1525,6 +1542,7 @@ export class PipelineService {
           .map(([id, times]) => `${id} (${times}x)`)
           .join(', ');
 
+        settled.push({ index: history.length, digest: results.map(digest).join('\n\n') });
         history.push({
           role: 'user',
           content: [
@@ -1591,6 +1609,7 @@ export class PipelineService {
         cacheCreationTokens,
         freshInputTokens,
         outputTokens,
+        sentBytes,
         costUsd: stepCost || null,
       };
 
@@ -1620,6 +1639,7 @@ export class PipelineService {
         cacheReadTokens,
         freshInputTokens,
         outputTokens,
+        sentBytes,
         costUsd: stepCost || null,
       };
 
@@ -3267,6 +3287,64 @@ function mergeRequestUrl(remote: string | null, branch: string): string | null {
   return base.includes('github.com')
     ? `${base}/compare/${encoded}?expand=1`
     : `${base}/-/merge_requests/new?merge_request%5Bsource_branch%5D=${encoded}`;
+}
+
+/**
+ * How many rounds of delegation results stay in the conversation word for word.
+ *
+ * Two, because an orchestrator's next question is nearly always about the round it just got
+ * back, and sometimes about the one before. Beyond that it is working from what it concluded,
+ * not from the transcript — and it pays for the transcript again on every turn it takes.
+ */
+const ROUNDS_KEPT_WHOLE = 2;
+
+/**
+ * One delegate's answer, shrunk to its heading and its first line.
+ *
+ * The heading is the part that has to survive: it names the agent and carries the FAILED and
+ * unmet flags, which is what stops an orchestrator asking the same agent the same question
+ * again. The rest becomes one sentence — the same sentence a person reads in a run listing.
+ */
+function digest(result: string): string {
+  const [heading = '', ...rest] = result.split('\n');
+  return `${heading}\n\n${summarise(rest.join('\n'), 240) || '_no answer_'}`;
+}
+
+/**
+ * Shrink the rounds nobody is still working from.
+ *
+ * Every turn re-sends the entire conversation, so a lead on its fifth round pays for four
+ * rounds of full agent answers in order to ask one new question.
+ *
+ * Worth being honest about the size of this. Measured over the recorded steps, 96% of what a
+ * run is billed for is cached context being re-read, at around 79,000 tokens a turn against
+ * 2,500 fresh — and most of that is a session's own reading, which never passes through here.
+ * What this reaches is the orchestrator's conversation: real, bounded, and not the main lever.
+ * The main lever is how many turns a session takes and how much it reads; see POMN-64.
+ *
+ * A summary, not a truncation. Cutting old rounds outright is what made a lead ask the same
+ * analyst the same question four times: it could not see what it had already delegated. What
+ * stays is every heading — who answered, and whether they failed — and one sentence of what
+ * each said. Handovers are untouched: those are files, published the moment an agent settles
+ * them, and they were never in here.
+ *
+ * Idempotent, and it only ever shortens: a round already condensed is written the same way the
+ * second time, and a round whose digest is not shorter than the round is left alone.
+ */
+function condense(history: LlmMessage[], settled: Array<{ index: number; digest: string }>): void {
+  for (const round of settled.slice(0, Math.max(0, settled.length - ROUNDS_KEPT_WHOLE))) {
+    const message = history[round.index];
+    if (!message) continue;
+
+    const shorter = [
+      'Here is what came back from the agents you delegated to, in short — this round is',
+      'settled, so it is kept as what it concluded rather than word for word.',
+      '',
+      round.digest,
+    ].join('\n');
+
+    if (shorter.length < message.content.length) message.content = shorter;
+  }
 }
 
 /**

@@ -65,6 +65,21 @@ export const PipelineStepSchema = z.object({
   cacheCreationTokens: z.number().default(0),
   promptBytes: z.number().default(0),
   /**
+   * Bytes this step actually handed the provider: the system prompt plus the whole
+   * conversation as it stood, summed over every call the step made.
+   *
+   * `promptBytes` is the system prompt once. This is what went over the wire, and the two
+   * differ by the conversation — which is the part that grows while a step runs, and the part
+   * nothing was counting.
+   *
+   * It is a floor on what a turn carried, never the whole of it. A provider that runs its own
+   * tool loop re-sends everything it has read on every internal turn, and none of that passes
+   * through here. That gap is the point of measuring this: `inputTokens` divided by `turns`
+   * says what a turn was billed for, this says how much of it we handed over, and the
+   * difference is the session reading on its own account.
+   */
+  sentBytes: z.number().default(0),
+  /**
    * Where those bytes went. Measured at assembly, not estimated afterwards: the parts are
    * joined into the prompt in the same breath, so the breakdown cannot drift from the total.
    */
