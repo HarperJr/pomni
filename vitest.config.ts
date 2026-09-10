@@ -34,5 +34,13 @@ export default defineConfig({
      */
     maxWorkers: 4,
     minWorkers: 1,
+    /**
+     * One scratch directory for the whole run, deleted once at the end.
+     *
+     * See `tests/temp-root.ts`: deleting a workspace per test put six hundred recursive
+     * removals in the middle of the run, and on Windows one of them occasionally outlasted the
+     * thirty-second hook timeout and failed a test that had already passed.
+     */
+    globalSetup: ['tests/temp-root.ts'],
   },
 });

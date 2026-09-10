@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { createRequire } from 'node:module';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { SqlitePipelineStore } from '@pomni/infra';
+import { tempRoot } from './temp-root.js';
 
 const { DatabaseSync } = createRequire(import.meta.url)('node:sqlite') as {
   DatabaseSync: new (path: string) => {
@@ -25,7 +26,7 @@ let opened: Array<{ close(): void }>;
 
 beforeEach(async () => {
   opened = [];
-  dir = await mkdtemp(join(tmpdir(), 'pomni-migrate-'));
+  dir = await mkdtemp(join(tempRoot(), 'pomni-migrate-'));
 });
 
 afterEach(async () => {

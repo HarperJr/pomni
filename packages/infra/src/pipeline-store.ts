@@ -9,6 +9,7 @@ import type {
   PipelineStore,
   Question,
 } from '@pomni/core';
+import { applyPragmas } from './sqlite.js';
 
 type SqlValue = string | number | null;
 
@@ -41,8 +42,7 @@ export class SqlitePipelineStore implements PipelineStore {
   constructor(path: string) {
     if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true });
     this.db = new DatabaseSync(path);
-    this.db.exec('PRAGMA journal_mode = WAL');
-    this.db.exec('PRAGMA busy_timeout = 5000');
+    applyPragmas(this.db);
     migrate(this.db);
   }
 
@@ -667,9 +667,9 @@ const MIGRATIONS: string[] = [
 function migrate(db: SqliteDatabase): void {
   db.exec(`CREATE TABLE IF NOT EXISTS pipeline_schema (version INTEGER NOT NULL)`);
 
-  // Every step, every time — which is what this comment always said and what the loop below
-  // did not do. Starting from the recorded version trusts a counter to describe a schema, and
-  // a counter can only ever describe *depth*. It cannot describe divergence.
+  // Every statement, every time — which is what this comment always said and what the loop
+  // once did not do. Starting from the recorded version trusts a counter to describe a schema,
+  // and a counter can only ever describe *depth*. It cannot describe divergence.
   //
   // Two lists of the same length are indistinguishable by it. That is not hypothetical: this
   // database sat at version 12, and so did a database built from this file, and they had
@@ -678,43 +678,39 @@ function migrate(db: SqliteDatabase): void {
   // neither would ever run another step, so the missing column would have stayed missing until
   // the next run failed on an INSERT naming it.
   //
-  // The statements are individually safe to re-attempt — a column that is already there is
-  // caught below — so the truth is the schema itself rather than a number we wrote down.
-  for (let version = 0; version < MIGRATIONS.length; version += 1) {
-    db.exec('BEGIN');
-    try {
-      db.exec(MIGRATIONS[version] as string);
-      db.exec('DELETE FROM pipeline_schema');
-      db.exec(`INSERT INTO pipeline_schema (version) VALUES (${version + 1})`);
-      db.exec('COMMIT');
-    } catch (error) {
-      db.exec('ROLLBACK');
-
-      // A column that is already there is not a failure. SQLite has no
-      // `ADD COLUMN IF NOT EXISTS`, and a migration inserted into the middle of this list
-      // rather than appended to it leaves an existing database one step out of step — which
-      // has happened, and cost a server that would not start. Record the step and carry on;
-      // anything else is a real failure and still stops us.
-      const message = error instanceof Error ? error.message : String(error);
-      if (!/duplicate column name|already exists/i.test(message)) throw error;
-
-      // Applied already, possibly by a different step of a reordered list. Re-run the
-      // statements one at a time so the ones that have *not* been applied still land.
-      for (const statement of (MIGRATIONS[version] as string).split(';')) {
+  // One transaction for the whole list, and that is not a detail. Committing after each step
+  // is a commit per migration and an fsync per commit: on a fresh database this took 1.5
+  // seconds, paid by every test that opens a store, which is every test. A statement that
+  // fails with "duplicate column" does not poison a SQLite transaction — the ones after it
+  // still land — so nothing is lost by holding one open.
+  db.exec('BEGIN');
+  try {
+    for (const migration of MIGRATIONS) {
+      // Statement by statement rather than as a block, so a migration whose first half is
+      // already applied still gets its second half. A list reordered rather than appended to
+      // leaves an existing database exactly in that state — which has happened, and cost a
+      // server that would not start.
+      for (const statement of migration.split(';')) {
         if (!statement.trim()) continue;
         try {
           db.exec(statement);
-        } catch (retry) {
-          const said = retry instanceof Error ? retry.message : String(retry);
-          if (!/duplicate column name|already exists/i.test(said)) throw retry;
+        } catch (error) {
+          // A column that is already there is not a failure. SQLite has no
+          // `ADD COLUMN IF NOT EXISTS`, so this is how "already applied" is spelled.
+          const message = error instanceof Error ? error.message : String(error);
+          if (!/duplicate column name|already exists/i.test(message)) throw error;
         }
       }
-
-      db.exec('BEGIN');
-      db.exec('DELETE FROM pipeline_schema');
-      db.exec(`INSERT INTO pipeline_schema (version) VALUES (${version + 1})`);
-      db.exec('COMMIT');
     }
+
+    // A hint, never the authority: what is above decides what the schema is, and this only
+    // says how long the list was when it last ran.
+    db.exec('DELETE FROM pipeline_schema');
+    db.exec(`INSERT INTO pipeline_schema (version) VALUES (${MIGRATIONS.length})`);
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
   }
 }
 

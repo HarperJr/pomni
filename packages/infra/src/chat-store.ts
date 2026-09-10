@@ -9,6 +9,7 @@ import {
   type ChatMessage,
   type ChatStore,
 } from '@pomni/core';
+import { applyPragmas } from './sqlite.js';
 
 type SqlValue = string | number | null;
 
@@ -44,8 +45,7 @@ export class SqliteChatStore implements ChatStore {
   constructor(path: string) {
     if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true });
     this.db = new DatabaseSync(path);
-    this.db.exec('PRAGMA journal_mode = WAL');
-    this.db.exec('PRAGMA busy_timeout = 5000');
+    applyPragmas(this.db);
     this.db.exec('PRAGMA foreign_keys = ON');
     migrate(this.db);
   }

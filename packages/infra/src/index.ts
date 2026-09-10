@@ -11,6 +11,7 @@ export * from './fs-probe.js';
 export * from './git.js';
 export * from './claude-code-llm.js';
 export * from './desktop.js';
+export * from './sqlite.js';
 export * from './llm.js';
 export * from './llm-factory.js';
 export * from './openai-llm.js';

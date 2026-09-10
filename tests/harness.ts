@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join, relative, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { DetectorRegistry } from '@pomni/adapters';
+import { tempRoot } from './temp-root.js';
 import {
   BacklogService,
   ChatService,
@@ -901,7 +902,7 @@ export interface HarnessOptions<G extends GitPort = FakeGit> {
 export async function createHarness<G extends GitPort = FakeGit>(
   options: HarnessOptions<G> = {},
 ): Promise<TestHarness<G>> {
-  const dir = await mkdtemp(join(tmpdir(), 'pomni-test-'));
+  const dir = await mkdtemp(join(tempRoot(), 'pomni-test-'));
   const root = join(dir, '.pomni');
 
   const docs = new FileDocStore(root);
@@ -1082,8 +1083,10 @@ export async function createHarness<G extends GitPort = FakeGit>(
       worktreeStore.close();
       chatStore.close();
       commentStore.close();
-      // Windows holds handles briefly after close; retry rather than fail the suite.
-      await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+      // The directory is not deleted here. Closing the handles is what a test needs to be
+      // finished with its workspace; removing the bytes is housekeeping, and doing it six
+      // hundred times in the middle of a run is what made a hook occasionally outlast its
+      // thirty-second timeout. The whole tree goes at once in `tests/temp-root.ts`.
     },
   };
 }

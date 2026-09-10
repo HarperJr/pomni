@@ -2,6 +2,7 @@ import { mkdirSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname } from 'node:path';
 import type { Run, RunFilter, RunStore, TestResult } from '@pomni/core';
+import { applyPragmas } from './sqlite.js';
 
 /**
  * `node:sqlite` is newer than most bundlers' builtin lists — a static import gets rewritten
@@ -41,8 +42,7 @@ export class SqliteRunStore implements RunStore {
     if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true });
     this.db = new DatabaseSync(path);
 
-    this.db.exec('PRAGMA journal_mode = WAL');
-    this.db.exec('PRAGMA busy_timeout = 5000');
+    applyPragmas(this.db);
     this.db.exec('PRAGMA foreign_keys = ON');
     migrate(this.db);
   }

@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { ulid, type Comment, type CommentAuthor } from '@pomni/core';
 import { SqliteCommentStore } from '@pomni/infra';
+import { tempRoot } from './temp-root.js';
 
 let dir: string;
 /** Every store opened in a test, closed in teardown — Windows holds the file handle otherwise. */
@@ -11,7 +12,7 @@ let opened: Array<{ close(): void }>;
 
 beforeEach(async () => {
   opened = [];
-  dir = await mkdtemp(join(tmpdir(), 'pomni-comment-store-'));
+  dir = await mkdtemp(join(tempRoot(), 'pomni-comment-store-'));
 });
 
 afterEach(async () => {
