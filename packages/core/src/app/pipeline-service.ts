@@ -62,6 +62,7 @@ import type {
   GitPort,
   MergeRequestRef,
   LlmMessage,
+  LlmUsage,
   LlmPort,
   Logger,
   PipelineStore,
@@ -1224,9 +1225,20 @@ export class PipelineService {
     let cacheReadTokens = 0;
     let cacheCreationTokens = 0;
     let freshInputTokens = 0;
+    /** The sentence a mid-turn stop gave, when one happened. Null on every other path. */
+    let stoppedMidTurn: string | null = null;
 
     try {
       const prompt = session.system;
+
+      // What this session may spend before it is cut off, and what a token costs on this
+      // model. Both read once, here, because the check they feed has to be synchronous — it
+      // runs between two turns of a session that is already going, where there is nowhere to
+      // await. The consequence, stated: raising the ceiling mid-step does not reach a step
+      // already running, only the checks between steps. That is the smaller surprise.
+      const ceiling = (await this.policyNow(run.projectId))?.maxCostUsd;
+      const rate = await this.store.rate(model);
+      const onTurn = this.turnStop(run, budget, { ceiling, rate });
 
       // The orchestrator's own turns stay in the conversation. Sending only the latest
       // round back is what made a lead ask the same analyst the same question four times:
@@ -1279,6 +1291,7 @@ export class PipelineService {
           adaptiveThinking: provider.kind !== 'claude-code',
           effort: orchestrating ? 'high' : 'medium',
           maxTokens: 16_000,
+          onTurn,
         });
 
         // Cache reads and writes are most of the real volume and were being dropped, so
@@ -1296,8 +1309,15 @@ export class PipelineService {
         // Summed, not overwritten: an orchestrator's rounds are one session's worth of turns,
         // and 0 from a provider that reports none stays 0 rather than being read as one turn.
         turns += result.turns;
-        stepCost += result.costUsd ?? 0;
-        addCost(result.costUsd ?? 0);
+        // A session cut off part-way used what it used, and the frame that carries the cost
+        // is the one that never printed. Charged at the same measured rate the stop was
+        // decided on, so the ledger and the decision cannot tell different stories about
+        // the same turns.
+        const charged =
+          result.costUsd ??
+          (result.stoppedBy && rate !== null ? tokensUsed(result.usage) * rate : 0);
+        stepCost += charged;
+        addCost(charged);
         transcript.push(`\n# Reply (round ${round + 1})\n\n${result.text}`);
 
         history.push({ role: 'assistant', content: result.text });
@@ -1311,6 +1331,17 @@ export class PipelineService {
           stepId: step.id,
           chunk: result.text,
         });
+
+        // Stopped inside the session, not between two of them. Everything after this point
+        // in the round reads the reply as an answer — it would parse a verdict out of half a
+        // sentence, publish the files it names and let an orchestrator delegate again on the
+        // strength of it. What the session had said is kept, and kept labelled.
+        if (result.stoppedBy) {
+          stoppedMidTurn = result.stoppedBy;
+          budget.stopped = result.stoppedBy;
+          answer = partialAnswer(result.text, result.stoppedBy);
+          break;
+        }
 
         // Notes this agent left. Nothing waits for them: a comment is written and the round
         // carries on in the same turn, which is the whole difference between this and asking
@@ -1534,13 +1565,20 @@ export class PipelineService {
 
       // Published before the step is even written: whatever this agent settled is now the
       // rest of the run's to use, and the next delegation may already be waiting on it.
-      await this.publish(run, parseHandover(answer));
+      //
+      // Not from a session cut off part-way. A handover is a file, and a file the session was
+      // still writing is truncated — passing it on hands the next agent something that looks
+      // finished and is not.
+      if (!stoppedMidTurn) await this.publish(run, parseHandover(answer));
 
       answer = prose || answer;
 
       const done: PipelineStep = {
         ...step,
-        status: this.cancelled.has(run.id) ? 'cancelled' : 'done',
+        // Cancelled, not done. It was stopped, and a step that says `done` is a step
+        // somebody will read as having finished the job it was given.
+        status: this.cancelled.has(run.id) || stoppedMidTurn ? 'cancelled' : 'done',
+        error: stoppedMidTurn,
         output: answer,
         outcome: verdict.outcome,
         unmet: verdict.unmet,
@@ -1654,6 +1692,50 @@ export class PipelineService {
     }
 
     return null;
+  }
+
+  /**
+   * The check a session runs against its own bill, between one turn and the next.
+   *
+   * `budgetStop` guards the gaps between steps, and for an orchestrator that is most of the
+   * spend. For a leaf agent there are no gaps: it is one `complete()` call that drives its
+   * own tool loop, and the whole of its cost lands after the fact. Service Author spent
+   * $7.77 in one such call on a run that was at $8.12 of $10 when it started, and every
+   * check in the system was satisfied at the moment that call was admitted.
+   *
+   * What it can promise, exactly: a ceiling is crossed by at most the cost of one turn. The
+   * turn already in flight when the estimate goes over cannot be un-billed — the money is
+   * spent by the time the provider tells us it was — so this is "one turn over", never
+   * "never over". Anything stronger would need a provider that can be interrupted mid-turn,
+   * and no provider offers that.
+   *
+   * Returns undefined when it cannot promise even that: no ceiling to cross, or no rate to
+   * measure against because nothing has been paid on this model yet. A guess dressed up as
+   * a limit is worse than a limit that says it is absent.
+   */
+  private turnStop(
+    run: PipelineRun,
+    budget: RunBudget,
+    measure: { ceiling: number | undefined; rate: number | null },
+  ): ((used: LlmUsage & { turns: number }) => string | null) | undefined {
+    const { ceiling, rate } = measure;
+    if (ceiling === undefined || rate === null) return undefined;
+
+    return (used) => {
+      // `budget.cost` is every turn already paid for anywhere in this run; `used` is this
+      // session's own, which is not in it yet.
+      const spent = budget.cost + tokensUsed(used) * rate;
+      if (spent < ceiling) return null;
+
+      return (
+        `this agent was stopped part-way through its ${used.turns}${nth(used.turns)} turn: the` +
+        ` run had reached about $${spent.toFixed(2)} of the $${ceiling.toFixed(2)} its project` +
+        " allows (policy.maxCostUsd). The estimate is measured from this model's own recent" +
+        ' cost per token, so it is close rather than exact. What the run had already committed' +
+        " is committed. Raise the ceiling with 'pomni project edit --max-cost <usd>' and resume" +
+        ' the run, or leave it here.'
+      );
+    };
   }
 
   /** What a step reports about the run's budget as it starts. */
@@ -2936,7 +3018,7 @@ export function clampHandover(files: ContextFile[]): { files: ContextFile[]; not
   for (const file of files) {
     const name = file.name.split(/[\/]/).pop()?.trim() || 'handover';
 
-    if (file.content.trim().length === 0 || file.content.includes(' ')) {
+    if (file.content.trim().length === 0 || file.content.includes('\u0000')) {
       notes.push(`handover '${name}' was ignored — it is empty or is not text`);
       continue;
     }
@@ -3196,6 +3278,41 @@ function mergeRequestUrl(remote: string | null, branch: string): string | null {
  */
 function stoppedAnswer(message: string): string {
   return [message, '', '```json', '{"outcome": "blocked", "unmet": []}', '```'].join('\n');
+}
+
+/**
+ * What a session cut off mid-turn hands back: what it had said, and then why it stops there.
+ *
+ * `partial` rather than `blocked`. Blocked means an agent could not do the work; this one was
+ * doing it. The distinction is what the difference between raising the ceiling and rethinking
+ * the task rests on, and the reader making that decision is the person who set the ceiling.
+ *
+ * The stop sentence goes last, after the prose, so it reads as the note it is rather than as
+ * the agent's own conclusion.
+ */
+function partialAnswer(said: string, message: string): string {
+  return [
+    said.trim() || '_This agent was stopped before it said anything._',
+    '',
+    `> ${message}`,
+    '',
+    '```json',
+    '{"outcome": "partial", "unmet": []}',
+    '```',
+  ].join('\n');
+}
+
+/** Every token a turn is billed for. Cache reads and writes are tokens; they are most of them. */
+function tokensUsed(usage: LlmUsage): number {
+  return (
+    usage.inputTokens + usage.cacheReadTokens + usage.cacheCreationTokens + usage.outputTokens
+  );
+}
+
+/** `1st`, `2nd`, `3rd`, `4th`. Only ever reaches a reader inside a sentence about a turn. */
+function nth(count: number): string {
+  if (count % 100 >= 11 && count % 100 <= 13) return 'th';
+  return ['th', 'st', 'nd', 'rd'][count % 10] ?? 'th';
 }
 
 /** git's own first line is what a person needs; the rest of a git failure is noise. */

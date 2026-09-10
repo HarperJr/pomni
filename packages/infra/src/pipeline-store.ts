@@ -230,6 +230,21 @@ export class SqlitePipelineStore implements PipelineStore {
     return rows.map(toStep);
   }
 
+  async rate(model: string): Promise<number | null> {
+    // Both sums over the same rows, so the ratio is what those steps actually charged per
+    // token. `input_tokens` already includes cache reads and writes, which is the same
+    // denominator a caller counting a live session's usage arrives at — the two have to
+    // agree or the estimate is out by the cache, which is most of the volume.
+    const row = this.statement(
+      `SELECT SUM(cost_usd) AS cost, SUM(input_tokens + output_tokens) AS tokens
+         FROM pipeline_steps
+        WHERE model = ? AND cost_usd IS NOT NULL AND input_tokens + output_tokens > 0`,
+    ).get(model) as { cost: number | null; tokens: number | null } | undefined;
+
+    if (!row?.cost || !row.tokens) return null;
+    return row.cost / row.tokens;
+  }
+
   async putArtifacts(artifacts: Artifact[]): Promise<void> {
     const statement = this.statement(
       `INSERT INTO pipeline_artifacts (id, run_id, step_id, name, kind, path, change, bytes, created_at)

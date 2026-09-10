@@ -23,6 +23,20 @@ export interface LlmRequest {
   /** Off for models that do not support it; the adapter also guards. */
   adaptiveThinking?: boolean;
   signal?: AbortSignal;
+  /**
+   * Consulted after every turn the provider reports, with everything the session has used so
+   * far. Returning a string ends the session there and the string says why; returning null
+   * lets it carry on.
+   *
+   * This is the only place a runaway session can be stopped. A leaf agent is a single
+   * `complete()` call that then runs its own tool loop for as long as it likes — one such
+   * call spent $7.77 against a $10 run that was at $8.12 when it started — so a caller
+   * checking between calls cannot see it coming: by the time control comes back the money is
+   * gone. Providers that report no turns never call this, and are bounded only by the
+   * checks around them; that is a real limit, not an oversight, and it is why the guarantee
+   * is stated in terms of what the provider tells us.
+   */
+  onTurn?(used: LlmUsage & { turns: number }): string | null;
 }
 
 export interface LlmToolSpec {
@@ -85,6 +99,15 @@ export interface LlmResult {
   actions?: AgentAction[];
   /** What the provider says this call cost, when it says. */
   costUsd?: number;
+  /**
+   * Set when `onTurn` ended the session: the reason it gave.
+   *
+   * A result carrying this is partial by construction. `text` is whatever the session had
+   * said by then, which is worth keeping and must not be read as an answer — and `costUsd`
+   * is absent, because the frame that carries the cost is the one that never arrived. The
+   * caller knows what it stopped for and has to account for the tokens itself.
+   */
+  stoppedBy?: string;
 }
 
 export interface ToolLoopHooks {
