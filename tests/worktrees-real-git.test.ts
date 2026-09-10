@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { runBranch } from '@pomni/core';
 import { GitCli } from '@pomni/infra';
 import { createHarness, gitAvailable, makeGitRepo, type TestHarness } from './harness.js';
+import { tempRoot } from './temp-root.js';
 
 /**
  * The same flows as `worktrees.test.ts`, against a real `git` and a real repository.
@@ -340,7 +341,7 @@ describe.skipIf(!HAS_GIT)('advancing a clone to its upstream', () => {
   const cli = new GitCli();
 
   beforeEach(async () => {
-    dir = await mkdtemp(join(tmpdir(), 'pomni-ff-'));
+    dir = await mkdtemp(join(tempRoot(), 'pomni-ff-'));
     origin = await makeGitRepo(join(dir, 'origin'));
     clone = join(dir, 'clone');
     await exec('git', ['clone', origin, clone]);
@@ -500,7 +501,7 @@ describe.skipIf(!HAS_GIT)('a file’s diff, from real git', () => {
   const cli = new GitCli();
 
   beforeEach(async () => {
-    dir = await mkdtemp(join(tmpdir(), 'pomni-diff-'));
+    dir = await mkdtemp(join(tempRoot(), 'pomni-diff-'));
     await makeGitRepo(dir);
   });
 

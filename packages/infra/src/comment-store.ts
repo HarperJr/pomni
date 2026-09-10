@@ -2,6 +2,7 @@ import { createRequire } from 'node:module';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { ValidationError, type Comment, type CommentAuthor, type CommentFilter, type CommentStore } from '@pomni/core';
+import { applyPragmas } from './sqlite.js';
 
 type SqlValue = string | number | null;
 
@@ -34,8 +35,7 @@ export class SqliteCommentStore implements CommentStore {
   constructor(path: string) {
     if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true });
     this.db = new DatabaseSync(path);
-    this.db.exec('PRAGMA journal_mode = WAL');
-    this.db.exec('PRAGMA busy_timeout = 5000');
+    applyPragmas(this.db);
     migrate(this.db);
   }
 

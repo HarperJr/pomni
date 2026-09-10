@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { findWorkspaceRoot } from '@pomni/infra';
+import { tempRoot } from './temp-root.js';
 
 /**
  * Which `.pomni` a command belongs to.
@@ -15,7 +16,7 @@ import { findWorkspaceRoot } from '@pomni/infra';
 let root: string;
 
 beforeEach(async () => {
-  root = await mkdtemp(join(tmpdir(), 'pomni-root-'));
+  root = await mkdtemp(join(tempRoot(), 'pomni-root-'));
   await mkdir(join(root, '.pomni', 'worktrees', 'pomni', 'pomni-2', 'RUN', '.pomni'), {
     recursive: true,
   });
@@ -51,7 +52,7 @@ describe('finding the workspace a command belongs to', () => {
   });
 
   it('still answers for a workspace that has no worktrees directory at all', async () => {
-    const plain = await mkdtemp(join(tmpdir(), 'pomni-plain-'));
+    const plain = await mkdtemp(join(tempRoot(), 'pomni-plain-'));
     try {
       await mkdir(join(plain, '.pomni'), { recursive: true });
       expect(await findWorkspaceRoot(plain)).toBe(join(plain, '.pomni'));

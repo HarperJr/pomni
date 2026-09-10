@@ -7,6 +7,7 @@ import { StaleRevisionError } from '@pomni/core';
 import { FileDocStore } from '@pomni/infra';
 import { createApp } from '@pomni/server';
 import { createHarness, makeNodeRepo, type TestHarness } from './harness.js';
+import { tempRoot } from './temp-root.js';
 
 const Doc = z.object({ name: z.string(), count: z.number().default(0) });
 
@@ -15,7 +16,7 @@ describe('doc store', () => {
   let store: FileDocStore;
 
   beforeEach(async () => {
-    dir = await mkdtemp(join(tmpdir(), 'pomni-store-'));
+    dir = await mkdtemp(join(tempRoot(), 'pomni-store-'));
     store = new FileDocStore(dir);
   });
 
