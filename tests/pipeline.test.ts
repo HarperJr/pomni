@@ -610,3 +610,27 @@ describe('an agent handing something to the rest of the run', () => {
     expect(parseHandover(answer).map((file) => file.name)).toEqual(['one.md', 'two.md']);
   });
 });
+
+describe('what kind of change a run is for', () => {
+  it('tells the orchestrator, so it can size the team to it', async () => {
+    const item = await harness.backlog.create('acme', { title: 'Fix the checkout', type: 'bug' });
+
+    harness.llm.replies = ['Done.'];
+    await (
+      await harness.pipelines.start({ projectId: 'acme', task: 'Fix the checkout', itemId: item.id })
+    ).completion;
+
+    // The item's `type` existed from the beginning and reached nobody: the task was its title
+    // and body. A lead cannot size a team to a kind of change it is never told.
+    const brief = String(harness.llm.calls[0]?.messages[0]?.content ?? '');
+    expect(brief).toContain('**bug**');
+    expect(brief).toContain(item.id);
+  });
+
+  it('says nothing about a kind when the run has no item', async () => {
+    harness.llm.replies = ['Done.'];
+    await (await harness.pipelines.start({ projectId: 'acme', task: 'Look at something' })).completion;
+
+    expect(String(harness.llm.calls[0]?.messages[0]?.content ?? '')).not.toContain('Size the team');
+  });
+});
