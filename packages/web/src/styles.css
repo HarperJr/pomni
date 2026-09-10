@@ -1652,3 +1652,17 @@ button.link:hover { text-decoration: underline; }
 .diff-head {
   color: var(--text-dim);
 }
+
+/* What you can do with one of a run's files, under its diff. */
+.open-file {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+}
+
+.open-file .ghost {
+  padding: 1px 8px;
+  font-size: 12px;
+}

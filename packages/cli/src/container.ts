@@ -32,6 +32,7 @@ import {
   FileEventSink,
   FileLogSink,
   DefaultLlmFactory,
+  Desktop,
   ForgeClient,
   GitCli,
   HttpProviderProbe,
@@ -90,6 +91,7 @@ export interface ContainerOptions {
 export function createContainer(root: string, logLevel: LogLevel = 'warn'): PomniContainer {
   const docs = new FileDocStore(root);
   const fs = new NodeFsProbe();
+  const desktop = new Desktop();
   const git = new GitCli();
   const clock = new SystemClock();
   const events = new InMemoryEventBus();
@@ -175,6 +177,9 @@ export function createContainer(root: string, logLevel: LogLevel = 'warn'): Pomn
     worktrees,
     new ForgeClient(),
     comments,
+    fs,
+    workspace,
+    desktop,
   );
   // Empty rather than `process.cwd()` on purpose: a fallback directory that happens to look
   // like a project would let the adapter rebuild and replace this process with the wrong
@@ -242,6 +247,7 @@ export function createContainer(root: string, logLevel: LogLevel = 'warn'): Pomn
     events,
     fs,
     git,
+    desktop,
     logger,
   };
 }

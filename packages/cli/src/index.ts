@@ -1,10 +1,12 @@
 import { spawn } from 'node:child_process';
 import { join, relative } from 'node:path';
 import {
+  KNOWN_EDITORS,
   PomniError,
   RequirementsNotMetError,
   describeSource,
   type AddRepoSourceInput,
+  type DesktopPort,
   type RepoRole,
   type WorktreePolicy,
 } from '@pomni/core';
@@ -87,6 +89,57 @@ export async function main(argv: string[]): Promise<void> {
       if (!(await container.git.isAvailable())) {
         console.log(style.yellow('warning: git was not found on PATH — cloning repos will fail'));
       }
+    });
+
+  // -- editor ---------------------------------------------------------------
+
+  program
+    .command('editor [command]')
+    .description('what opens a file when Pomni is asked to open one — with no argument, what it would use now')
+    .option('--clear', 'forget the configured editor and go back to looking on PATH')
+    .action(async (command: string | undefined, options: { clear?: boolean }) => {
+      const container = await open();
+
+      if (options.clear || command) {
+        // A program name, not a command line. The file is passed as a separate argument and
+        // never goes through a shell, so `code --wait` would be looked up as a program of
+        // that name and not found — better to say so here than to fail when it is pressed.
+        if (command && !/^[\w.+-]+$/.test(command)) {
+          console.error(
+            style.red(`'${command}' is not a program name — arguments cannot be set here`),
+          );
+          process.exitCode = 1;
+          return;
+        }
+
+        const next = await container.workspace.setConfig({
+          editor: { command: options.clear ? null : (command as string) },
+        });
+        console.log(
+          next.editor.command
+            ? `${style.green('editor')} ${next.editor.command}`
+            : style.dim('editor cleared — Pomni will look for one on PATH'),
+        );
+      }
+
+      const configured = (await container.workspace.config()).editor.command;
+      const found = configured ?? (await firstOnPath(container.desktop));
+
+      if (!found) {
+        console.log(
+          style.yellow(
+            `no editor: none of ${KNOWN_EDITORS.join(', ')} is on PATH. Set one with 'pomni editor <command>'.`,
+          ),
+        );
+        return;
+      }
+
+      const usable = await container.desktop.canRun(found);
+      console.log(
+        usable
+          ? `${found}${configured ? '' : style.dim('  (found on PATH)')}`
+          : style.yellow(`${found} is configured but is not on PATH`),
+      );
     });
 
   // -- project --------------------------------------------------------------
@@ -895,3 +948,11 @@ export function reportError(error: unknown): void {
 }
 
 export { createContainer, openContainer } from './container.js';
+
+/** The first of the known editors this machine actually has. */
+async function firstOnPath(desktop: DesktopPort): Promise<string | null> {
+  for (const candidate of KNOWN_EDITORS) {
+    if (await desktop.canRun(candidate)) return candidate;
+  }
+  return null;
+}

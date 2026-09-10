@@ -1150,9 +1150,72 @@ function FileRow({ runId, file }: { runId: string; file: Artifact }) {
         <div className="file-diff">
           {diff.isPending && <div className="dim">reading the diff…</div>}
           {diff.isError && <div className="dim">{errorMessage(diff.error)}</div>}
-          {diff.data && <Diff diff={diff.data} />}
+          {diff.data && (
+            <>
+              <Diff diff={diff.data} />
+              <OpenFile runId={runId} file={file} diff={diff.data} />
+            </>
+          )}
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * Where a file can be opened, given what this diff came back knowing.
+ *
+ * Three answers, in the order they are useful. The forge is first because it is the one
+ * everybody else can see and the one that survives this machine. Opening locally is second and
+ * needs an editor to exist. Revealing it in a folder is the fallback that always works.
+ *
+ * A button that cannot do anything says why instead of failing when it is pressed — the
+ * editor's absence is known before it is offered, which is the whole reason `editor` comes
+ * back with the diff.
+ */
+function OpenFile({ runId, file, diff }: { runId: string; file: Artifact; diff: ArtifactDiff }) {
+  const [problem, setProblem] = useState<string | null>(null);
+
+  const open = useMutation({
+    mutationFn: (mode: 'editor' | 'reveal') => api.openArtifact(runId, file.id, mode),
+    onSuccess: () => setProblem(null),
+    onError: (error: unknown) => setProblem(errorMessage(error)),
+  });
+
+  return (
+    <div className="open-file">
+      {diff.url && (
+        <a href={diff.url} target="_blank" rel="noreferrer">
+          Open on the forge
+        </a>
+      )}
+
+      {diff.editor ? (
+        <button
+          className="ghost"
+          disabled={open.isPending}
+          onClick={() => open.mutate('editor')}
+          title={`opens it with ${diff.editor} on the machine running Pomni`}
+          type="button"
+        >
+          Open in {diff.editor}
+        </button>
+      ) : (
+        <span className="dim" title="set one with 'pomni editor <command>'">
+          no editor found
+        </span>
+      )}
+
+      <button
+        className="ghost"
+        disabled={open.isPending}
+        onClick={() => open.mutate('reveal')}
+        type="button"
+      >
+        Reveal in folder
+      </button>
+
+      {problem && <span className="dim">{problem}</span>}
     </div>
   );
 }

@@ -100,6 +100,24 @@ export async function pipelineRoutes(
     }),
   );
 
+  /**
+   * Open one of a run's files on this machine.
+   *
+   * The only route here that starts a program, so what it accepts is worth reading twice: an
+   * artifact id from the url and a mode from the body, and nothing else. There is no way to
+   * name a path in this request. The service resolves one from the run's own record of what it
+   * changed and refuses anything that lands outside a directory this project owns.
+   */
+  app.post<{ Params: { runId: string; artifactId: string }; Body: { mode?: string } }>(
+    '/api/pipelines/:runId/artifacts/:artifactId/open',
+    async (request, reply) => {
+      const mode = request.body?.mode === 'reveal' ? 'reveal' : 'editor';
+      await container.pipelines.openArtifact(request.params.runId, request.params.artifactId, mode);
+      reply.code(202);
+      return { opened: mode };
+    },
+  );
+
   /** Run a finished run again, carrying forward why it ended. */
   app.post<{ Params: { runId: string } }>('/api/pipelines/:runId/rerun', async (request, reply) => {
     const { run, completion } = await container.pipelines.rerun(request.params.runId);

@@ -702,6 +702,10 @@ export interface ArtifactDiff {
   source: 'worktree' | 'branch';
   text: string;
   truncated: boolean;
+  /** Where to read this file on the forge, at the run's branch. Null when there is no such page. */
+  url: string | null;
+  /** The editor that would open it on the machine running Pomni, or null when there is none. */
+  editor: string | null;
 }
 
 export interface Artifact {
@@ -1462,6 +1466,18 @@ export const api = {
   artifactDiff: (runId: string, artifactId: string) =>
     request<{ diff: ArtifactDiff }>(
       `/api/pipelines/${encodeURIComponent(runId)}/artifacts/${encodeURIComponent(artifactId)}/diff`,
+    ),
+
+  /**
+   * Open one of a run's files on the machine running Pomni.
+   *
+   * An artifact id, and a mode. There is deliberately no way to name a path here: the server
+   * resolves one from the run's own record and refuses anything outside a repo it owns.
+   */
+  openArtifact: (runId: string, artifactId: string, mode: 'editor' | 'reveal') =>
+    request<{ opened: string }>(
+      `/api/pipelines/${encodeURIComponent(runId)}/artifacts/${encodeURIComponent(artifactId)}/open`,
+      { method: 'POST', body: JSON.stringify({ mode }) },
     ),
 
   listWorktrees: (projectId: string) =>

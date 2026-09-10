@@ -417,6 +417,31 @@ export const ArtifactSchema = z.object({
 export type Artifact = z.infer<typeof ArtifactSchema>;
 
 /**
+ * Where a file can be read on the forge, at a particular branch.
+ *
+ * Built from the remote url rather than by calling the forge, for the same reasons
+ * `mergeRequestUrl` is: no token, works against a self-hosted instance, and it is the page a
+ * person would have navigated to themselves. Null whenever the shape is not known — a link
+ * that goes somewhere wrong is worse than no link, because a link is followed.
+ */
+export function fileUrl(remote: string | null, branch: string | null, path: string): string | null {
+  if (!remote || !branch) return null;
+
+  const base = remote.replace(/\.git$/i, '').replace(/\/+$/, '');
+  if (!/^https?:\/\//i.test(base)) return null;
+
+  // Every one of the three spells it the same way, which is why this is a lookup of hosts
+  // rather than of shapes: `/blob/<ref>/<path>` on GitHub and Bitbucket, `/-/blob/` on GitLab.
+  const ref = branch.split('/').map(encodeURIComponent).join('/');
+  const file = path.split(/[\\/]/).map(encodeURIComponent).join('/');
+
+  if (base.includes('github.com') || base.includes('bitbucket.org')) {
+    return `${base}/blob/${ref}/${file}`;
+  }
+  return `${base}/-/blob/${ref}/${file}`;
+}
+
+/**
  * One file's change, on its way to a browser.
  *
  * `source` is not decoration: a `worktree` diff is what is sitting uncommitted in a run still
@@ -432,6 +457,18 @@ export interface ArtifactDiff {
   text: string;
   /** True when `text` is the first part of a longer diff rather than the whole of it. */
   truncated: boolean;
+  /**
+   * Where to read this file on the forge, at the branch the run delivered on. Null for an ssh
+   * remote, a host with no known shape, or a run with no branch — a wrong link is worse than
+   * none, because a link is followed.
+   */
+  url: string | null;
+  /**
+   * The editor that would open it locally, or null when there is none to be found.
+   *
+   * Answered here so a button can say what it will do rather than failing when it is pressed.
+   */
+  editor: string | null;
 }
 
 /** How much text a set of context files adds to every agent's prompt. */
