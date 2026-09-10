@@ -45,6 +45,26 @@ export const ProjectPolicySchema = z.object({
    */
   maxCostUsd: z.number().positive().default(5),
   /**
+   * Turns one agent's session may take before it is stopped and asked to hand back what it has.
+   *
+   * Turns are what a run is billed for. Measured over the 20 recorded steps here, a turn is
+   * billed for about 79,000 tokens whatever the agent is doing — 96% of it the session
+   * re-reading context it gathered itself — so cost tracks the turn count almost exactly. The
+   * $7.77 step took 82 turns; the $0.48 step took 13. It was not six times the work.
+   *
+   * 50 because the median step takes 26 and finishes, and nothing under 42 turns here cost
+   * over $1.50. It would have stopped two of those twenty steps, both of them expensive ones.
+   * A default that binds often is a default that costs work, so this is set to catch the
+   * runaway rather than to discipline the ordinary.
+   *
+   * Counted per session, not per run: the run-wide ceilings are `maxCostUsd` and `maxTurns`,
+   * and one agent that will not stop is a different failure from a run that has done a lot.
+   * Governed here rather than on the provider so that one number covers a run whose agents
+   * use several — and `Provider.maxTurns` remains what it was, the provider's own hard kill,
+   * which loses the session's output and is why this is not that.
+   */
+  maxSessionTurns: z.number().int().positive().default(50),
+  /**
    * Bytes of assembled system prompt one turn may carry.
    *
    * A ceiling on the frame, not on the picture. Every turn pays for the whole prompt again,

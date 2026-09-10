@@ -185,9 +185,11 @@ describe('what a run reports about its own spend before it bites', () => {
 
     const budgetLines = seen.filter((chunk) => chunk.includes('Budget:'));
     expect(budgetLines.length).toBeGreaterThan(0);
-    expect(budgetLines.some((line) => /Budget: \$\d+\.\d{2} of \$5\.00, step \d+ of 200\./.test(line))).toBe(
-      true,
-    );
+    expect(
+      budgetLines.some((line) =>
+        /Budget: \$\d+\.\d{2} of \$5\.00, step \d+ of 200, 50 turns a session\./.test(line),
+      ),
+    ).toBe(true);
   });
 });
 

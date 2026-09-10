@@ -125,6 +125,11 @@ export async function main(argv: string[]): Promise<void> {
     .option('--no-max-cost', 'remove the cost ceiling — a run may spend without limit')
     .option('--max-turns <n>', 'stop a run once its agent steps reach this many, across the whole run')
     .option('--no-max-turns', 'remove the turn ceiling — a run may take as many steps as it needs')
+    .option(
+      '--max-session-turns <n>',
+      'stop one agent session once it has taken this many turns — turns are what a run is billed for',
+    )
+    .option('--no-max-session-turns', 'remove it — a session may take as many turns as it likes')
     .action(
       async (
         id: string,
@@ -137,6 +142,7 @@ export async function main(argv: string[]): Promise<void> {
           autoMr?: boolean;
           maxCost?: string | false;
           maxTurns?: string | false;
+          maxSessionTurns?: string | false;
         },
       ) => {
         const container = await open();
@@ -162,12 +168,27 @@ export async function main(argv: string[]): Promise<void> {
           }
         }
 
+        let maxSessionTurns: number | undefined;
+        if (options.maxSessionTurns !== undefined && options.maxSessionTurns !== false) {
+          maxSessionTurns = Number(options.maxSessionTurns);
+          if (!Number.isInteger(maxSessionTurns) || maxSessionTurns <= 0) {
+            console.error(
+              style.red(
+                `--max-session-turns must be a positive integer, got ${options.maxSessionTurns}`,
+              ),
+            );
+            process.exitCode = 1;
+            return;
+          }
+        }
+
         const policy = {
           ...(options.autoCommit !== undefined ? { autoCommit: options.autoCommit } : {}),
           ...(options.autoPush !== undefined ? { autoPush: options.autoPush } : {}),
           ...(options.autoMr !== undefined ? { autoMergeRequest: options.autoMr } : {}),
           ...(options.maxCost !== undefined ? { maxCostUsd } : {}),
           ...(options.maxTurns !== undefined ? { maxTurns } : {}),
+          ...(options.maxSessionTurns !== undefined ? { maxSessionTurns } : {}),
         };
         const updated = await container.projects.update(id, {
           ...(options.name !== undefined ? { name: options.name } : {}),
@@ -185,13 +206,21 @@ export async function main(argv: string[]): Promise<void> {
             ),
           );
         }
-        if (options.maxCost !== undefined || options.maxTurns !== undefined) {
+        if (
+          options.maxCost !== undefined ||
+          options.maxTurns !== undefined ||
+          options.maxSessionTurns !== undefined
+        ) {
           console.log(
             style.dim(
               `  a run now stops past ${
                 updated.policy.maxCostUsd !== undefined ? `$${updated.policy.maxCostUsd}` : 'no cost limit'
               } or ${
-                updated.policy.maxTurns !== undefined ? `${updated.policy.maxTurns} turns` : 'no turn limit'
+                updated.policy.maxTurns !== undefined ? `${updated.policy.maxTurns} steps` : 'no step limit'
+              }, and one session stops past ${
+                updated.policy.maxSessionTurns !== undefined
+                  ? `${updated.policy.maxSessionTurns} turns`
+                  : 'no turn limit'
               }`,
             ),
           );
