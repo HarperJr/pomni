@@ -75,7 +75,7 @@ function andList(items: string[]): string {
   return items.length <= 1 ? items.join('') : `${items.slice(0, -1).join(', ')} and ${items.at(-1) ?? ''}`;
 }
 
-function describeUnmet(unmet: UnmetRequirement): string {
+export function describeUnmet(unmet: UnmetRequirement): string {
   switch (unmet.kind) {
     case 'acceptance': {
       if (unmet.total === 0) return 'no acceptance criteria are written in the item body';

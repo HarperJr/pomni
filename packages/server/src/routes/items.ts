@@ -220,6 +220,28 @@ export async function itemRoutes(app: FastifyInstance, container: PomniContainer
       }),
     };
   });
+
+  /**
+   * Every move every card on the board could be asked to make.
+   *
+   * One request for the whole board rather than one per card: a card needs to know which
+   * columns will take it, what is outstanding for the next one, and why a drop was refused,
+   * and all three come off the same answer.
+   */
+  app.get<{ Params: { id: string } }>('/api/projects/:id/items-board', async (request) => {
+    const query = ListQuery.parse(request.query);
+    return {
+      board: await container.backlog.boardMoves({
+        projectId: request.params.id,
+        status: parseStatus(query.status),
+        type: query.type,
+        priority: query.priority,
+        label: query.label,
+        repo: query.repo,
+        query: query.q,
+      }),
+    };
+  });
 }
 
 function parseStatus(value: string | undefined): ItemStatus[] | ItemStatus | undefined {
