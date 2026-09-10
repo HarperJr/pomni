@@ -1238,9 +1238,13 @@ export class PipelineService {
       // runs between two turns of a session that is already going, where there is nowhere to
       // await. The consequence, stated: raising the ceiling mid-step does not reach a step
       // already running, only the checks between steps. That is the smaller surprise.
-      const ceiling = (await this.policyNow(run.projectId))?.maxCostUsd;
+      const policy = await this.policyNow(run.projectId);
       const rate = await this.store.rate(model);
-      const onTurn = this.turnStop(run, budget, { ceiling, rate });
+      const onTurn = this.turnStop(run, budget, {
+        ceiling: policy?.maxCostUsd,
+        rate,
+        maxSessionTurns: policy?.maxSessionTurns,
+      });
 
       // The orchestrator's own turns stay in the conversation. Sending only the latest
       // round back is what made a lead ask the same analyst the same question four times:
@@ -1715,7 +1719,7 @@ export class PipelineService {
   }
 
   /**
-   * The check a session runs against its own bill, between one turn and the next.
+   * The check a session runs against itself, between one turn and the next.
    *
    * `budgetStop` guards the gaps between steps, and for an orchestrator that is most of the
    * spend. For a leaf agent there are no gaps: it is one `complete()` call that drives its
@@ -1723,33 +1727,57 @@ export class PipelineService {
    * $7.77 in one such call on a run that was at $8.12 of $10 when it started, and every
    * check in the system was satisfied at the moment that call was admitted.
    *
-   * What it can promise, exactly: a ceiling is crossed by at most the cost of one turn. The
-   * turn already in flight when the estimate goes over cannot be un-billed — the money is
-   * spent by the time the provider tells us it was — so this is "one turn over", never
-   * "never over". Anything stronger would need a provider that can be interrupted mid-turn,
-   * and no provider offers that.
+   * Two questions, asked on the same turn boundary because they are the same failure seen
+   * from two sides. **Money**: what has this run spent, including what this session has run
+   * up since it started? **Turns**: how many has this one session taken? Cost tracks turns
+   * almost exactly — a turn is billed for about the same amount whatever it does — so the
+   * turn count catches a session going nowhere before the estimate has to.
    *
-   * Returns undefined when it cannot promise even that: no ceiling to cross, or no rate to
-   * measure against because nothing has been paid on this model yet. A guess dressed up as
-   * a limit is worse than a limit that says it is absent.
+   * What it can promise, exactly: a ceiling is crossed by at most one turn. The turn already
+   * in flight when a check goes over cannot be un-taken — the money is spent by the time the
+   * provider says it was — so this is "one turn over", never "never over". Anything stronger
+   * would need a provider that can be interrupted mid-turn, and none offers that.
+   *
+   * A provider that reports no turns is never stopped here, because it never calls this. An
+   * unmeasured session must not read as an infinite one, and the checks around the step are
+   * what bound it instead.
    */
   private turnStop(
     run: PipelineRun,
     budget: RunBudget,
-    measure: { ceiling: number | undefined; rate: number | null },
+    measure: { ceiling: number | undefined; rate: number | null; maxSessionTurns: number | undefined },
   ): ((used: LlmUsage & { turns: number }) => string | null) | undefined {
-    const { ceiling, rate } = measure;
-    if (ceiling === undefined || rate === null) return undefined;
+    const { ceiling, rate, maxSessionTurns } = measure;
+    // Money needs both a ceiling and a rate to measure against: a guess dressed up as a limit
+    // is worse than a limit that says it is absent. Turns need neither — they are counted, not
+    // estimated — so this is offered whenever either question can be asked.
+    const money = ceiling !== undefined && rate !== null;
+    if (!money && maxSessionTurns === undefined) return undefined;
 
     return (used) => {
+      if (used.turns <= 0) return null;
+
+      if (maxSessionTurns !== undefined && used.turns >= maxSessionTurns) {
+        return (
+          `this agent was stopped on its ${used.turns}${nth(used.turns)} turn: its project allows` +
+          ` one session ${maxSessionTurns} (policy.maxSessionTurns). Turns are what a run is` +
+          ' billed for, so a session that keeps taking them is what runs a budget up. Whatever' +
+          ' it had written is in the worktree and is committed with the rest of the run. Raise' +
+          " the ceiling with 'pomni project edit --max-session-turns <n>' and resume the run," +
+          ' or read what it managed and decide from there.'
+        );
+      }
+
+      if (!money) return null;
+
       // `budget.cost` is every turn already paid for anywhere in this run; `used` is this
       // session's own, which is not in it yet.
-      const spent = budget.cost + tokensUsed(used) * rate;
-      if (spent < ceiling) return null;
+      const spent = budget.cost + tokensUsed(used) * (rate as number);
+      if (spent < (ceiling as number)) return null;
 
       return (
         `this agent was stopped part-way through its ${used.turns}${nth(used.turns)} turn: the` +
-        ` run had reached about $${spent.toFixed(2)} of the $${ceiling.toFixed(2)} its project` +
+        ` run had reached about $${spent.toFixed(2)} of the $${(ceiling as number).toFixed(2)} its project` +
         " allows (policy.maxCostUsd). The estimate is measured from this model's own recent" +
         ' cost per token, so it is close rather than exact. What the run had already committed' +
         " is committed. Raise the ceiling with 'pomni project edit --max-cost <usd>' and resume" +
@@ -1765,7 +1793,12 @@ export class PipelineService {
       policy?.maxCostUsd !== undefined ? `$${policy.maxCostUsd.toFixed(2)}` : 'no ceiling';
     const turns = policy?.maxTurns !== undefined ? String(policy.maxTurns) : 'no ceiling';
 
-    return `Budget: $${budget.cost.toFixed(2)} of ${ceiling}, step ${budget.steps} of ${turns}.`;
+    const session =
+      policy?.maxSessionTurns !== undefined
+        ? `, ${policy.maxSessionTurns} turns a session`
+        : '';
+
+    return `Budget: $${budget.cost.toFixed(2)} of ${ceiling}, step ${budget.steps} of ${turns}${session}.`;
   }
 
   /**

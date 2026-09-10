@@ -144,10 +144,14 @@ describe('a session that crosses the ceiling part-way through', () => {
     expect(steps.at(-1)?.output).toContain('Yes, and here is why.');
   });
 
-  it('declines to check at all when nothing has been paid on the model yet', async () => {
-    // No prior run, so no rate. The check is not offered rather than being offered a guess —
-    // and the session runs to its own end, bounded only by the checks around it.
-    await harness.projects.update('acme', { policy: { maxCostUsd: 0.000001 } });
+  it('never stops for money when nothing has been paid on the model yet', async () => {
+    // No prior run, so no rate. A ceiling this small would stop anything measurable, and it
+    // stops nothing: an estimate with no evidence behind it is worse than none, so the money
+    // question simply is not asked. The turn question still is — it needs no rate — which is
+    // why the ceiling here is set out of the way.
+    await harness.projects.update('acme', {
+      policy: { maxCostUsd: 0.000001, maxSessionTurns: 100 },
+    });
     harness.llm.turnUsage = [usage(30), usage(30)];
     harness.llm.reply = 'Yes, and here is why.';
 
@@ -155,11 +159,11 @@ describe('a session that crosses the ceiling part-way through', () => {
       projectId: 'acme',
       task: 'Should we?',
     });
-    await completion;
+    const finished = await completion;
     const steps = await harness.pipelineStore.steps(run.id);
 
     expect(steps.at(-1)?.status).toBe('done');
-    expect(harness.llm.calls[0]?.onTurn).toBeUndefined();
+    expect(finished.error).toBeNull();
   });
 });
 
@@ -268,5 +272,89 @@ describe('counting a streamed session by its requests', () => {
     ).toBeNull();
     expect(watch.used.turns).toBe(0);
     expect(watch.stoppedBy).toBeNull();
+  });
+});
+
+describe('a session that keeps taking turns', () => {
+  it('is stopped on the turn that reaches the ceiling, and keeps what it wrote', async () => {
+    await attachRepo('web');
+    await harness.projects.update('acme', { policy: { maxSessionTurns: 3 } });
+    harness.llm.turnUsage = [usage(10), usage(10), usage(10), usage(10), usage(10)];
+    harness.llm.partialText = 'I got as far as the domain.';
+
+    const { run, completion } = await harness.pipelines.start({
+      projectId: 'acme',
+      task: 'Should we?',
+    });
+
+    const [held] = await harness.worktrees.list({ runId: run.id });
+    const path = held?.path as string;
+    await writeFile(join(path, 'delivered.ts'), 'export const whole = true;\n');
+
+    const finished = await completion;
+    const steps = await harness.pipelineStore.steps(run.id);
+    const stopped = steps.at(-1);
+
+    expect(stopped?.status).toBe('cancelled');
+    expect(stopped?.outcome).toBe('partial');
+    expect(stopped?.turns).toBe(3);
+    expect(stopped?.output).toContain('I got as far as the domain.');
+    expect(stopped?.output).toContain('stopped on its 3rd turn');
+    expect(stopped?.error).toContain('policy.maxSessionTurns');
+
+    // No rate exists here — nothing has been paid on this model — and the turn count needs
+    // none. It is counted, not estimated.
+    expect(finished.error).toContain('policy.maxSessionTurns');
+    expect(harness.git.commits).toHaveLength(1);
+  });
+
+  it('leaves a session under the ceiling alone', async () => {
+    await harness.projects.update('acme', { policy: { maxSessionTurns: 50 } });
+    harness.llm.turnUsage = [usage(10), usage(10), usage(10)];
+    harness.llm.reply = 'Yes, and here is why.';
+
+    const { run, completion } = await harness.pipelines.start({
+      projectId: 'acme',
+      task: 'Should we?',
+    });
+    const finished = await completion;
+    const steps = await harness.pipelineStore.steps(run.id);
+
+    expect(finished.status).toBe('passed');
+    expect(steps.at(-1)?.status).toBe('done');
+  });
+
+  it('never stops a provider that reports no turns at all', async () => {
+    await harness.projects.update('acme', { policy: { maxSessionTurns: 1 } });
+    // `turnUsage` empty: the fake answers without ever reporting a turn, the way a provider
+    // that streams nothing does. An unmeasured session must not read as an infinite one.
+    harness.llm.reply = 'Yes, and here is why.';
+
+    const { run, completion } = await harness.pipelines.start({
+      projectId: 'acme',
+      task: 'Should we?',
+    });
+    const finished = await completion;
+    const steps = await harness.pipelineStore.steps(run.id);
+
+    expect(finished.status).toBe('passed');
+    expect(steps.at(-1)?.status).toBe('done');
+  });
+
+  it('is offered even with no cost ceiling, because turns need no rate to count', async () => {
+    await harness.projects.update('acme', {
+      policy: { maxCostUsd: undefined, maxSessionTurns: 2 },
+    });
+    harness.llm.turnUsage = [usage(10), usage(10), usage(10)];
+
+    const { run, completion } = await harness.pipelines.start({
+      projectId: 'acme',
+      task: 'Should we?',
+    });
+    await completion;
+    const steps = await harness.pipelineStore.steps(run.id);
+
+    expect(steps.at(-1)?.status).toBe('cancelled');
+    expect(steps.at(-1)?.turns).toBe(2);
   });
 });
