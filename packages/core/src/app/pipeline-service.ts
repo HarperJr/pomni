@@ -254,7 +254,7 @@ export class PipelineService {
   ) {}
 
   async start(input: StartRunInput): Promise<StartRunResult> {
-    const task = input.task.trim();
+    let task = input.task.trim();
     if (!task) throw new ValidationError('a run needs a task');
 
     await this.projects.getRef(input.projectId);
@@ -263,6 +263,15 @@ export class PipelineService {
     // An author who is not told which files a change is about pays to find them: on the run
     // that produced this, one spent 2.4M input tokens looking for two the item had named.
     const touched = input.itemId ? await this.touchedFiles(input.projectId, input.itemId) : null;
+
+    // What kind of change this is, told to the orchestrator so it can size the team to it.
+    // A one-file fix does not want the full roster, and until now nothing said which kind of
+    // item a run was for: the task was the item's title and body, and `type` — which every
+    // item carries — reached nobody. Composed here rather than in each surface, because the
+    // CLI, the browser and the MCP server each built the task themselves and only one of them
+    // would ever have been updated.
+    const kind = input.itemId ? await this.itemKind(input.projectId, input.itemId) : null;
+    if (kind) task = [kind, '', task].join('\n');
     // What people and earlier agents have said about the item since it was specced. Rebuilt
     // from the store on every attempt, never carried: a note written between two attempts must
     // reach the second one, and one deleted between them must not survive in a copy.
@@ -493,6 +502,19 @@ export class PipelineService {
    * run, survives a resume, and shows in the console as something a person can read, which is
    * the same treatment the run's other composed information already gets.
    */
+  /**
+   * One line telling the orchestrator what kind of item this is.
+   *
+   * Prose rather than a field, because it lands in the brief every agent reads and a bare
+   * `type: bug` invites an agent to parse it. What the lead does with it is the lead's spec's
+   * business — this only makes the fact available, which it was not before.
+   */
+  private async itemKind(projectId: string, itemId: string): Promise<string | null> {
+    const item = await this.backlog.get(projectId, itemId).catch(() => null);
+    if (!item) return null;
+    return `This is a **${item.type}** (${item.id}). Size the team to that.`;
+  }
+
   private async touchedFiles(projectId: string, itemId: string): Promise<ContextFile | null> {
     // An item that cannot be read is not a reason to refuse to run: the run has a task, and
     // the list is a head start rather than a requirement.
