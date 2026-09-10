@@ -215,6 +215,49 @@ export const PipelineRunSchema = z.object({
 
 export type PipelineRun = z.infer<typeof PipelineRunSchema>;
 
+/**
+ * What `WorktreeService` says when it could not cut a worktree and the run used the repo
+ * directory itself.
+ *
+ * Shared so that the reader of the sentence and its writer cannot drift apart. It is a
+ * sentence rather than a flag because it is also what a person reads in `unmet`, and a run
+ * that shared a repo directory needs to say which repo and why, not merely that it happened.
+ */
+export const SHARED_REPO_NOTE = 'working in the repo directory';
+
+/** Where a run's work is. Rendered differently by each surface; decided in one place. */
+export type WorkLocation =
+  /** On a branch. `live` distinguishes a worktree still standing from work already committed. */
+  | { kind: 'branch'; branch: string; live: boolean }
+  /** In the shared repo directory, because no worktree could be cut. */
+  | { kind: 'repo' }
+  /** Not known. Said by showing nothing. */
+  | { kind: 'unknown' };
+
+/**
+ * Three sources, in the order they are trustworthy.
+ *
+ * The run's own `branch` is what `deliver()` wrote when it committed, and it outlives
+ * everything else. The live worktree row covers a run still in flight, which has not
+ * committed yet and so has nothing on the run. Only a run that actually fell back to a shared
+ * repo directory is `repo` — and that is decided by what the run says in `unmet`, never by a
+ * missing worktree row.
+ *
+ * That last distinction is the bug this exists for. A worktree row lives exactly as long as
+ * its directory, so a run that delivered cleanly has none — and reading that absence as "it
+ * worked in the repo" told people the one thing that had not happened, at the moment the
+ * branch was the only thing that mattered.
+ */
+export function workLocation(
+  run: { branch: string | null; unmet: string[] },
+  live?: string | null,
+): WorkLocation {
+  if (run.branch) return { kind: 'branch', branch: run.branch, live: false };
+  if (live) return { kind: 'branch', branch: live, live: true };
+  if (run.unmet.some((note) => note.includes(SHARED_REPO_NOTE))) return { kind: 'repo' };
+  return { kind: 'unknown' };
+}
+
 export interface PipelineRunDetail extends PipelineRun {
   steps: PipelineStep[];
   artifacts: Artifact[];

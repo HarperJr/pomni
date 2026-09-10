@@ -636,6 +636,12 @@ export interface PipelineRun {
   /** Files attached when the run was started; every agent was given them. */
   context: ContextFile[];
   status: PipelineStatus;
+  /**
+   * The branch this run's work was committed on, written when it delivered. Null means "not
+   * recorded" — a run from before the field, or one that committed nothing. It never means
+   * the run worked in the repo directory; `unmet` says that in words.
+   */
+  branch: string | null;
   pid: number | null;
   result: string | null;
   error: string | null;
@@ -651,6 +657,36 @@ export interface PipelineRun {
   inputTokens: number;
   outputTokens: number;
   costUsd: number | null;
+}
+
+/** Where a run's work is. Mirrors `WorkLocation` in `packages/core/src/domain/pipeline.ts`. */
+export type WorkLocation =
+  | { kind: 'branch'; branch: string; live: boolean }
+  | { kind: 'repo' }
+  | { kind: 'unknown' };
+
+/**
+ * Which of the three answers applies to this run.
+ *
+ * A hand-kept copy of `workLocation` in `packages/core/src/domain/pipeline.ts`, because the
+ * web package cannot import core (see `SpecGap` above). The precedence and the sentence
+ * matched below are that function's; keep them in step with it.
+ *
+ * The part worth not getting wrong: a run with no worktree row has not necessarily worked in
+ * the repo directory. A row lives exactly as long as its directory, so a run that delivered
+ * cleanly has none, and reading that absence as "in repo" tells people the one thing that did
+ * not happen — at the moment the branch is the only thing that matters.
+ */
+export function workLocation(
+  run: { branch: string | null; unmet: string[] },
+  live?: string | null,
+): WorkLocation {
+  if (run.branch) return { kind: 'branch', branch: run.branch, live: false };
+  if (live) return { kind: 'branch', branch: live, live: true };
+  if (run.unmet.some((note) => note.includes('working in the repo directory'))) {
+    return { kind: 'repo' };
+  }
+  return { kind: 'unknown' };
 }
 
 export interface Artifact {

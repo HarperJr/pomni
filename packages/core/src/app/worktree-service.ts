@@ -1,4 +1,5 @@
 import { ConflictError, NotFoundError, ValidationError } from '../domain/errors.js';
+import { SHARED_REPO_NOTE } from '../domain/pipeline.js';
 import { layout } from '../domain/layout.js';
 import { RepoSchema, type Repo, type ResolvedRepo } from '../domain/repo.js';
 import { ulid } from '../domain/ulid.js';
@@ -164,7 +165,7 @@ export class WorktreeService {
       } catch (error) {
         // The branch already exists, the disk is full, the filesystem cannot do links, the
         // repo is itself somebody's worktree. All of it is a shared directory, not a dead run.
-        const reason = `'${repo.name}': could not create a worktree (${firstLine(error)}) — the run is working in the repo directory`;
+        const reason = `'${repo.name}': could not create a worktree (${firstLine(error)}) — the run is ${SHARED_REPO_NOTE}`;
         this.logger.warn(reason);
         dirs[repo.id] = repo.workingDir;
         fallbacks.push({ repoId: repo.id, name: repo.name, reason });

@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import {
   api,
+  workLocation,
   type Artifact,
   type ContextFile,
   type Question,
@@ -65,6 +66,14 @@ export function PipelinePanel({ projectId }: { projectId: string }) {
     queryFn: () => api.projectWorkflows(projectId).then((result) => result.workflows),
   });
 
+  // Only a run still in flight needs this: it has not committed, so it has no branch of its
+  // own yet, and the worktree it is standing on is the only place the name exists. A finished
+  // run answers from its own record and never waits on this query.
+  const worktrees = useQuery({
+    queryKey: ['worktrees', projectId],
+    queryFn: () => api.listWorktrees(projectId).then((result) => result.worktrees),
+  });
+
   // The poll above is the backstop; a run finishing is what actually needs to move it out of
   // the live section right away, and that is exactly what `pipeline.finished` announces.
   useEffect(() => {
@@ -77,6 +86,9 @@ export function PipelinePanel({ projectId }: { projectId: string }) {
   }, [projectId, queryClient]);
 
   const runnable = (workflows.data ?? []).filter((workflow) => workflow.runnable);
+  const liveBranch = new Map(
+    (worktrees.data ?? []).map((entry) => [entry.worktree.runId, entry.worktree.branch]),
+  );
   const allRuns = runs.data ?? [];
   const live = allRuns.filter((run) => run.status === 'running');
   const finished = allRuns.filter((run) => run.status !== 'running');
@@ -115,7 +127,13 @@ export function PipelinePanel({ projectId }: { projectId: string }) {
           {live.length > 0 && <div className="section-head">Running</div>}
           {live.map((run) => (
             <div className="run-entry" key={run.id}>
-              <RunRow projectId={projectId} run={run} onRerun={rerun.mutate} rerunPending={rerun.isPending} />
+              <RunRow
+                projectId={projectId}
+                run={run}
+                liveBranch={liveBranch.get(run.id)}
+                onRerun={rerun.mutate}
+                rerunPending={rerun.isPending}
+              />
               <LiveFlow runId={run.id} />
             </div>
           ))}
@@ -124,7 +142,13 @@ export function PipelinePanel({ projectId }: { projectId: string }) {
 
           {visibleFinished.map((run) => (
             <div className="run-entry" key={run.id}>
-              <RunRow projectId={projectId} run={run} onRerun={rerun.mutate} rerunPending={rerun.isPending} />
+              <RunRow
+                projectId={projectId}
+                run={run}
+                liveBranch={liveBranch.get(run.id)}
+                onRerun={rerun.mutate}
+                rerunPending={rerun.isPending}
+              />
             </div>
           ))}
 
@@ -167,14 +191,50 @@ export function PipelinePanel({ projectId }: { projectId: string }) {
 }
 
 /** One run's row: badge, task, duration, and the retry button when it makes sense. */
+/**
+ * Where a run's work is, in a cell.
+ *
+ * Says nothing when nothing is known, which is the whole point of it. The column used to read
+ * `in repo` for every run that had finished tidily — a claim about the one thing that had not
+ * happened — and a blank is better than a confident wrong answer.
+ *
+ * A branch that is still live is marked, because the two are worth telling apart: one is a
+ * directory you can walk into, and the other is a commit you can open a merge request for.
+ */
+function Where({ run, live }: { run: PipelineRun; live?: string }) {
+  const where = workLocation(run, live);
+  if (where.kind === 'unknown') return null;
+
+  if (where.kind === 'repo') {
+    return (
+      <span className="dim mono truncate" title="no worktree could be cut; the run used the repo directory itself">
+        in repo
+      </span>
+    );
+  }
+
+  return (
+    <span
+      className="dim mono truncate"
+      title={where.live ? 'the worktree this run is working in' : 'the branch this run delivered on'}
+    >
+      {where.branch}
+      {where.live ? ' · live' : ''}
+    </span>
+  );
+}
+
 function RunRow({
   projectId,
   run,
+  liveBranch,
   onRerun,
   rerunPending,
 }: {
   projectId: string;
   run: PipelineRun;
+  /** The branch of the worktree this run is standing on, while it still has one. */
+  liveBranch?: string;
   onRerun: (runId: string) => void;
   rerunPending: boolean;
 }) {
@@ -189,6 +249,7 @@ function RunRow({
           </div>
           <div className="dim mono truncate">{run.result ?? run.error ?? ''}</div>
         </div>
+        <Where run={run} live={liveBranch} />
         <span className="dim mono">{duration(run.durationMs)}</span>
       </Link>
       {/* A run that stopped without finishing the job is the one you came here to
@@ -525,6 +586,14 @@ export function ConsolePage() {
     refetchInterval: (query) => (query.state.data?.status === 'running' ? 1500 : false),
   });
 
+  // Only asked while the run is in flight: a finished run carries its own branch, and this is
+  // the one place the name exists before it has committed anything.
+  const worktrees = useQuery({
+    queryKey: ['worktrees', projectId],
+    queryFn: () => api.listWorktrees(projectId).then((result) => result.worktrees),
+    enabled: run.data?.status === 'running',
+  });
+
   const rerun = useMutation({
     mutationFn: () => api.rerunPipeline(runId),
     // Straight into the new run: the old one is history the moment this starts.
@@ -646,6 +715,13 @@ export function ConsolePage() {
       <div className="card">
         <div className="row">
           <div className="grow wrap">{data.task}</div>
+          <Where
+            run={data}
+            live={
+              (worktrees.data ?? []).find((entry) => entry.worktree.runId === data.id)?.worktree
+                .branch
+            }
+          />
           <span className="dim mono">
             {data.steps.length} step{data.steps.length === 1 ? '' : 's'}
             {active > 0 ? ` · ${active} running` : ''}

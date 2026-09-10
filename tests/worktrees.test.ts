@@ -14,6 +14,7 @@ import {
   itemIdFromBranch,
   runBranch,
   runIdFromBranch,
+  workLocation,
   worktreeEligibility,
   worktreeState,
   type PipelineRun,
@@ -1005,5 +1006,60 @@ describe('branches a run left behind', () => {
 
     await harness.pipelines.answer(questionId as string, 'Carry on.');
     await completion;
+  });
+});
+
+describe('where a run’s work is', () => {
+  const run = (fields: Partial<PipelineRun>): PipelineRun =>
+    PipelineRunSchema.parse({
+      id: 'run-1',
+      projectId: 'acme',
+      workflowId: 'discovery',
+      workflowName: 'Discovery',
+      providerId: 'claude-code',
+      itemId: null,
+      task: 'work',
+      status: 'passed',
+      result: null,
+      error: null,
+      startedAt: '2026-09-10T00:00:00.000Z',
+      endedAt: '2026-09-10T00:10:00.000Z',
+      durationMs: 600_000,
+      costUsd: null,
+      ...fields,
+    });
+
+  it('prefers what the run delivered on, because that outlives everything else', () => {
+    expect(workLocation(run({ branch: 'fix/POMN-52/main' }), 'chore/run-x/main')).toEqual({
+      kind: 'branch',
+      branch: 'fix/POMN-52/main',
+      live: false,
+    });
+  });
+
+  it('falls back to the worktree a run in flight is standing on', () => {
+    expect(workLocation(run({ branch: null }), 'feature/POMN-9/main')).toEqual({
+      kind: 'branch',
+      branch: 'feature/POMN-9/main',
+      live: true,
+    });
+  });
+
+  it('says nothing at all when nothing is known', () => {
+    // The bug this function exists for. A run that delivered tidily has no worktree row — a
+    // row lives exactly as long as its directory — and reading that absence as `in repo`
+    // stated the one thing that had not happened.
+    expect(workLocation(run({ branch: null }))).toEqual({ kind: 'unknown' });
+    expect(workLocation(run({ branch: null, unmet: ['the gate failed'] }))).toEqual({
+      kind: 'unknown',
+    });
+  });
+
+  it('says `in repo` only on the evidence of the run saying so itself', () => {
+    const shared = run({
+      branch: null,
+      unmet: ["'web': could not create a worktree (locked) — the run is working in the repo directory"],
+    });
+    expect(workLocation(shared)).toEqual({ kind: 'repo' });
   });
 });
