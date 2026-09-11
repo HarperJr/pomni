@@ -252,8 +252,11 @@ function RunRow({
   const { t, duration } = useLanguage();
 
   return (
-    <>
-      <Link className="row" to={`/p/${projectId}/console/${run.id}`}>
+    // The link and the retry are siblings in a flex row rather than the retry being floated
+    // over the link. Absolutely positioning it put it on top of the branch and the duration,
+    // which are the two things on that end of the row.
+    <div className="run-line">
+      <Link className="row grow" to={`/p/${projectId}/console/${run.id}`}>
         <div className="grow">
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
             <RunBadge status={run.status} />
@@ -277,7 +280,7 @@ function RunRow({
           {t('runs.runAgain')}
         </button>
       )}
-    </>
+    </div>
   );
 }
 

@@ -473,7 +473,6 @@ function Shell() {
           <SectionLink section="providers">{t('nav.providers')}</SectionLink>
           <SectionLink section="credentials">{t('nav.credentials')}</SectionLink>
         </nav>
-        <div className="spacer" />
         <LanguagePicker />
       </div>
 
