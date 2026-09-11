@@ -16,12 +16,14 @@ import { DoctorPanel, RunControls, RunList, VerifyButton } from './runs';
 import { PipelinePanel } from './console';
 import { DiscoveryPanel } from './discovery';
 import { ProjectWorkflows } from './workflows';
+import { useLanguage } from './i18n';
 
 // ---------------------------------------------------------------------------
 // Projects
 // ---------------------------------------------------------------------------
 
 export function ProjectsPage() {
+  const { t } = useLanguage();
   const [creating, setCreating] = useState(false);
   const projects = useQuery({
     queryKey: ['projects'],
@@ -37,10 +39,10 @@ export function ProjectsPage() {
   return (
     <>
       <div className="page-head">
-        <h1>Projects</h1>
+        <h1>{t('projects.title')}</h1>
         <div className="spacer" />
         <button className="primary" onClick={() => setCreating(true)}>
-          New project
+          {t('projects.new')}
         </button>
       </div>
 
@@ -49,8 +51,7 @@ export function ProjectsPage() {
       {projects.data?.length === 0 && (
         <div className="card">
           <div className="empty">
-            No projects yet. A project is a container — create one, then add the repos it is
-            built from.
+            {t('projects.emptyLong')}
           </div>
         </div>
       )}
@@ -67,7 +68,7 @@ export function ProjectsPage() {
               <h3>{project.name}</h3>
               <div className="dim mono">{project.id}</div>
               <div style={{ marginTop: 12 }} className="tags">
-                {project.repos.length === 0 && <span className="dim">no repos</span>}
+                {project.repos.length === 0 && <span className="dim">{t('projects.noRepos')}</span>}
                 {project.repos.map((repo) => (
                   <span key={repo.id} className="tag">
                     {repo.id}
@@ -86,6 +87,7 @@ export function ProjectsPage() {
 }
 
 function NewProjectDialog({ onClose }: { onClose: () => void }) {
+  const { t } = useLanguage();
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
   const [error, setError] = useState<string | null>(null);
@@ -103,29 +105,29 @@ function NewProjectDialog({ onClose }: { onClose: () => void }) {
 
   return (
     <Dialog
-      title="New project"
+      title={t('projects.new')}
       onClose={onClose}
       footer={
         <>
-          <button onClick={onClose}>Cancel</button>
+          <button onClick={onClose}>{t('common.cancel')}</button>
           <button
             className="primary"
             disabled={!name.trim() || create.isPending}
             onClick={() => create.mutate()}
           >
-            Create
+            {t('projects.create')}
           </button>
         </>
       }
     >
       <Alert kind="error">{error}</Alert>
       <label>
-        <span className="lab">Name</span>
+        <span className="lab">{t('projects.name')}</span>
         <input value={name} onChange={(event) => setName(event.target.value)} autoFocus />
-        <span className="hint">The id is derived from the name and never changes.</span>
+        <span className="hint">{t('projects.nameHint')}</span>
       </label>
       <label>
-        <span className="lab">Description</span>
+        <span className="lab">{t('projects.description')}</span>
         <input value={description} onChange={(event) => setDescription(event.target.value)} />
       </label>
     </Dialog>
@@ -141,15 +143,16 @@ function NewProjectDialog({ onClose }: { onClose: () => void }) {
  * what the agents are doing, and the machinery behind that.
  */
 const SECTIONS = [
-  { id: 'repos', label: 'Repos' },
-  { id: 'backlog', label: 'Backlog' },
-  { id: 'runs', label: 'Agent runs' },
-  { id: 'checks', label: 'Checks' },
-  { id: 'workflows', label: 'Workflows' },
-  { id: 'discovery', label: 'Discovery' },
+  { id: 'repos', label: 'block.repos' },
+  { id: 'backlog', label: 'block.backlog' },
+  { id: 'runs', label: 'block.runs' },
+  { id: 'checks', label: 'block.checks' },
+  { id: 'workflows', label: 'block.workflows' },
+  { id: 'discovery', label: 'block.discovery' },
 ] as const;
 
 export function ProjectPage() {
+  const { t } = useLanguage();
   const { projectId = '' } = useParams();
   const [adding, setAdding] = useState(false);
   const [params, setParams] = useSearchParams();
@@ -198,7 +201,7 @@ export function ProjectPage() {
   });
 
   if (project.isError) return <Alert kind="error">{errorMessage(project.error)}</Alert>;
-  if (!project.data) return <div className="dim">Loading…</div>;
+  if (!project.data) return <div className="dim">{t('common.loading')}</div>;
 
   return (
     <>
@@ -238,7 +241,7 @@ export function ProjectPage() {
               aria-current={section.id === active}
               onClick={() => select(section.id)}
             >
-              <span className="grow truncate">{section.label}</span>
+              <span className="grow truncate">{t(section.label)}</span>
               <span className="dim mono">{counts[section.id] ?? ''}</span>
             </button>
           ))}
@@ -280,6 +283,7 @@ export function ProjectPage() {
 }
 
 function RepoRow({ projectId, repo }: { projectId: string; repo: Repo }) {
+  const { t } = useLanguage();
   const [editing, setEditing] = useState(false);
   const queryClient = useQueryClient();
   const invalidate = () => queryClient.invalidateQueries({ queryKey: ['project', projectId] });
@@ -345,7 +349,7 @@ function RepoRow({ projectId, repo }: { projectId: string; repo: Repo }) {
         Edit
       </button>
       <button className="ghost" onClick={() => sync.mutate()} disabled={sync.isPending}>
-        {sync.isPending ? 'Syncing…' : 'Sync'}
+        {sync.isPending ? t('repo.syncing') : t('repo.sync')}
       </button>
       {editing && (
         <EditRepoDialog projectId={projectId} repo={repo} onClose={() => setEditing(false)} />
@@ -355,8 +359,8 @@ function RepoRow({ projectId, repo }: { projectId: string; repo: Repo }) {
         onClick={() => {
           const what =
             repo.source.kind === 'git'
-              ? 'This deletes the cloned working copy.'
-              : 'Your folder is left untouched.';
+              ? t('repo.removeCloned')
+              : t('repo.removeLinked');
           if (confirm(`Remove "${repo.name}"? ${what}`)) remove.mutate();
         }}
       >
@@ -393,6 +397,7 @@ function EditRepoDialog({
   repo: Repo;
   onClose: () => void;
 }) {
+  const { t } = useLanguage();
   // Narrowed once: a boolean flag does not let the compiler follow the union.
   const gitSource = repo.source.kind === 'git' ? repo.source : null;
   const localSource = repo.source.kind === 'local' ? repo.source : null;
@@ -442,9 +447,9 @@ function EditRepoDialog({
       onClose={onClose}
       footer={
         <>
-          <button onClick={onClose}>Cancel</button>
+          <button onClick={onClose}>{t('common.cancel')}</button>
           <button className="primary" onClick={() => save.mutate()} disabled={save.isPending}>
-            {save.isPending ? 'Saving…' : 'Save'}
+            {save.isPending ? t('common.saving') : t('common.save')}
           </button>
         </>
       }
@@ -453,11 +458,11 @@ function EditRepoDialog({
 
       <div className="field-row">
         <label>
-          <span className="lab">Display name</span>
+          <span className="lab">{t('repo.displayName')}</span>
           <input value={name} onChange={(event) => setName(event.target.value)} />
         </label>
         <label>
-          <span className="lab">Role</span>
+          <span className="lab">{t('repo.role')}</span>
           <select value={role} onChange={(event) => setRole(event.target.value as RepoRole)}>
             {REPO_ROLES.map((option) => (
               <option key={option} value={option}>{option}</option>
@@ -469,9 +474,9 @@ function EditRepoDialog({
       {gitSource ? (
         <>
           <label>
-            <span className="lab">Credential</span>
+            <span className="lab">{t('repo.credential')}</span>
             <select value={credential} onChange={(event) => setCredential(event.target.value)}>
-              <option value="">Match by host / public repo</option>
+              <option value="">{t('repo.credentialAuto')}</option>
               {(credentials.data ?? []).map((item) => (
                 <option key={item.id} value={item.id} disabled={!item.hasSecret}>
                   {item.id} ({item.host}){item.hasSecret ? '' : ' — no secret'}
@@ -485,15 +490,15 @@ function EditRepoDialog({
 
           <div className="field-row">
             <label>
-              <span className="lab">Branch or tag</span>
+              <span className="lab">{t('repo.branch')}</span>
               <input
                 value={ref}
                 onChange={(event) => setRef(event.target.value)}
-                placeholder="default branch"
+                placeholder={t('repo.branchPlaceholder')}
               />
             </label>
             <label>
-              <span className="lab">Forge</span>
+              <span className="lab">{t('repo.forge')}</span>
               <select
                 value={provider}
                 onChange={(event) => setProvider(event.target.value as typeof provider)}
@@ -501,13 +506,13 @@ function EditRepoDialog({
                 <option value="github">GitHub</option>
                 <option value="gitlab">GitLab</option>
                 <option value="bitbucket">Bitbucket</option>
-                <option value="generic">Other</option>
+                <option value="generic">{t('repo.forgeOther')}</option>
               </select>
             </label>
           </div>
 
           <label>
-            <span className="lab">Repository URL</span>
+            <span className="lab">{t('repo.url')}</span>
             <input value={url} onChange={(event) => setUrl(event.target.value)} />
           </label>
 
@@ -541,6 +546,7 @@ function EditRepoDialog({
 // ---------------------------------------------------------------------------
 
 export function CredentialsPage() {
+  const { t } = useLanguage();
   const [adding, setAdding] = useState(false);
   const queryClient = useQueryClient();
 
@@ -552,7 +558,7 @@ export function CredentialsPage() {
   return (
     <>
       <div className="page-head">
-        <h1>Credentials</h1>
+        <h1>{t('credentials.title')}</h1>
         <div className="spacer" />
         <button className="primary" onClick={() => setAdding(true)}>
           Add credential
@@ -567,7 +573,7 @@ export function CredentialsPage() {
 
       <div className="card">
         {(credentials.data ?? []).length === 0 ? (
-          <div className="empty">No credentials. Public repos work without one.</div>
+          <div className="empty">{t('credentials.empty')}</div>
         ) : (
           (credentials.data ?? []).map((credential) => (
             <CredentialRow
@@ -742,6 +748,7 @@ function CredentialDialog({
   onClose: () => void;
   onSaved: () => void;
 }) {
+  const { t } = useLanguage();
   const [name, setName] = useState(credential.name);
   const [provider, setProvider] = useState<string>(credential.provider);
   const [host, setHost] = useState(credential.host);
@@ -785,9 +792,9 @@ function CredentialDialog({
       onClose={onClose}
       footer={
         <>
-          <button onClick={onClose}>Cancel</button>
+          <button onClick={onClose}>{t('common.cancel')}</button>
           <button className="primary" onClick={() => save.mutate()} disabled={save.isPending}>
-            {save.isPending ? 'Saving…' : 'Save'}
+            {save.isPending ? t('common.saving') : t('common.save')}
           </button>
         </>
       }
@@ -796,11 +803,11 @@ function CredentialDialog({
 
       <div className="field-row">
         <label>
-          <span className="lab">Name</span>
+          <span className="lab">{t('credentials.name')}</span>
           <input value={name} onChange={(event) => setName(event.target.value)} autoFocus />
         </label>
         <label>
-          <span className="lab">Provider</span>
+          <span className="lab">{t('credentials.provider')}</span>
           <select value={provider} onChange={(event) => setProvider(event.target.value)}>
             <option value="github">github</option>
             <option value="gitlab">gitlab</option>
@@ -811,7 +818,7 @@ function CredentialDialog({
       </div>
 
       <label>
-        <span className="lab">Host</span>
+        <span className="lab">{t('credentials.host')}</span>
         <input value={host} onChange={(event) => setHost(event.target.value)} />
         <span className="hint">
           Include the port if the repo url has one
@@ -820,7 +827,7 @@ function CredentialDialog({
       </label>
 
       <label>
-        <span className="lab">Username</span>
+        <span className="lab">{t('credentials.username')}</span>
         <input
           value={username}
           onChange={(event) => setUsername(event.target.value)}
@@ -833,22 +840,22 @@ function CredentialDialog({
       </label>
 
       <label>
-        <span className="lab">Where the token comes from</span>
+        <span className="lab">{t('credentials.tokenSource')}</span>
         <select value={kind} onChange={(event) => setKind(event.target.value as typeof kind)}>
           <option value="gh-cli" disabled={provider !== 'github'}>
             GitHub CLI (gh auth token) — nothing stored
           </option>
-          <option value="env">Environment variable — nothing stored</option>
-          <option value="file">Store in Pomni (gitignored file)</option>
+          <option value="env">{t('credentials.fromEnv')}</option>
+          <option value="file">{t('credentials.fromFile')}</option>
         </select>
         {kind !== 'file' && credential.secretRef.kind === 'file' && (
-          <span className="hint">The token Pomni was storing will be forgotten.</span>
+          <span className="hint">{t('credentials.forgetHint')}</span>
         )}
       </label>
 
       {kind === 'env' && (
         <label>
-          <span className="lab">Variable name</span>
+          <span className="lab">{t('credentials.variableName')}</span>
           <input value={envVar} onChange={(event) => setEnvVar(event.target.value)} />
           <span className="hint">
             Read by the server process, so set it before starting{' '}
@@ -859,7 +866,7 @@ function CredentialDialog({
 
       {kind === 'file' && (
         <SecretField
-          label={keepsExistingToken ? 'Replace token' : 'Token'}
+          label={t(keepsExistingToken ? 'credentials.replaceToken' : 'credentials.token')}
           value={token}
           onChange={setToken}
           placeholder={keepsExistingToken ? 'leave blank to keep the current one' : 'glpat-…'}
@@ -882,6 +889,7 @@ function CredentialDialog({
 }
 
 function AddCredentialDialog({ onClose }: { onClose: () => void }) {
+  const { t } = useLanguage();
   const [name, setName] = useState('');
   const [provider, setProvider] = useState('github');
   // Tracked so switching provider can update the default without discarding a typed host.
@@ -924,11 +932,11 @@ function AddCredentialDialog({ onClose }: { onClose: () => void }) {
 
   return (
     <Dialog
-      title="Add credential"
+      title={t('credentials.add')}
       onClose={onClose}
       footer={
         <>
-          <button onClick={onClose}>Cancel</button>
+          <button onClick={onClose}>{t('common.cancel')}</button>
           <button
             className="primary"
             disabled={!name.trim() || create.isPending}
@@ -943,16 +951,16 @@ function AddCredentialDialog({ onClose }: { onClose: () => void }) {
 
       <div className="field-row">
         <label>
-          <span className="lab">Name</span>
+          <span className="lab">{t('credentials.name')}</span>
           <input
             value={name}
             onChange={(event) => setName(event.target.value)}
-            placeholder="GitHub personal"
+            placeholder={t('credentials.namePlaceholder')}
             autoFocus
           />
         </label>
         <label>
-          <span className="lab">Provider</span>
+          <span className="lab">{t('credentials.provider')}</span>
           <select value={provider} onChange={(event) => chooseProvider(event.target.value)}>
             <option value="github">github</option>
             <option value="gitlab">gitlab</option>
@@ -963,7 +971,7 @@ function AddCredentialDialog({ onClose }: { onClose: () => void }) {
       </div>
 
       <label>
-        <span className="lab">Host</span>
+        <span className="lab">{t('credentials.host')}</span>
         <input
           value={host}
           onChange={(event) => {
@@ -980,13 +988,13 @@ function AddCredentialDialog({ onClose }: { onClose: () => void }) {
       </label>
 
       <label>
-        <span className="lab">Where the token comes from</span>
+        <span className="lab">{t('credentials.tokenSource')}</span>
         <select value={kind} onChange={(event) => setKind(event.target.value as typeof kind)}>
           <option value="gh-cli" disabled={provider !== 'github'}>
             GitHub CLI (gh auth token) — nothing stored
           </option>
-          <option value="env">Environment variable — nothing stored</option>
-          <option value="file">Store in Pomni (gitignored file)</option>
+          <option value="env">{t('credentials.fromEnv')}</option>
+          <option value="file">{t('credentials.fromFile')}</option>
         </select>
       </label>
 
@@ -1006,7 +1014,7 @@ function AddCredentialDialog({ onClose }: { onClose: () => void }) {
 
       {kind === 'env' && (
         <label>
-          <span className="lab">Variable name</span>
+          <span className="lab">{t('credentials.variableName')}</span>
           <input value={envVar} onChange={(event) => setEnvVar(event.target.value)} />
           <span className="hint">
             Read when git needs it. The server must be able to see the variable, so set it

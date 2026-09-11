@@ -47,6 +47,57 @@ export const ru: Dictionary = {
   'projects.repoCount': 'репозиториев',
   'projects.openCount': 'открытых карточек',
 
+  // -- the projects screen --------------------------------------------------
+  'projects.create': 'Создать',
+  'projects.emptyLong':
+    'Проектов пока нет. Проект — это контейнер: создайте один, а затем добавьте репозитории, из которых он собран.',
+  'projects.noRepos': 'репозиториев нет',
+  'projects.name': 'Название',
+  'projects.nameHint': 'Id выводится из названия и больше не меняется.',
+  'projects.description': 'Описание',
+  'projects.nRunning': 'идёт {n} ран|идут {n} рана|идут {n} ранов',
+
+  // -- a project's blocks ---------------------------------------------------
+  'block.repos': 'Репозитории',
+  'block.backlog': 'Бэклог',
+  'block.runs': 'Прогоны агентов',
+  'block.checks': 'Проверки',
+  'block.workflows': 'Воркфлоу',
+  'block.discovery': 'Разведка',
+
+  // -- repos ----------------------------------------------------------------
+  'repo.sync': 'Синхронизировать',
+  'repo.syncing': 'Синхронизируем…',
+  'repo.removeCloned': 'Клонированная рабочая копия будет удалена.',
+  'repo.removeLinked': 'Ваша папка останется нетронутой.',
+  'repo.displayName': 'Отображаемое имя',
+  'repo.role': 'Роль',
+  'repo.credential': 'Доступ',
+  'repo.credentialAuto': 'Подобрать по хосту / публичный репозиторий',
+  'repo.branch': 'Ветка или тег',
+  'repo.branchPlaceholder': 'ветка по умолчанию',
+  'repo.forge': 'Форж',
+  'repo.forgeOther': 'Другой',
+  'repo.url': 'URL репозитория',
+
+  // -- credentials ----------------------------------------------------------
+  'credentials.title': 'Доступы',
+  'credentials.empty': 'Доступов нет. Публичные репозитории работают и без них.',
+  'credentials.add': 'Добавить доступ',
+  'credentials.name': 'Название',
+  'credentials.namePlaceholder': 'GitHub личный',
+  'credentials.provider': 'Провайдер',
+  'credentials.host': 'Хост',
+  'credentials.username': 'Пользователь',
+  'credentials.usernameOptional': 'Пользователь (необязательно)',
+  'credentials.tokenSource': 'Откуда берётся токен',
+  'credentials.fromEnv': 'Переменная окружения — ничего не хранится',
+  'credentials.fromFile': 'Хранить в Pomni (файл в gitignore)',
+  'credentials.forgetHint': 'Токен, который хранила Pomni, будет забыт.',
+  'credentials.variableName': 'Имя переменной',
+  'credentials.token': 'Токен',
+  'credentials.replaceToken': 'Заменить токен',
+
   // -- tracker --------------------------------------------------------------
   'tracker.title': 'Трекер',
   'tracker.backlog': 'Бэклог',

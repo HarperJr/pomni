@@ -1,5 +1,6 @@
 import { useEffect, type ReactNode } from 'react';
 import type { PipelineRun, RepoStatus } from './api';
+import { useLanguage } from './i18n';
 
 /**
  * Shared by the Projects grid and the Tracker cards, so the two screens make one request for
@@ -83,6 +84,7 @@ export function Alert({
  * grid from reflowing as runs start and finish.
  */
 export function RunningBadge({ runs }: { runs: PipelineRun[] }) {
+  const { plural } = useLanguage();
   if (runs.length === 0) return <div className="running-badge" />;
 
   const only = runs.length === 1 ? runs[0] : undefined;
@@ -90,7 +92,10 @@ export function RunningBadge({ runs }: { runs: PipelineRun[] }) {
   return (
     <div className="running-badge running-badge-active">
       <span className="dot spin" />
-      {runs.length} running{only ? ` · ${only.workflowName}` : ''}
+      {/* Through `plural`, not `n + ' running'`: Russian needs three forms where English
+          needs one, and this is the first count the interface renders. */}
+      {plural('projects.nRunning', runs.length)}
+      {only ? ` · ${only.workflowName}` : ''}
     </div>
   );
 }
