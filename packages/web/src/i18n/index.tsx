@@ -41,6 +41,19 @@ interface Translator {
   plural(key: Key, count: number, values?: Record<string, string | number>): string;
   /** A date, formatted by `Intl` in the chosen language rather than by a hand-built string. */
   date(iso: string | null | undefined, options?: Intl.DateTimeFormatOptions): string;
+  /**
+   * A number with the grouping the chosen language uses. English groups with commas and
+   * Russian with spaces, and both are what a reader of that language expects to see.
+   */
+  number(value: number): string;
+  /**
+   * How long something took: `850ms`, `12.3s`, `2m 5s`, and `850 мс`, `12,3 с`, `2 мин 5 с`.
+   *
+   * Through `Intl.NumberFormat`'s unit style rather than by appending `s` and `m`, which are
+   * English abbreviations wherever they appear. Empty string for an unmeasured duration —
+   * `null` means nobody counted, and `0ms` would be a measurement.
+   */
+  duration(ms: number | null | undefined): string;
 }
 
 const Context = createContext<Translator | null>(null);
@@ -100,6 +113,27 @@ export function LanguageProvider({ children }: { children: ReactNode }) {
         const order = language === 'ru' ? ['one', 'few', 'many'] : ['one', 'other'];
         const chosen = forms[order.indexOf(category)] ?? forms.at(-1) ?? '';
         return fill(chosen, { ...values, n: count });
+      },
+      number: (value) => new Intl.NumberFormat(locale).format(value),
+      duration: (ms) => {
+        if (ms === null || ms === undefined) return '';
+
+        const unit = (value: number, name: 'millisecond' | 'second' | 'minute') =>
+          new Intl.NumberFormat(locale, {
+            style: 'unit',
+            unit: name,
+            // Narrow, so English keeps the dense `12.3s` it had rather than gaining `12.3 secs`.
+            // Russian widens to `12,3 с` on its own, which is what Russian does with units.
+            unitDisplay: 'narrow',
+            maximumFractionDigits: name === 'second' ? 1 : 0,
+          }).format(value);
+
+        if (ms < 1000) return unit(ms, 'millisecond');
+        if (ms < 60_000) return unit(ms / 1000, 'second');
+        return `${unit(Math.floor(ms / 60_000), 'minute')} ${unit(
+          Math.round((ms % 60_000) / 1000),
+          'second',
+        )}`;
       },
       date: (iso, options) => {
         if (!iso) return '';

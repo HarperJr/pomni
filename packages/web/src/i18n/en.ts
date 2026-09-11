@@ -110,6 +110,42 @@ export const en = {
   'tracker.emptyAll': 'This project has nothing in its backlog yet.',
   'tracker.emptyActive': 'This project has nothing open right now.',
 
+  // -- the backlog list -----------------------------------------------------
+  'items.hideDone': 'Hide done',
+  'items.add': 'Add item',
+  'items.empty':
+    'Nothing captured yet. An item is a Markdown file in the repo — readable in a diff, editable by an agent.',
+  'items.new': 'New item',
+  'items.title': 'Title',
+  'items.titleHint':
+    'Captured as a Markdown file with a spec template. Fill in the problem and acceptance criteria before moving it past Backlog.',
+  'items.type': 'Type',
+  'items.priority': 'Priority',
+
+  // -- the item page --------------------------------------------------------
+  'item.unblock': 'Unblock',
+  'item.unblocking': 'Unblocking…',
+  'item.moveTo': 'Move to',
+  'item.spec': 'Spec',
+  'item.unsaved': 'unsaved changes',
+  'item.currentBody': 'Current body on the server',
+  'item.offFlow':
+    "This item's status ({state}) is not a state in this project's current flow — only recovery moves are offered below.",
+  'item.conflict':
+    'This item changed on the server since you started editing. Your draft has not been touched —',
+  'item.viewCurrent': 'view the current body',
+  'item.beforeDeciding': 'before deciding what to do.',
+
+  // -- states, as the interface names them ----------------------------------
+  'state.backlog': 'Backlog',
+  'state.specced': 'Specced',
+  'state.ready': 'Ready',
+  'state.in_progress': 'In progress',
+  'state.in_review': 'In review',
+  'state.done': 'Done',
+  'state.blocked': 'Blocked',
+  'state.cancelled': 'Cancelled',
+
   // -- the board ------------------------------------------------------------
   'board.move': 'Move…',
   'board.nowhere': 'nowhere from here',
@@ -183,6 +219,13 @@ export const en = {
   'console.answerPlaceholder': 'Your answer — a sentence is usually enough.',
   'console.answer': 'Answer',
   'console.sending': 'Sending…',
+
+  // -- what a run spent -----------------------------------------------------
+  'spend.tokensOver': '{tokens} tokens over {runs} runs',
+  'spend.input': 'input: {n}',
+  'spend.output': 'output: {n}',
+  'spend.cacheUnknown': 'cache: unknown',
+  'spend.cacheShare': 'cache: {percent}%',
 
   // -- runs -----------------------------------------------------------------
   'run.branch.delivered': 'the branch this run delivered on',

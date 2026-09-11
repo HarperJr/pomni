@@ -17,21 +17,33 @@ import {
 } from './api';
 import { Alert, Dialog, errorMessage } from './components';
 import { Markdown } from './markdown';
+import { useLanguage, type Key } from './i18n';
 
-const COLUMN_LABEL: Record<string, string> = {
-  backlog: 'Backlog',
-  specced: 'Specced',
-  ready: 'Ready',
-  in_progress: 'In progress',
-  in_review: 'In review',
-  done: 'Done',
-  blocked: 'Blocked',
-  cancelled: 'Cancelled',
+/**
+ * What the interface calls each built-in state.
+ *
+ * Keys rather than words: the state itself is data and stays as the data spells it —
+ * `in_review` is what the CLI prints, what the flow declares and what a person searches for.
+ * This is only the label beside it.
+ */
+const COLUMN_LABEL: Record<string, Key> = {
+  backlog: 'state.backlog',
+  specced: 'state.specced',
+  ready: 'state.ready',
+  in_progress: 'state.in_progress',
+  in_review: 'state.in_review',
+  done: 'state.done',
+  blocked: 'state.blocked',
+  cancelled: 'state.cancelled',
 };
 
 /** A project-defined state has no entry above — fall back to its name, made readable. */
-function columnLabel(status: ItemStatus): string {
-  return COLUMN_LABEL[status] ?? status.replace(/_/g, ' ');
+function useColumnLabel(): (status: ItemStatus) => string {
+  const { t } = useLanguage();
+  return (status) => {
+    const key = COLUMN_LABEL[status];
+    return key ? t(key) : status.replace(/_/g, ' ');
+  };
 }
 
 const DEFAULT_ORDER: ItemStatus[] = [
@@ -46,6 +58,7 @@ const DEFAULT_ORDER: ItemStatus[] = [
 ];
 
 export function ItemStatusBadge({ status, label }: { status: ItemStatus; label?: string }) {
+  const columnLabel = useColumnLabel();
   const tone =
     status === 'done'
       ? 'ready'
@@ -172,6 +185,7 @@ function describeSpecGap(gap: Extract<UnmetRequirement, { kind: 'spec' }>['gap']
 
 /** Backlog list on the project page. The kanban board proper is M2. */
 export function ItemList({ projectId }: { projectId: string }) {
+  const { t } = useLanguage();
   const [adding, setAdding] = useState(false);
   const [showDone, setShowDone] = useState(false);
 
@@ -196,9 +210,9 @@ export function ItemList({ projectId }: { projectId: string }) {
         <span className="dim" style={{ fontWeight: 400 }}>{items.data?.length ?? 0}</span>
         <div className="spacer" />
         <button className="ghost" onClick={() => setShowDone((value) => !value)}>
-          {showDone ? 'Hide done' : 'Show all'}
+          {showDone ? t('items.hideDone') : t('common.showAll')}
         </button>
-        <button onClick={() => setAdding(true)}>Add item</button>
+        <button onClick={() => setAdding(true)}>{t('items.add')}</button>
       </div>
 
       {items.isError && (
@@ -209,8 +223,7 @@ export function ItemList({ projectId }: { projectId: string }) {
 
       {(items.data ?? []).length === 0 ? (
         <div className="empty">
-          Nothing captured yet. An item is a Markdown file in the repo — readable in a diff,
-          editable by an agent.
+          {t('items.empty')}
         </div>
       ) : (
         grouped.map(([status, group]) => (
@@ -246,6 +259,7 @@ function ItemRow({ projectId, item }: { projectId: string; item: BacklogItem }) 
 }
 
 function NewItemDialog({ projectId, onClose }: { projectId: string; onClose: () => void }) {
+  const { t } = useLanguage();
   const [title, setTitle] = useState('');
   const [type, setType] = useState<ItemType>('feature');
   const [priority, setPriority] = useState<Priority>('P2');
@@ -263,11 +277,11 @@ function NewItemDialog({ projectId, onClose }: { projectId: string; onClose: () 
 
   return (
     <Dialog
-      title="New item"
+      title={t('items.new')}
       onClose={onClose}
       footer={
         <>
-          <button onClick={onClose}>Cancel</button>
+          <button onClick={onClose}>{t('common.cancel')}</button>
           <button
             className="primary"
             disabled={!title.trim() || create.isPending}
@@ -280,16 +294,13 @@ function NewItemDialog({ projectId, onClose }: { projectId: string; onClose: () 
     >
       <Alert kind="error">{error}</Alert>
       <label>
-        <span className="lab">Title</span>
+        <span className="lab">{t('items.title')}</span>
         <input value={title} onChange={(event) => setTitle(event.target.value)} autoFocus />
-        <span className="hint">
-          Captured as a Markdown file with a spec template. Fill in the problem and acceptance
-          criteria before moving it past Backlog.
-        </span>
+        <span className="hint">{t('items.titleHint')}</span>
       </label>
       <div className="field-row">
         <label>
-          <span className="lab">Type</span>
+          <span className="lab">{t('items.type')}</span>
           <select value={type} onChange={(event) => setType(event.target.value as ItemType)}>
             {ITEM_TYPES.map((option) => (
               <option key={option} value={option}>{option}</option>
@@ -297,7 +308,7 @@ function NewItemDialog({ projectId, onClose }: { projectId: string; onClose: () 
           </select>
         </label>
         <label>
-          <span className="lab">Priority</span>
+          <span className="lab">{t('items.priority')}</span>
           <select value={priority} onChange={(event) => setPriority(event.target.value as Priority)}>
             {PRIORITIES.map((option) => (
               <option key={option} value={option}>{option}</option>
@@ -405,6 +416,8 @@ function TransitionRow({
 
 /** One item: its spec, its state, and the transitions it can legally make. */
 export function ItemPage() {
+  const { t } = useLanguage();
+  const columnLabel = useColumnLabel();
   const { projectId = '', itemId = '' } = useParams();
   const [error, setError] = useState<string | null>(null);
   const queryClient = useQueryClient();
@@ -502,7 +515,7 @@ export function ItemPage() {
   });
 
   if (item.isError) return <Alert kind="error">{errorMessage(item.error)}</Alert>;
-  if (!item.data) return <div className="dim">Loading…</div>;
+  if (!item.data) return <div className="dim">{t('common.loading')}</div>;
 
   const data = item.data.item;
 
@@ -530,8 +543,7 @@ export function ItemPage() {
 
       {data.offFlow && (
         <Alert kind="info">
-          This item's status ({columnLabel(data.status)}) is not a state in this project's
-          current flow — only recovery moves are offered below.
+          {t('item.offFlow', { state: columnLabel(data.status) })}
         </Alert>
       )}
 
@@ -568,7 +580,7 @@ export function ItemPage() {
                     disabled={unblock.isPending}
                     onClick={() => unblock.mutate()}
                   >
-                    {unblock.isPending ? 'Unblocking…' : 'Unblock'}
+                    {unblock.isPending ? t('item.unblocking') : t('item.unblock')}
                   </button>
                   <span className="dim" style={{ marginLeft: 8, fontSize: 12 }}>
                     puts it back to{' '}
@@ -587,7 +599,7 @@ export function ItemPage() {
         )}
 
         <div className="row" style={{ alignItems: 'flex-start' }}>
-          <span className="dim" style={{ paddingTop: 5 }}>Move to</span>
+          <span className="dim" style={{ paddingTop: 5 }}>{t('item.moveTo')}</span>
           <div className="grow transition-list">
             {shownTransitions.length === 0 && (
               <span className="dim" style={{ fontSize: 12 }}>no moves are offered from here</span>
@@ -612,9 +624,9 @@ export function ItemPage() {
 
       <div className="card">
         <div className="card-head">
-          Spec
+          {t('item.spec')}
           <div className="spacer" />
-          {bodyDirty && <span className="dim spec-dirty">unsaved changes</span>}
+          {bodyDirty && <span className="dim spec-dirty">{t('item.unsaved')}</span>}
           {/* The draft, not the saved body: a preview of something other than what you are
               typing is a preview of the wrong thing. */}
           <button
@@ -622,7 +634,7 @@ export function ItemPage() {
             style={{ padding: '3px 12px', fontSize: 12 }}
             onClick={() => setReading((was) => !was)}
           >
-            {reading ? 'Edit' : 'Preview'}
+            {reading ? t('common.edit') : t('common.preview')}
           </button>
           <button
             className="primary"
@@ -630,13 +642,12 @@ export function ItemPage() {
             disabled={!bodyDirty || saveBody.isPending}
             onClick={() => saveBody.mutate()}
           >
-            {saveBody.isPending ? 'Saving…' : 'Save'}
+            {saveBody.isPending ? t('common.saving') : t('common.save')}
           </button>
         </div>
         {conflict && (
           <Alert kind="error">
-            This item changed on the server since you started editing. Your draft has not been
-            touched —{' '}
+            {t('item.conflict')}{' '}
             <button
               className="ghost"
               onClick={async () => {
@@ -644,9 +655,9 @@ export function ItemPage() {
                 setShowLatest(true);
               }}
             >
-              view the current body
+              {t('item.viewCurrent')}
             </button>{' '}
-            before deciding what to do.
+            {t('item.beforeDeciding')}
           </Alert>
         )}
         {reading ? (
@@ -663,9 +674,9 @@ export function ItemPage() {
 
       {showLatest && (
         <Dialog
-          title="Current body on the server"
+          title={t('item.currentBody')}
           onClose={() => setShowLatest(false)}
-          footer={<button onClick={() => setShowLatest(false)}>Close</button>}
+          footer={<button onClick={() => setShowLatest(false)}>{t('common.close')}</button>}
         >
           <Markdown className="md-panel" source={data.body} />
         </Dialog>
