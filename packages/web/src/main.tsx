@@ -14,6 +14,7 @@ import { WorkflowPage, WorkflowsPage } from './workflows';
 import { TrackerPage } from './tracker';
 import { ChatPage } from './chat';
 import './styles.css';
+import { LanguagePicker, LanguageProvider, useLanguage } from './i18n';
 
 const queryClient = new QueryClient({
   defaultOptions: { queries: { staleTime: 2_000, retry: false, refetchOnWindowFocus: true } },
@@ -439,6 +440,7 @@ function Shell() {
   const location = useLocation();
   const [chatting, setChatting] = useState(false);
   const [chatId, setChatId] = useState('');
+  const { t } = useLanguage();
 
   // Escape closes it, as any modal should. Nothing about the page underneath changes, which
   // is the whole point: you ask a question without losing your place.
@@ -461,16 +463,18 @@ function Shell() {
     <div className="shell">
       <div className="topbar">
         <div className="brand">
-          Pomni<span>project runtime</span>
+          Pomni<span>{t('brand.tagline')}</span>
         </div>
         <nav className="nav">
-          <SectionLink section="projects">Projects</SectionLink>
-          <SectionLink section="tracker">Tracker</SectionLink>
-          <SectionLink section="workflows">Workflows</SectionLink>
-          <SectionLink section="tools">Tools</SectionLink>
-          <SectionLink section="providers">Providers</SectionLink>
-          <SectionLink section="credentials">Credentials</SectionLink>
+          <SectionLink section="projects">{t('nav.projects')}</SectionLink>
+          <SectionLink section="tracker">{t('nav.tracker')}</SectionLink>
+          <SectionLink section="workflows">{t('nav.workflows')}</SectionLink>
+          <SectionLink section="tools">{t('nav.tools')}</SectionLink>
+          <SectionLink section="providers">{t('nav.providers')}</SectionLink>
+          <SectionLink section="credentials">{t('nav.credentials')}</SectionLink>
         </nav>
+        <div className="spacer" />
+        <LanguagePicker />
       </div>
 
       <Routes>
@@ -497,7 +501,7 @@ function Shell() {
           className="chat-fab"
           onClick={() => setChatting(true)}
           aria-expanded={false}
-          aria-label="Open chat"
+          aria-label={t('chat.open')}
           title="Talk to Pomni"
         >
           <svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true" focusable="false">
@@ -526,7 +530,7 @@ function Shell() {
             <button
               className="chat-close"
               onClick={() => setChatting(false)}
-              aria-label="Close chat"
+              aria-label={t('chat.close')}
               title="Close"
             >
               <span aria-hidden="true">×</span>
@@ -549,9 +553,11 @@ const root = document.getElementById('root');
 if (root) {
   createRoot(root).render(
     <QueryClientProvider client={queryClient}>
-      <BrowserRouter>
-        <Shell />
-      </BrowserRouter>
+      <LanguageProvider>
+        <BrowserRouter>
+          <Shell />
+        </BrowserRouter>
+      </LanguageProvider>
     </QueryClientProvider>,
   );
 }
