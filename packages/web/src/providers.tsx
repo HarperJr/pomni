@@ -9,13 +9,12 @@ import {
   type Struggle,
 } from './api';
 import { Alert, Dialog, errorMessage } from './components';
+import { useLanguage, type Key } from './i18n';
 
-const KIND_NOTE: Record<ProviderKind, string> = {
-  'claude-code':
-    'The `claude` CLI on this machine. Uses its own login — no key — and is the only kind whose agents can read and change files.',
-  anthropic: 'The Anthropic API, via a key in an environment variable. Text only.',
-  openai:
-    'Anything speaking the OpenAI chat shape: OpenAI, Ollama, LM Studio, vLLM, OpenRouter. Text only.',
+const KIND_NOTE: Record<ProviderKind, Key> = {
+  'claude-code': 'providers.note.claudeCode',
+  anthropic: 'providers.note.anthropic',
+  openai: 'providers.note.openai',
 };
 
 /**
@@ -26,6 +25,7 @@ const KIND_NOTE: Record<ProviderKind, string> = {
  * model on localhost without being rewritten.
  */
 export function ProvidersPage() {
+  const { t } = useLanguage();
   const [adding, setAdding] = useState(false);
   const [editing, setEditing] = useState<ProviderStatus | null>(null);
   const queryClient = useQueryClient();
@@ -48,16 +48,15 @@ export function ProvidersPage() {
   return (
     <>
       <div className="page-head">
-        <h1>Providers</h1>
+        <h1>{t('providers.title')}</h1>
         <div className="spacer" />
         <button className="primary" onClick={() => setAdding(true)}>
-          Add provider
+          {t('providers.add')}
         </button>
       </div>
 
       <Alert kind="info">
-        An agent declares how hard its job is — low, medium, high, max. Each provider maps
-        those levels onto real models, so a workflow moves between providers unchanged.
+        {t('providers.intro')}
       </Alert>
 
       {status.isError && <Alert kind="error">{errorMessage(status.error)}</Alert>}
@@ -87,11 +86,11 @@ export function ProvidersPage() {
 
             {status.data?.default !== provider.id && (
               <button className="ghost" onClick={() => makeDefault.mutate(provider.id)}>
-                Make default
+                {t('providers.makeDefault')}
               </button>
             )}
             <button className="ghost" onClick={() => setEditing(provider)}>
-              Edit
+              {t('common.edit')}
             </button>
             <button
               className="ghost danger"
@@ -99,7 +98,7 @@ export function ProvidersPage() {
                 if (confirm(`Remove provider "${provider.label}"?`)) remove.mutate(provider.id);
               }}
             >
-              Remove
+              {t('common.remove')}
             </button>
           </div>
         ))}
@@ -123,6 +122,7 @@ function modelAt(models: ModelMap, level: Struggle): string | undefined {
 }
 
 function AddProviderDialog({ onClose }: { onClose: () => void }) {
+  const { t } = useLanguage();
   const [preset, setPreset] = useState('');
   const [label, setLabel] = useState('');
   const [kind, setKind] = useState<ProviderKind>('openai');
@@ -163,17 +163,17 @@ function AddProviderDialog({ onClose }: { onClose: () => void }) {
 
   return (
     <Dialog
-      title="Add a provider"
+      title={t('providers.addTitle')}
       onClose={onClose}
       footer={
         <>
-          <button onClick={onClose}>Cancel</button>
+          <button onClick={onClose}>{t('common.cancel')}</button>
           <button
             className="primary"
             disabled={!label.trim() || create.isPending}
             onClick={() => create.mutate()}
           >
-            Add
+            {t('common.add')}
           </button>
         </>
       }
@@ -181,9 +181,9 @@ function AddProviderDialog({ onClose }: { onClose: () => void }) {
       <Alert kind="error">{error}</Alert>
 
       <label>
-        <span className="lab">Start from</span>
+        <span className="lab">{t('providers.startFrom')}</span>
         <select value={preset} onChange={(event) => choose(event.target.value)}>
-          <option value="">Nothing — configure it by hand</option>
+          <option value="">{t('providers.startFromNothing')}</option>
           {(presets.data?.presets ?? []).map((entry) => (
             <option key={entry.id} value={entry.id}>
               {entry.label}
@@ -220,6 +220,7 @@ function EditProviderDialog({
   provider: ProviderStatus;
   onClose: () => void;
 }) {
+  const { t } = useLanguage();
   const [label, setLabel] = useState(provider.label);
   const [kind, setKind] = useState<ProviderKind>(provider.kind);
   const [baseUrl, setBaseUrl] = useState(provider.baseUrl ?? '');
@@ -254,9 +255,9 @@ function EditProviderDialog({
       onClose={onClose}
       footer={
         <>
-          <button onClick={onClose}>Cancel</button>
+          <button onClick={onClose}>{t('common.cancel')}</button>
           <button className="primary" onClick={() => save.mutate()} disabled={save.isPending}>
-            Save
+            {t('common.save')}
           </button>
         </>
       }
@@ -304,6 +305,7 @@ function ProviderFields({
   setModels: (value: Partial<Record<Struggle, string>>) => void;
   providerId?: string;
 }) {
+  const { t } = useLanguage();
   // What the endpoint actually serves, so a local setup does not need guesswork.
   const available = useQuery({
     queryKey: ['provider-models', providerId],
@@ -316,11 +318,11 @@ function ProviderFields({
     <>
       <div className="field-row">
         <label>
-          <span className="lab">Name</span>
+          <span className="lab">{t('providers.name')}</span>
           <input value={label} onChange={(event) => setLabel(event.target.value)} />
         </label>
         <label>
-          <span className="lab">Kind</span>
+          <span className="lab">{t('providers.kind')}</span>
           <select value={kind} onChange={(event) => setKind(event.target.value as ProviderKind)}>
             <option value="claude-code">claude-code</option>
             <option value="anthropic">anthropic</option>
@@ -329,38 +331,35 @@ function ProviderFields({
         </label>
       </div>
       <div className="hint" style={{ marginTop: -8, marginBottom: 14 }}>
-        {KIND_NOTE[kind]}
+        {t(KIND_NOTE[kind])}
       </div>
 
       {kind === 'openai' && (
         <label>
-          <span className="lab">Base URL</span>
+          <span className="lab">{t('providers.baseUrl')}</span>
           <input
             value={baseUrl}
             onChange={(event) => setBaseUrl(event.target.value)}
             placeholder="http://localhost:11434/v1"
           />
-          <span className="hint">Include the version path. Ollama uses /v1 too.</span>
+          <span className="hint">{t('providers.baseUrlHint')}</span>
         </label>
       )}
 
       {kind !== 'claude-code' && (
         <label>
-          <span className="lab">API key environment variable</span>
+          <span className="lab">{t('providers.keyVariable')}</span>
           <input
             value={apiKeyEnv}
             onChange={(event) => setApiKeyEnv(event.target.value)}
             placeholder="OPENAI_API_KEY"
           />
-          <span className="hint">
-            The name of the variable, never the key. Leave blank for local endpoints that need
-            none. The server process reads it, so set it before launching.
-          </span>
+          <span className="hint">{t('providers.keyVariableHint')}</span>
         </label>
       )}
 
       <div className="lab" style={{ marginBottom: 6 }}>
-        Model for each struggle level
+        {t('providers.modelPerLevel')}
       </div>
       {STRUGGLE_LEVELS.map((level) => (
         <label key={level} style={{ marginBottom: 8 }}>

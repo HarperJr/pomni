@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { api, type Repo, type Run, type RunStatus } from './api';
 import { Alert, Dialog, errorMessage } from './components';
+import { useLanguage } from './i18n';
 
 const ACTIVE: RunStatus[] = ['queued', 'running'];
 
@@ -127,6 +128,7 @@ export function RunList({ projectId, limit = 12 }: { projectId: string; limit?: 
 
 /** One run, with its log streamed from the server. */
 export function RunPage() {
+  const { t } = useLanguage();
   const { projectId = '', runId = '' } = useParams();
   const [log, setLog] = useState('');
   const [live, setLive] = useState(true);
@@ -173,7 +175,7 @@ export function RunPage() {
   }, [log, live]);
 
   if (run.isError) return <Alert kind="error">{errorMessage(run.error)}</Alert>;
-  if (!run.data) return <div className="dim">Loading…</div>;
+  if (!run.data) return <div className="dim">{t('common.loading')}</div>;
 
   const { run: record, testResults } = run.data;
   const failures = testResults.filter((result) => result.status === 'failed');
@@ -217,7 +219,10 @@ export function RunPage() {
 
       {failures.length > 0 && (
         <div className="card">
-          <div className="card-head">Failed tests<span className="dim" style={{ fontWeight: 400 }}>{failures.length}</span></div>
+          <div className="card-head">
+            {t('checks.failedTests')}
+            <span className="dim" style={{ fontWeight: 400 }}>{failures.length}</span>
+          </div>
           {failures.slice(0, 25).map((failure, index) => (
             <div className="row" key={`${failure.suite}-${failure.name}-${index}`}>
               <div className="grow">
@@ -246,6 +251,7 @@ export function RunPage() {
 
 /** Project-level gate button; shows the result inline. */
 export function VerifyButton({ projectId }: { projectId: string }) {
+  const { t } = useLanguage();
   const [open, setOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const queryClient = useQueryClient();
@@ -261,16 +267,16 @@ export function VerifyButton({ projectId }: { projectId: string }) {
 
   return (
     <>
-      <button onClick={() => setOpen(true)}>Verify</button>
+      <button onClick={() => setOpen(true)}>{t('checks.verify')}</button>
       {open && (
         <Dialog
-          title="Run the gate"
+          title={t('checks.runTheGate')}
           onClose={() => setOpen(false)}
           footer={
             <>
-              <button onClick={() => setOpen(false)}>Cancel</button>
+              <button onClick={() => setOpen(false)}>{t('common.cancel')}</button>
               <button className="primary" onClick={() => verify.mutate('default')} disabled={verify.isPending}>
-                Run default gate
+                {t('checks.runDefaultGate')}
               </button>
             </>
           }
@@ -281,7 +287,7 @@ export function VerifyButton({ projectId }: { projectId: string }) {
             It stops at the first failing capability — a red typecheck makes the test result moot.
           </p>
           <button onClick={() => verify.mutate('land')} disabled={verify.isPending}>
-            Run land gate instead
+            {t('checks.runLandGate')}
           </button>
         </Dialog>
       )}
@@ -291,6 +297,7 @@ export function VerifyButton({ projectId }: { projectId: string }) {
 
 /** Read-only doctor report. */
 export function DoctorPanel({ projectId }: { projectId: string }) {
+  const { t } = useLanguage();
   const [open, setOpen] = useState(false);
   const report = useQuery({
     queryKey: ['doctor', projectId],
@@ -300,14 +307,14 @@ export function DoctorPanel({ projectId }: { projectId: string }) {
 
   return (
     <>
-      <button onClick={() => setOpen(true)}>Doctor</button>
+      <button onClick={() => setOpen(true)}>{t('checks.doctor')}</button>
       {open && (
         <Dialog
-          title="Doctor"
+          title={t('checks.doctor')}
           onClose={() => setOpen(false)}
-          footer={<button onClick={() => setOpen(false)}>Close</button>}
+          footer={<button onClick={() => setOpen(false)}>{t('common.close')}</button>}
         >
-          {report.isLoading && <div className="dim">Checking…</div>}
+          {report.isLoading && <div className="dim">{t('checks.checking')}</div>}
           {report.isError && <Alert kind="error">{errorMessage(report.error)}</Alert>}
           {(report.data?.repos ?? []).map((repo) => (
             <div key={repo.repoId} style={{ marginBottom: 16 }}>
