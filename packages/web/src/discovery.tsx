@@ -2,19 +2,20 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
 import { api, type AssetKind, type DiscoveredAsset } from './api';
 import { Alert, Dialog, errorMessage } from './components';
+import { useLanguage, type Key } from './i18n';
 
-const KIND_LABEL: Record<AssetKind, string> = {
-  agent: 'Agents',
-  skill: 'Skills',
-  command: 'Commands',
-  rules: 'House rules',
+const KIND_LABEL: Record<AssetKind, Key> = {
+  agent: 'discovery.kind.agent',
+  skill: 'discovery.kind.skill',
+  command: 'discovery.kind.command',
+  rules: 'discovery.kind.rules',
 };
 
-const KIND_HINT: Record<AssetKind, string> = {
-  agent: 'Subagent definitions already checked into the repo. Import one and its own text becomes the prompt.',
-  skill: 'Packaged instructions the repo already carries. Useful context when writing an agent that works there.',
-  command: 'Slash commands defined in the repo.',
-  rules: "The repo's own CLAUDE.md or AGENTS.md — the house style an agent working there should follow.",
+const KIND_HINT: Record<AssetKind, Key> = {
+  agent: 'discovery.hint.agent',
+  skill: 'discovery.hint.skill',
+  command: 'discovery.hint.command',
+  rules: 'discovery.hint.rules',
 };
 
 const ORDER: AssetKind[] = ['agent', 'skill', 'command', 'rules'];
@@ -26,6 +27,7 @@ const ORDER: AssetKind[] = ['agent', 'skill', 'command', 'rules'];
  * same descriptions inside Pomni would be busywork, so import instead.
  */
 export function DiscoveryPanel({ projectId }: { projectId: string }) {
+  const { t } = useLanguage();
   const [open, setOpen] = useState(false);
   const [viewing, setViewing] = useState<DiscoveredAsset | null>(null);
   const [importing, setImporting] = useState<DiscoveredAsset | null>(null);
@@ -44,23 +46,22 @@ export function DiscoveryPanel({ projectId }: { projectId: string }) {
   return (
     <div className="card">
       <div className="card-head">
-        In the repos
+        {t('discovery.title')}
         <span className="dim" style={{ fontWeight: 400 }}>
           {report.data ? report.data.assets.length : ''}
         </span>
         <div className="spacer" />
         <button onClick={() => setOpen((value) => !value)}>
-          {open ? 'Hide' : 'Scan'}
+          {t(open ? 'discovery.hide' : 'discovery.scan')}
         </button>
       </div>
 
       {!open ? (
         <div className="empty">
-          Scan the project's repos for agent definitions, skills, commands and house rules that
-          are already checked in.
+          {t('discovery.idle')}
         </div>
       ) : report.isLoading ? (
-        <div className="empty">Scanning…</div>
+        <div className="empty">{t('discovery.scanning')}</div>
       ) : report.isError ? (
         <div className="row">
           <Alert kind="error">{errorMessage(report.error)}</Alert>
@@ -119,6 +120,7 @@ function AssetGroup({
   onView: (asset: DiscoveredAsset) => void;
   onImport: (asset: DiscoveredAsset) => void;
 }) {
+  const { t } = useLanguage();
   // A repo can carry a hundred agents; showing them all makes the page unusable.
   const [expanded, setExpanded] = useState(false);
   const shown = expanded ? assets : assets.slice(0, 8);
@@ -126,10 +128,10 @@ function AssetGroup({
   return (
     <>
       <div className="row" style={{ paddingTop: 10, paddingBottom: 6 }}>
-        <strong>{KIND_LABEL[kind]}</strong>
+        <strong>{t(KIND_LABEL[kind])}</strong>
         <span className="dim">{assets.length}</span>
         <span className="dim grow" style={{ fontSize: 12 }}>
-          {KIND_HINT[kind]}
+          {t(KIND_HINT[kind])}
         </span>
       </div>
 
@@ -157,7 +159,7 @@ function AssetGroup({
       {assets.length > shown.length && (
         <div className="row" style={{ paddingLeft: 32 }}>
           <button className="ghost" onClick={() => setExpanded(true)}>
-            Show {assets.length - shown.length} more
+            {t('discovery.showMore', { n: assets.length - shown.length })}
           </button>
         </div>
       )}
@@ -166,11 +168,12 @@ function AssetGroup({
 }
 
 function AssetViewer({ asset, onClose }: { asset: DiscoveredAsset; onClose: () => void }) {
+  const { t } = useLanguage();
   return (
     <Dialog
       title={asset.name}
       onClose={onClose}
-      footer={<button onClick={onClose}>Close</button>}
+      footer={<button onClick={onClose}>{t('common.close')}</button>}
     >
       <div className="detect-box" style={{ marginBottom: 14 }}>
         <div className="mono">
@@ -199,6 +202,7 @@ function ImportAgentDialog({
   asset: DiscoveredAsset;
   onClose: () => void;
 }) {
+  const { t } = useLanguage();
   const [workflowId, setWorkflowId] = useState('');
   const [error, setError] = useState<string | null>(null);
   const queryClient = useQueryClient();
@@ -220,36 +224,33 @@ function ImportAgentDialog({
 
   return (
     <Dialog
-      title={`Import ${asset.name}`}
+      title={t('discovery.import', { name: asset.name })}
       onClose={onClose}
       footer={
         <>
-          <button onClick={onClose}>Cancel</button>
+          <button onClick={onClose}>{t('common.cancel')}</button>
           <button
             className="primary"
             disabled={!workflowId || run.isPending}
             onClick={() => run.mutate()}
           >
-            Import
+            {t('discovery.importGo')}
           </button>
         </>
       }
     >
       <Alert kind="error">{error}</Alert>
       <label>
-        <span className="lab">Into which workflow</span>
+        <span className="lab">{t('discovery.intoWorkflow')}</span>
         <select value={workflowId} onChange={(event) => setWorkflowId(event.target.value)}>
-          <option value="">Choose…</option>
+          <option value="">{t('discovery.choose')}</option>
           {(workflows.data ?? []).map((workflow) => (
             <option key={workflow.id} value={workflow.id}>
               {workflow.name}
             </option>
           ))}
         </select>
-        <span className="hint">
-          The definition's own text becomes the agent's prompt, and its description becomes the
-          spec — so you can regenerate later without losing what it was for.
-        </span>
+        <span className="hint">{t('discovery.importHint')}</span>
       </label>
     </Dialog>
   );

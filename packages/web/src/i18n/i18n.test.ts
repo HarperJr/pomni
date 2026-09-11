@@ -53,7 +53,8 @@ describe('the dictionaries', () => {
     // Product vocabulary stays as it is on purpose — `merge request`, `worktree`, `Pomni` —
     // so this only asks that a Russian phrase is not character-for-character the English one
     // unless it is one of those, which is what an untranslated string looks like.
-    const sameOnPurpose = new Set<string>(['run.artifacts.mr']);
+    // Product names and borrowed terms are the same sentence in both languages on purpose.
+    const sameOnPurpose = new Set<string>(['run.artifacts.mr', 'tools.namePlaceholder']);
     const identical = keys.filter(
       (key) => !sameOnPurpose.has(key) && ru[key] === en[key] && /[a-z]{4}/i.test(en[key]),
     );

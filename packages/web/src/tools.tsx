@@ -9,10 +9,11 @@ import {
   type ToolStatus,
 } from './api';
 import { Alert, Dialog, errorMessage } from './components';
+import { useLanguage, type Key } from './i18n';
 
-const KIND_NOTE: Record<ToolKind, string> = {
-  cli: 'A program on this machine. The agent runs it through its shell, and may run only this one binary.',
-  mcp: 'An MCP server. Its tools appear in the session directly, named mcp__<id>__*.',
+const KIND_NOTE: Record<ToolKind, Key> = {
+  cli: 'tools.note.cli',
+  mcp: 'tools.note.mcp',
 };
 
 /**
@@ -24,6 +25,7 @@ const KIND_NOTE: Record<ToolKind, string> = {
  * anyone is visible as such rather than looking configured.
  */
 export function ToolsPage() {
+  const { t } = useLanguage();
   const [adding, setAdding] = useState(false);
   const [editing, setEditing] = useState<ToolStatus | null>(null);
   const [checks, setChecks] = useState<Record<string, ToolCheckResult>>({});
@@ -64,17 +66,17 @@ export function ToolsPage() {
   return (
     <>
       <div className="page-head">
-        <h1>Tools</h1>
+        <h1>{t('tools.title')}</h1>
         <div className="spacer" />
         <button
           className="ghost"
           onClick={() => check.mutate(undefined)}
           disabled={check.isPending || list.length === 0}
         >
-          {check.isPending ? 'Checking…' : 'Check all'}
+          {check.isPending ? t('checks.checking') : t('tools.checkAll')}
         </button>
         <button className="primary" onClick={() => setAdding(true)}>
-          Add tool
+          {t('tools.add')}
         </button>
       </div>
 
@@ -90,8 +92,7 @@ export function ToolsPage() {
       {list.length === 0 && !tools.isLoading ? (
         <div className="card">
           <div className="row dim">
-            Nothing registered yet. A tool is an MCP server or a command-line program — the
-            Figma MCP, or a CLI an agent should be allowed to run.
+            {t('tools.empty')}
           </div>
         </div>
       ) : (
@@ -143,7 +144,7 @@ export function ToolsPage() {
                     );
                   })}
                   {!tool.usage && (
-                    <span className="tag warn" title="Agents are told the tool exists but not how to drive it">
+                    <span className="tag warn" title={t('tools.undocumented')}>
                       no usage written
                     </span>
                   )}
@@ -151,10 +152,10 @@ export function ToolsPage() {
               </div>
 
               <button className="ghost" onClick={() => check.mutate([tool.id])}>
-                Check
+                {t('tools.check')}
               </button>
               <button className="ghost" onClick={() => setEditing(tool)}>
-                Edit
+                {t('common.edit')}
               </button>
               <button
                 className="ghost danger"
@@ -164,7 +165,7 @@ export function ToolsPage() {
                   }
                 }}
               >
-                Remove
+                {t('common.remove')}
               </button>
             </div>
           ))}
@@ -185,6 +186,7 @@ export function ToolsPage() {
  * and letting most of them be wrong.
  */
 function ToolDialog({ tool, onClose }: { tool?: ToolStatus; onClose: () => void }) {
+  const { t } = useLanguage();
   const [name, setName] = useState(tool?.name ?? '');
   const [kind, setKind] = useState<ToolKind>(tool?.kind ?? 'cli');
   const [description, setDescription] = useState(tool?.description ?? '');
@@ -231,17 +233,17 @@ function ToolDialog({ tool, onClose }: { tool?: ToolStatus; onClose: () => void 
 
   return (
     <Dialog
-      title={tool ? `Edit ${tool.name}` : 'Add a tool'}
+      title={tool ? t('tools.editTitle', { name: tool.name }) : t('tools.addTitle')}
       onClose={onClose}
       footer={
         <>
-          <button onClick={onClose}>Cancel</button>
+          <button onClick={onClose}>{t('common.cancel')}</button>
           <button
             className="primary"
             onClick={() => save.mutate()}
             disabled={!name.trim() || save.isPending}
           >
-            {tool ? 'Save' : 'Add'}
+            {t(tool ? 'common.save' : 'common.add')}
           </button>
         </>
       }
@@ -250,33 +252,33 @@ function ToolDialog({ tool, onClose }: { tool?: ToolStatus; onClose: () => void 
 
       <div className="field-row">
         <label>
-          <span className="lab">Name</span>
+          <span className="lab">{t('tools.name')}</span>
           <input
             value={name}
             onChange={(event) => setName(event.target.value)}
-            placeholder="Figma CLI"
+            placeholder={t('tools.namePlaceholder')}
             autoFocus
           />
         </label>
         <label>
-          <span className="lab">Kind</span>
+          <span className="lab">{t('tools.kind')}</span>
           <select
             value={kind}
             onChange={(event) => setKind(event.target.value as ToolKind)}
             disabled={Boolean(tool)}
           >
-            <option value="cli">Command-line program</option>
-            <option value="mcp">MCP server</option>
+            <option value="cli">{t('tools.kindCli')}</option>
+            <option value="mcp">{t('tools.kindMcp')}</option>
           </select>
         </label>
       </div>
       <span className="hint" style={{ display: 'block', marginTop: -8, marginBottom: 14 }}>
-        {KIND_NOTE[kind]}
+        {t(KIND_NOTE[kind])}
       </span>
 
       {kind === 'cli' ? (
         <label>
-          <span className="lab">Binary</span>
+          <span className="lab">{t('tools.binary')}</span>
           <input
             value={bin}
             onChange={(event) => setBin(event.target.value)}
@@ -289,7 +291,7 @@ function ToolDialog({ tool, onClose }: { tool?: ToolStatus; onClose: () => void 
       ) : (
         <>
           <label>
-            <span className="lab">Transport</span>
+            <span className="lab">{t('tools.transport')}</span>
             <select
               value={transport}
               onChange={(event) => setTransport(event.target.value as McpTransport)}
@@ -303,7 +305,7 @@ function ToolDialog({ tool, onClose }: { tool?: ToolStatus; onClose: () => void 
           {transport === 'stdio' ? (
             <div className="field-row">
               <label>
-                <span className="lab">Command</span>
+                <span className="lab">{t('tools.command')}</span>
                 <input
                   value={command}
                   onChange={(event) => setCommand(event.target.value)}
@@ -311,7 +313,7 @@ function ToolDialog({ tool, onClose }: { tool?: ToolStatus; onClose: () => void 
                 />
               </label>
               <label>
-                <span className="lab">Arguments</span>
+                <span className="lab">{t('tools.arguments')}</span>
                 <input
                   value={args}
                   onChange={(event) => setArgs(event.target.value)}
@@ -321,7 +323,7 @@ function ToolDialog({ tool, onClose }: { tool?: ToolStatus; onClose: () => void 
             </div>
           ) : (
             <label>
-              <span className="lab">URL</span>
+              <span className="lab">{t('tools.url')}</span>
               <input
                 value={url}
                 onChange={(event) => setUrl(event.target.value)}
@@ -333,42 +335,37 @@ function ToolDialog({ tool, onClose }: { tool?: ToolStatus; onClose: () => void 
       )}
 
       <label>
-        <span className="lab">What it is for</span>
+        <span className="lab">{t('tools.purpose')}</span>
         <input
           value={description}
           onChange={(event) => setDescription(event.target.value)}
-          placeholder="Drives Figma Desktop: variables, components, layout."
+          placeholder={t('tools.purposePlaceholder')}
         />
       </label>
 
       <label>
-        <span className="lab">How to drive it</span>
+        <span className="lab">{t('tools.usage')}</span>
         <textarea
           rows={8}
           value={usage}
           onChange={(event) => setUsage(event.target.value)}
-          placeholder={
-            'Always start with `figma-cli status`…\n\nThe commands worth knowing, and the order a task uses them.'
-          }
+          placeholder={t('tools.usagePlaceholder')}
         />
-        <span className="hint">
-          Goes into the prompt of every agent granted this tool. An agent allowed to run a
-          program but never told how will not use it well — this is the part worth writing.
-        </span>
+        <span className="hint">{t('tools.usageHint')}</span>
       </label>
 
       <div className="field-row">
         <label>
-          <span className="lab">Credential</span>
+          <span className="lab">{t('tools.credential')}</span>
           <select value={credential} onChange={(event) => setCredential(event.target.value)}>
-            <option value="">None</option>
+            <option value="">{t('tools.credentialNone')}</option>
             {(credentials.data ?? []).map((entry) => (
               <option key={entry.id} value={entry.id}>
                 {entry.name}
               </option>
             ))}
           </select>
-          <span className="hint">The token stays where it lives; only its id is stored here.</span>
+          <span className="hint">{t('tools.credentialHint')}</span>
         </label>
         <label>
           <span className="lab">…goes in</span>
@@ -380,22 +377,20 @@ function ToolDialog({ tool, onClose }: { tool?: ToolStatus; onClose: () => void 
           />
           <span className="hint">
             {transport === 'stdio' || kind === 'cli'
-              ? 'An environment variable on the process.'
-              : 'A request header.'}
+              ? t('tools.asEnvVar')
+              : t('tools.asHeader')}
           </span>
         </label>
       </div>
 
       <label>
-        <span className="lab">Check command</span>
+        <span className="lab">{t('tools.checkCommand')}</span>
         <input
           value={check}
           onChange={(event) => setCheck(event.target.value)}
           placeholder="figma-cli status"
         />
-        <span className="hint">
-          Run by Check. Exit zero means working — the last line of its output is shown.
-        </span>
+        <span className="hint">{t('tools.checkHint')}</span>
       </label>
     </Dialog>
   );

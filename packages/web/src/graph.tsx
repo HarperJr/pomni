@@ -1,4 +1,5 @@
 import type { Agent, WorkflowDetail } from './api';
+import { useLanguage } from './i18n';
 
 const NODE_W = 156;
 const NODE_H = 54;
@@ -102,9 +103,10 @@ export function WorkflowGraph({
   workflow: WorkflowDetail;
   onSelect?: (agentId: string) => void;
 }) {
+  const { t } = useLanguage();
   const { nodes, width, height } = layout(workflow);
   if (nodes.length === 0) {
-    return <div className="empty">Add an orchestrator and the graph appears here.</div>;
+    return <div className="empty">{t('graph.empty')}</div>;
   }
 
   const edges = nodes.flatMap((node) =>

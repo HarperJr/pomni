@@ -70,6 +70,124 @@ export const en = {
   'block.workflows': 'Workflows',
   'block.discovery': 'Discovery',
 
+  // -- adding a repo --------------------------------------------------------
+  'addRepo.title': 'Add a repo',
+  'addRepo.adding': 'Adding…',
+  'addRepo.cloneAndAdd': 'Clone and add',
+  'addRepo.fromGit': 'Clone from git',
+  'addRepo.fromLocal': 'Link a local folder',
+  'addRepo.urlHint':
+    'Cloned into the project workspace. Use an https url to authenticate with a token.',
+  'addRepo.forgeAuto': 'Detect automatically',
+  'addRepo.forgeHint':
+    'Detected from the hostname, and for a self-hosted forge by asking the server. Set it explicitly if the guess is wrong — it decides the username a token is sent with.',
+  'addRepo.folder': 'Folder',
+  'addRepo.linkedInPlace': 'Linked in place — Pomni never moves or copies your code.',
+  'addRepo.hideBrowser': 'hide browser',
+  'addRepo.browse': 'browse…',
+  'addRepo.noCommands': 'no commands found',
+  'addRepo.namePlaceholder': 'derived from the source',
+  'addRepo.noSecret': ' — no secret',
+
+  // -- the graph ------------------------------------------------------------
+  'graph.empty': 'Add an orchestrator and the graph appears here.',
+
+  // -- a capability run -----------------------------------------------------
+  'checks.failedTests': 'Failed tests',
+  'checks.verify': 'Verify',
+  'checks.runTheGate': 'Run the gate',
+  'checks.runDefaultGate': 'Run default gate',
+  'checks.runLandGate': 'Run land gate instead',
+  'checks.doctor': 'Doctor',
+  'checks.checking': 'Checking…',
+
+  // -- what the repos already contain ---------------------------------------
+  'discovery.title': 'In the repos',
+  'discovery.scan': 'Scan',
+  'discovery.hide': 'Hide',
+  'discovery.scanning': 'Scanning…',
+  'discovery.idle':
+    "Scan the project's repos for agent definitions, skills, commands and house rules that are already checked in.",
+  'discovery.showMore': 'Show {n} more',
+  'discovery.import': 'Import {name}',
+  'discovery.importGo': 'Import',
+  'discovery.intoWorkflow': 'Into which workflow',
+  'discovery.choose': 'Choose…',
+  'discovery.importHint':
+    "The definition's own text becomes the agent's prompt, and its description becomes the spec — so you can regenerate later without losing what it was for.",
+  'discovery.kind.agent': 'Agents',
+  'discovery.kind.skill': 'Skills',
+  'discovery.kind.command': 'Commands',
+  'discovery.kind.rules': 'House rules',
+  'discovery.hint.agent':
+    'Subagent definitions already checked into the repo. Import one and its own text becomes the prompt.',
+  'discovery.hint.skill':
+    'Packaged instructions the repo already carries. Useful context when writing an agent that works there.',
+  'discovery.hint.command': 'Slash commands defined in the repo.',
+  'discovery.hint.rules':
+    "The repo's own CLAUDE.md or AGENTS.md — the house style an agent working there should follow.",
+
+  // -- providers ------------------------------------------------------------
+  'providers.title': 'Providers',
+  'providers.add': 'Add provider',
+  'providers.addTitle': 'Add a provider',
+  'providers.intro':
+    'An agent declares how hard its job is — low, medium, high, max. Each provider maps those levels onto real models, so a workflow moves between providers unchanged.',
+  'providers.makeDefault': 'Make default',
+  'providers.startFrom': 'Start from',
+  'providers.startFromNothing': 'Nothing — configure it by hand',
+  'providers.name': 'Name',
+  'providers.kind': 'Kind',
+  'providers.baseUrl': 'Base URL',
+  'providers.baseUrlHint': 'Include the version path. Ollama uses /v1 too.',
+  'providers.keyVariable': 'API key environment variable',
+  'providers.keyVariableHint':
+    'The name of the variable, never the key. Leave blank for local endpoints that need none. The server process reads it, so set it before launching.',
+  'providers.modelPerLevel': 'Model for each struggle level',
+  'providers.note.claudeCode':
+    'The `claude` CLI on this machine. Uses its own login — no key — and is the only kind whose agents can read and change files.',
+  'providers.note.anthropic': 'The Anthropic API, via a key in an environment variable. Text only.',
+  'providers.note.openai':
+    'Anything speaking the OpenAI chat shape: OpenAI, Ollama, LM Studio, vLLM, OpenRouter. Text only.',
+
+  // -- tools ----------------------------------------------------------------
+  'tools.title': 'Tools',
+  'tools.checkAll': 'Check all',
+  'tools.add': 'Add tool',
+  'tools.addTitle': 'Add a tool',
+  'tools.editTitle': 'Edit {name}',
+  'tools.empty':
+    'Nothing registered yet. A tool is an MCP server or a command-line program — the Figma MCP, or a CLI an agent should be allowed to run.',
+  'tools.check': 'Check',
+  'tools.undocumented': 'Agents are told the tool exists but not how to drive it',
+  'tools.name': 'Name',
+  'tools.namePlaceholder': 'Figma CLI',
+  'tools.kind': 'Kind',
+  'tools.kindCli': 'Command-line program',
+  'tools.kindMcp': 'MCP server',
+  'tools.binary': 'Binary',
+  'tools.transport': 'Transport',
+  'tools.command': 'Command',
+  'tools.arguments': 'Arguments',
+  'tools.url': 'URL',
+  'tools.purpose': 'What it is for',
+  'tools.purposePlaceholder': 'Drives Figma Desktop: variables, components, layout.',
+  'tools.usage': 'How to drive it',
+  'tools.usagePlaceholder':
+    'Always start with `figma-cli status`…\n\nThe commands worth knowing, and the order a task uses them.',
+  'tools.usageHint':
+    'Goes into the prompt of every agent granted this tool. An agent allowed to run a program but never told how will not use it well — this is the part worth writing.',
+  'tools.credential': 'Credential',
+  'tools.credentialNone': 'None',
+  'tools.credentialHint': 'The token stays where it lives; only its id is stored here.',
+  'tools.asEnvVar': 'An environment variable on the process.',
+  'tools.asHeader': 'A request header.',
+  'tools.checkCommand': 'Check command',
+  'tools.checkHint': 'Run by Check. Exit zero means working — the last line of its output is shown.',
+  'tools.note.cli':
+    'A program on this machine. The agent runs it through its shell, and may run only this one binary.',
+  'tools.note.mcp': 'An MCP server. Its tools appear in the session directly, named mcp__<id>__*.',
+
   // -- repos ----------------------------------------------------------------
   'repo.sync': 'Sync',
   'repo.syncing': 'Syncing…',

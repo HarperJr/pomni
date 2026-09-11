@@ -2,10 +2,12 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useState } from 'react';
 import { api, REPO_ROLES, type BrowseResult, type RepoRole } from './api';
 import { Alert, Dialog, errorMessage } from './components';
+import { useLanguage } from './i18n';
 
 type Tab = 'local' | 'git';
 
 export function AddRepoDialog({ projectId, onClose }: { projectId: string; onClose: () => void }) {
+  const { t } = useLanguage();
   const [tab, setTab] = useState<Tab>('git');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -60,25 +62,25 @@ export function AddRepoDialog({ projectId, onClose }: { projectId: string; onClo
 
   return (
     <Dialog
-      title="Add a repo"
+      title={t('addRepo.title')}
       onClose={onClose}
       footer={
         <>
           <button onClick={onClose} disabled={busy}>
-            Cancel
+            {t('common.cancel')}
           </button>
           <button className="primary" onClick={submit} disabled={!canSubmit || busy}>
-            {busy ? 'Adding…' : tab === 'git' ? 'Clone and add' : 'Add'}
+            {busy ? t('addRepo.adding') : t(tab === 'git' ? 'addRepo.cloneAndAdd' : 'common.add')}
           </button>
         </>
       }
     >
       <div className="tabs">
         <button className={tab === 'git' ? 'active' : ''} onClick={() => setTab('git')}>
-          Clone from git
+          {t('addRepo.fromGit')}
         </button>
         <button className={tab === 'local' ? 'active' : ''} onClick={() => setTab('local')}>
-          Link a local folder
+          {t('addRepo.fromLocal')}
         </button>
       </div>
 
@@ -87,34 +89,32 @@ export function AddRepoDialog({ projectId, onClose }: { projectId: string; onClo
       {tab === 'git' ? (
         <>
           <label>
-            <span className="lab">Repository URL</span>
+            <span className="lab">{t('repo.url')}</span>
             <input
               value={url}
               onChange={(event) => setUrl(event.target.value)}
               placeholder="https://github.com/owner/repo.git"
               autoFocus
             />
-            <span className="hint">
-              Cloned into the project workspace. Use an https url to authenticate with a token.
-            </span>
+            <span className="hint">{t('addRepo.urlHint')}</span>
           </label>
 
           <div className="field-row">
             <label>
-              <span className="lab">Branch or tag</span>
+              <span className="lab">{t('repo.branch')}</span>
               <input
                 value={ref}
                 onChange={(event) => setRef(event.target.value)}
-                placeholder="default branch"
+                placeholder={t('repo.branchPlaceholder')}
               />
             </label>
             <label>
-              <span className="lab">Credential</span>
+              <span className="lab">{t('repo.credential')}</span>
               <select value={credential} onChange={(event) => setCredential(event.target.value)}>
-                <option value="">Match by host / public repo</option>
+                <option value="">{t('repo.credentialAuto')}</option>
                 {(credentials.data ?? []).map((item) => (
                   <option key={item.id} value={item.id} disabled={!item.hasSecret}>
-                    {item.id} ({item.host}){item.hasSecret ? '' : ' — no secret'}
+                    {item.id} ({item.host}){item.hasSecret ? '' : t('addRepo.noSecret')}
                   </option>
                 ))}
               </select>
@@ -122,22 +122,18 @@ export function AddRepoDialog({ projectId, onClose }: { projectId: string; onClo
           </div>
 
           <label>
-            <span className="lab">Forge</span>
+            <span className="lab">{t('repo.forge')}</span>
             <select
               value={provider}
               onChange={(event) => setProvider(event.target.value as typeof provider)}
             >
-              <option value="">Detect automatically</option>
+              <option value="">{t('addRepo.forgeAuto')}</option>
               <option value="github">GitHub</option>
               <option value="gitlab">GitLab</option>
               <option value="bitbucket">Bitbucket</option>
-              <option value="generic">Other</option>
+              <option value="generic">{t('repo.forgeOther')}</option>
             </select>
-            <span className="hint">
-              Detected from the hostname, and for a self-hosted forge by asking the server.
-              Set it explicitly if the guess is wrong — it decides the username a token is
-              sent with.
-            </span>
+            <span className="hint">{t('addRepo.forgeHint')}</span>
           </label>
         </>
       ) : (
@@ -146,15 +142,15 @@ export function AddRepoDialog({ projectId, onClose }: { projectId: string; onClo
 
       <div className="field-row">
         <label>
-          <span className="lab">Display name</span>
+          <span className="lab">{t('repo.displayName')}</span>
           <input
             value={name}
             onChange={(event) => setName(event.target.value)}
-            placeholder="derived from the source"
+            placeholder={t('addRepo.namePlaceholder')}
           />
         </label>
         <label>
-          <span className="lab">Role</span>
+          <span className="lab">{t('repo.role')}</span>
           <select value={role} onChange={(event) => setRole(event.target.value as RepoRole)}>
             {REPO_ROLES.map((option) => (
               <option key={option} value={option}>
@@ -169,6 +165,7 @@ export function AddRepoDialog({ projectId, onClose }: { projectId: string; onClo
 }
 
 function LocalPathField({ path, onChange }: { path: string; onChange: (value: string) => void }) {
+  const { t } = useLanguage();
   const [browsing, setBrowsing] = useState(false);
 
   const detection = useQuery({
@@ -181,7 +178,7 @@ function LocalPathField({ path, onChange }: { path: string; onChange: (value: st
   return (
     <>
       <label>
-        <span className="lab">Folder</span>
+        <span className="lab">{t('addRepo.folder')}</span>
         <input
           value={path}
           onChange={(event) => onChange(event.target.value)}
@@ -189,13 +186,13 @@ function LocalPathField({ path, onChange }: { path: string; onChange: (value: st
           autoFocus
         />
         <span className="hint">
-          Linked in place — Pomni never moves or copies your code.{' '}
+          {t('addRepo.linkedInPlace')}{' '}
           <button
             className="ghost"
             style={{ padding: '0 4px', textDecoration: 'underline' }}
             onClick={() => setBrowsing((value) => !value)}
           >
-            {browsing ? 'hide browser' : 'browse…'}
+            {t(browsing ? 'addRepo.hideBrowser' : 'addRepo.browse')}
           </button>
         </span>
       </label>
@@ -207,7 +204,8 @@ function LocalPathField({ path, onChange }: { path: string; onChange: (value: st
           <strong>{detection.data.detection.adapter}</strong>{' '}
           <span className="dim">{detection.data.detection.detected.join(', ')}</span>
           <div className="dim" style={{ marginTop: 4 }}>
-            {Object.keys(detection.data.detection.capabilities).sort().join(' · ') || 'no commands found'}
+            {Object.keys(detection.data.detection.capabilities).sort().join(' · ') ||
+              t('addRepo.noCommands')}
           </div>
         </div>
       )}
