@@ -16,6 +16,7 @@ import {
 } from './api';
 import { Alert, Dialog, errorMessage } from './components';
 import { Markdown } from './markdown';
+import { useLanguage } from './i18n';
 
 const ACTIVE: StepStatus[] = ['pending', 'running'];
 
@@ -34,11 +35,17 @@ function dotClass(step: PipelineStep): string {
   return `outcome-${step.outcome}`;
 }
 
-const OUTCOME_NOTE: Record<string, string> = {
-  partial: 'did some of it',
-  blocked: 'could not do it',
-  unknown: 'did not say whether it worked',
-};
+/**
+ * What a step's outcome means, in words, keyed for the dictionary.
+ *
+ * The outcome itself is data and stays as the data spells it; this is the sentence beside it,
+ * which is interface and is translated.
+ */
+const OUTCOME_NOTE = {
+  partial: 'console.outcome.partial',
+  blocked: 'console.outcome.blocked',
+  unknown: 'console.outcome.unknown',
+} as const;
 
 const RECENT_FINISHED = 5;
 const PAGE_SIZE = 30;
@@ -46,6 +53,7 @@ const MAX_LIMIT = 200;
 
 /** Start a run, and see the ones that already happened. */
 export function PipelinePanel({ projectId }: { projectId: string }) {
+  const { t } = useLanguage();
   const [starting, setStarting] = useState(false);
   const [limit, setLimit] = useState(PAGE_SIZE);
   const queryClient = useQueryClient();
@@ -103,16 +111,16 @@ export function PipelinePanel({ projectId }: { projectId: string }) {
   return (
     <div className="card">
       <div className="card-head">
-        Agent runs
+        {t('runs.title')}
         <span className="dim" style={{ fontWeight: 400 }}>{allRuns.length}</span>
         <div className="spacer" />
         <button
           className="primary"
           disabled={runnable.length === 0}
           onClick={() => setStarting(true)}
-          title={runnable.length === 0 ? 'no attached workflow is ready to run' : undefined}
+          title={runnable.length === 0 ? t('runs.startDisabled') : undefined}
         >
-          Run a task
+          {t('runs.start')}
         </button>
       </div>
 
@@ -120,13 +128,11 @@ export function PipelinePanel({ projectId }: { projectId: string }) {
 
       {allRuns.length === 0 ? (
         <div className="empty">
-          {runnable.length === 0
-            ? 'Attach a workflow whose agents all have prompts, then a task can be run through it.'
-            : 'Nothing has run yet. Give the pipeline a task and watch it work.'}
+          {t(runnable.length === 0 ? 'runs.emptyNoWorkflow' : 'runs.emptyNoRuns')}
         </div>
       ) : (
         <>
-          {live.length > 0 && <div className="section-head">Running</div>}
+          {live.length > 0 && <div className="section-head">{t('runs.running')}</div>}
           {live.map((run) => (
             <div className="run-entry" key={run.id}>
               <RunRow
@@ -140,7 +146,9 @@ export function PipelinePanel({ projectId }: { projectId: string }) {
             </div>
           ))}
 
-          {live.length > 0 && finished.length > 0 && <div className="section-head">Recent</div>}
+          {live.length > 0 && finished.length > 0 && (
+            <div className="section-head">{t('runs.recent')}</div>
+          )}
 
           {visibleFinished.map((run) => (
             <div className="run-entry" key={run.id}>
@@ -159,7 +167,7 @@ export function PipelinePanel({ projectId }: { projectId: string }) {
               className="ghost show-all"
               onClick={() => setLimit((current) => Math.min(current + PAGE_SIZE, MAX_LIMIT))}
             >
-              Show all
+              {t('common.showAll')}
             </button>
           )}
 
@@ -170,11 +178,11 @@ export function PipelinePanel({ projectId }: { projectId: string }) {
                   className="ghost show-all"
                   onClick={() => setLimit((current) => Math.min(current + PAGE_SIZE, MAX_LIMIT))}
                 >
-                  Show all
+                  {t('common.showAll')}
                 </button>
               )}
               <button className="ghost show-all" onClick={() => setLimit(PAGE_SIZE)}>
-                Show less
+                {t('runs.showLess')}
               </button>
             </div>
           )}
@@ -204,13 +212,14 @@ export function PipelinePanel({ projectId }: { projectId: string }) {
  * directory you can walk into, and the other is a commit you can open a merge request for.
  */
 function Where({ run, live }: { run: PipelineRun; live?: string }) {
+  const { t } = useLanguage();
   const where = workLocation(run, live);
   if (where.kind === 'unknown') return null;
 
   if (where.kind === 'repo') {
     return (
-      <span className="dim mono truncate" title="no worktree could be cut; the run used the repo directory itself">
-        in repo
+      <span className="dim mono truncate" title={t('run.branch.inRepoWhy')}>
+        {t('run.branch.inRepo')}
       </span>
     );
   }
@@ -218,7 +227,7 @@ function Where({ run, live }: { run: PipelineRun; live?: string }) {
   return (
     <span
       className="dim mono truncate"
-      title={where.live ? 'the worktree this run is working in' : 'the branch this run delivered on'}
+      title={where.live ? t('run.branch.live') : t('run.branch.delivered')}
     >
       {where.branch}
       {where.live ? ' · live' : ''}
@@ -240,6 +249,8 @@ function RunRow({
   onRerun: (runId: string) => void;
   rerunPending: boolean;
 }) {
+  const { t } = useLanguage();
+
   return (
     <>
       <Link className="row" to={`/p/${projectId}/console/${run.id}`}>
@@ -261,9 +272,9 @@ function RunRow({
           className="ghost rerun"
           disabled={rerunPending}
           onClick={() => onRerun(run.id)}
-          title="Run it again, telling the agents how this attempt ended"
+          title={t('runs.rerunTitle')}
         >
-          Run again
+          {t('runs.runAgain')}
         </button>
       )}
     </>
@@ -279,6 +290,7 @@ function RunRow({
  */
 function LiveFlow({ runId }: { runId: string }) {
   const queryClient = useQueryClient();
+  const { t } = useLanguage();
   const scroller = useRef<HTMLDivElement | null>(null);
 
   const run = useQuery({
@@ -324,7 +336,7 @@ function LiveFlow({ runId }: { runId: string }) {
   }, [working]);
 
   if (steps.length === 0 && asking.length === 0) {
-    return <div className="flow dim">Waiting for the orchestrator to plan the work...</div>;
+    return <div className="flow dim">{t('runs.planning')}</div>;
   }
 
   return (
@@ -346,14 +358,14 @@ function LiveFlow({ runId }: { runId: string }) {
         )}
         <div className="spacer" />
         <span className="dim mono">
-          {done} of {steps.length} done
+          {t('runs.doneOf', { done, total: steps.length })}
         </span>
       </div>
 
       {/* Collapsed by default and independent per run: the summary above is the answer to
           "what is happening now", this is the answer to "show me everything", asked less often. */}
       <details className="flow-tree">
-        <summary className="dim">Show the delegation tree</summary>
+        <summary className="dim">{t('runs.tree')}</summary>
         <div className="flow-steps" ref={scroller}>
           {steps.map((step) => (
             <div
@@ -383,6 +395,7 @@ function StartRunDialog({
   workflows: WorkflowDetail[];
   onClose: () => void;
 }) {
+  const { t } = useLanguage();
   const [source, setSource] = useState<'item' | 'text'>('item');
   const [itemId, setItemId] = useState('');
   const [task, setTask] = useState('');
@@ -435,17 +448,17 @@ function StartRunDialog({
 
   return (
     <Dialog
-      title="Run a task"
+      title={t('start.title')}
       onClose={onClose}
       footer={
         <>
-          <button onClick={onClose}>Cancel</button>
+          <button onClick={onClose}>{t('common.cancel')}</button>
           <button
             className="primary"
             disabled={(source === 'item' ? !itemId : !task.trim()) || start.isPending}
             onClick={() => start.mutate()}
           >
-            Start
+            {t('start.go')}
           </button>
         </>
       }
@@ -454,44 +467,37 @@ function StartRunDialog({
 
       <div className="tabs">
         <button className={source === 'item' ? 'active' : ''} onClick={() => setSource('item')}>
-          From the backlog
+          {t('start.fromBacklog')}
         </button>
         <button className={source === 'text' ? 'active' : ''} onClick={() => setSource('text')}>
-          Describe it
+          {t('start.describe')}
         </button>
       </div>
 
       {source === 'item' ? (
         <label>
-          <span className="lab">Item</span>
+          <span className="lab">{t('start.item')}</span>
           <select value={itemId} onChange={(event) => setItemId(event.target.value)}>
-            <option value="">Choose an item…</option>
+            <option value="">{t('start.chooseItem')}</option>
             {(items.data ?? []).map((item) => (
               <option key={item.id} value={item.id}>
                 {item.id} · {item.priority} · {item.title}
               </option>
             ))}
           </select>
-          <span className="hint">
-            Its problem and acceptance criteria become the task. The item moves to{' '}
-            <strong>in progress</strong> when the run starts, and to <strong>in review</strong>{' '}
-            if the gate passes afterwards.
-          </span>
+          <span className="hint">{t('start.itemHint')}</span>
         </label>
       ) : (
         <label>
-          <span className="lab">Task</span>
+          <span className="lab">{t('start.task')}</span>
           <textarea
             rows={5}
             value={task}
             onChange={(event) => setTask(event.target.value)}
-            placeholder="Users cannot reset their password when their email has changed. Work out what we should build."
+            placeholder={t('start.taskPlaceholder')}
             autoFocus
           />
-          <span className="hint">
-            Written for the orchestrator, which decides who to involve. Give it the problem,
-            not the plan.
-          </span>
+          <span className="hint">{t('start.taskHint')}</span>
         </label>
       )}
 
@@ -501,22 +507,20 @@ function StartRunDialog({
         </pre>
       )}
       <label>
-        <span className="lab">Workflow</span>
+        <span className="lab">{t('start.workflow')}</span>
         <select value={workflowId} onChange={(event) => setWorkflowId(event.target.value)}>
-          <option value="">Choose from the task</option>
+          <option value="">{t('start.workflowAuto')}</option>
           {workflows.map((workflow) => (
             <option key={workflow.id} value={workflow.id}>
               {workflow.name}
             </option>
           ))}
         </select>
-        <span className="hint">
-          Left automatic, the workflow whose hints match the task wins.
-        </span>
+        <span className="hint">{t('start.workflowHint')}</span>
       </label>
 
       <label>
-        <span className="lab">Context files</span>
+        <span className="lab">{t('start.context')}</span>
         <input
           type="file"
           multiple
@@ -532,7 +536,7 @@ function StartRunDialog({
                 <span className="mono">{file.name}</span>
                 <span className="dim">{kb(file.content)}</span>
                 <button
-                  aria-label={`Remove ${file.name}`}
+                  aria-label={t('start.removeFile', { name: file.name })}
                   onClick={() => setContext(context.filter((_, at) => at !== index))}
                 >
                   ×
@@ -541,10 +545,7 @@ function StartRunDialog({
             ))}
           </div>
         )}
-        <span className="hint">
-          Text files — a spec, a log, a schema. Every agent in the workflow is given them, so
-          attach what the work needs and not the whole repo.
-        </span>
+        <span className="hint">{t('start.contextHint')}</span>
       </label>
     </Dialog>
   );
@@ -576,6 +577,7 @@ interface LogLine {
  */
 export function ConsolePage() {
   const { projectId = '', runId = '' } = useParams();
+  const { t } = useLanguage();
   const [log, setLog] = useState<LogLine[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
   const [follow, setFollow] = useState(true);
@@ -689,7 +691,7 @@ export function ConsolePage() {
         <RunBadge status={data.status} />
         {data.status === 'running' ? (
           <button className="danger" onClick={() => cancel.mutate()} disabled={cancel.isPending}>
-            Stop
+            {t('console.stop')}
           </button>
         ) : (
           <>
@@ -697,18 +699,18 @@ export function ConsolePage() {
               <button
                 onClick={() => resume.mutate()}
                 disabled={resume.isPending}
-                title="Carry on from what it already did, in the same worktree. Finished steps are not paid for twice."
+                title={t('console.resumeTitle')}
               >
-                {resume.isPending ? 'Resuming…' : 'Resume'}
+                {resume.isPending ? t('console.resuming') : t('console.resume')}
               </button>
             )}
             <button
               className="primary"
               onClick={() => rerun.mutate()}
               disabled={rerun.isPending}
-              title="Start again from the task, telling the agents how this attempt ended"
+              title={t('console.runAgainTitle')}
             >
-              {rerun.isPending ? 'Starting…' : 'Run again'}
+              {rerun.isPending ? t('console.starting') : t('runs.runAgain')}
             </button>
           </>
         )}
@@ -737,7 +739,7 @@ export function ConsolePage() {
               className="grow"
               value={note}
               onChange={(event) => setNote(event.target.value)}
-              placeholder="Fixed something yourself? Say what, and Resume will tell the agents."
+              placeholder={t('console.resumeNote')}
               onKeyDown={(event) => {
                 if (event.key === 'Enter' && !resume.isPending) resume.mutate();
               }}
@@ -773,15 +775,15 @@ export function ConsolePage() {
       <div className="console">
         <div className="card console-tree">
           <div className="card-head">
-            Agents
+            {t('console.agents')}
             {selected && (
               <button className="ghost" onClick={() => setSelected(null)}>
-                Show all
+                {t('common.showAll')}
               </button>
             )}
           </div>
           {data.steps.length === 0 ? (
-            <div className="empty">Waiting for the orchestrator…</div>
+            <div className="empty">{t('console.waitingForOrchestrator')}</div>
           ) : (
             data.steps.map((step) => (
               <button
@@ -796,11 +798,11 @@ export function ConsolePage() {
                   {step.role === 'orchestrator' && <span className="tag">orch</span>}
                   {step.status === 'done' && step.outcome !== 'done' && (
                     <span className={`tag outcome-${step.outcome}`}>
-                      {OUTCOME_NOTE[step.outcome]}
+                      {t(OUTCOME_NOTE[step.outcome as keyof typeof OUTCOME_NOTE])}
                     </span>
                   )}
                   {refusedCount(step) > 0 && (
-                    <span className="tag refused" title="The permission layer turned this away">
+                    <span className="tag refused" title={t('console.refused')}>
                       {refusedCount(step)} refused
                     </span>
                   )}
@@ -826,7 +828,7 @@ export function ConsolePage() {
           <div className="card-head">
             {selected
               ? data.steps.find((step) => step.id === selected)?.agentName
-              : 'Transcript'}
+              : t('console.transcript')}
             <div className="spacer" />
             <label className="dim" style={{ margin: 0, display: 'flex', gap: 6, fontSize: 12 }}>
               <input
@@ -842,7 +844,7 @@ export function ConsolePage() {
           <div className="log-body">
             {shown.length === 0 && !selected && (
               <div className="empty">
-                Output appears here as each agent replies. Click an agent to see only its turn.
+                {t('console.transcriptEmpty')}
               </div>
             )}
 
@@ -851,7 +853,7 @@ export function ConsolePage() {
                 className="md-panel"
                 source={
                   data.steps.find((step) => step.id === selected)?.output ??
-                  'This agent has not replied yet.'
+                  t('console.noReplyYet')
                 }
               />
             )}
@@ -896,7 +898,7 @@ export function ConsolePage() {
 
       {(data.result || data.error) && (
         <div className="card">
-          <div className="card-head">{data.error ? 'Failed' : 'Result'}</div>
+          <div className="card-head">{t(data.error ? 'console.failed' : 'console.result')}</div>
           {/* The error is a sentence from the system, not markdown an agent wrote — it keeps
               its exact shape. The result is prose and is read as such. */}
           {data.error ? (
@@ -1085,6 +1087,7 @@ function kindOf(tool: string): string {
 }
 
 function Artifacts({ runId, artifacts }: { runId: string; artifacts: Artifact[] }) {
+  const { t } = useLanguage();
   const files = artifacts.filter((artifact) => artifact.kind === 'file');
   const reports = artifacts.filter((artifact) => artifact.kind === 'report');
   const links = reports.filter((artifact) => artifact.change === 'merge request');
@@ -1094,7 +1097,7 @@ function Artifacts({ runId, artifacts }: { runId: string; artifacts: Artifact[] 
   return (
     <div className="card">
       <div className="card-head">
-        Artifacts
+        {t('run.artifacts')}
         <span className="dim" style={{ fontWeight: 400 }}>{files.length + links.length}</span>
       </div>
 
@@ -1102,11 +1105,11 @@ function Artifacts({ runId, artifacts }: { runId: string; artifacts: Artifact[] 
         <div className="row" key={link.id}>
           <div className="grow">
             <a href={link.path ?? '#'} target="_blank" rel="noreferrer">
-              <strong>Open a merge request</strong>
+              <strong>{t('run.artifacts.openMr')}</strong>
             </a>
-            <div className="dim mono truncate">branch {link.name}</div>
+            <div className="dim mono truncate">{t('run.artifacts.branch', { name: link.name })}</div>
           </div>
-          <span className="tag">merge request</span>
+          <span className="tag">{t('run.artifacts.mr')}</span>
         </div>
       ))}
 
@@ -1137,6 +1140,7 @@ const CHANGE_CLASS: Record<string, string> = {
 
 /** One file row: its path, what happened to it, and its diff once someone asks for it. */
 function FileRow({ runId, file }: { runId: string; file: Artifact }) {
+  const { t } = useLanguage();
   const [open, setOpen] = useState(false);
 
   // `enabled` is the whole reason this is a query per row rather than one for the panel: a
@@ -1158,7 +1162,7 @@ function FileRow({ runId, file }: { runId: string; file: Artifact }) {
 
       {open && (
         <div className="file-diff">
-          {diff.isPending && <div className="dim">reading the diff…</div>}
+          {diff.isPending && <div className="dim">{t('run.diff.reading')}</div>}
           {diff.isError && <div className="dim">{errorMessage(diff.error)}</div>}
           {diff.data && (
             <>
@@ -1184,6 +1188,7 @@ function FileRow({ runId, file }: { runId: string; file: Artifact }) {
  * back with the diff.
  */
 function OpenFile({ runId, file, diff }: { runId: string; file: Artifact; diff: ArtifactDiff }) {
+  const { t } = useLanguage();
   const [problem, setProblem] = useState<string | null>(null);
 
   const open = useMutation({
@@ -1196,7 +1201,7 @@ function OpenFile({ runId, file, diff }: { runId: string; file: Artifact; diff: 
     <div className="open-file">
       {diff.url && (
         <a href={diff.url} target="_blank" rel="noreferrer">
-          Open on the forge
+          {t('run.file.openForge')}
         </a>
       )}
 
@@ -1205,14 +1210,14 @@ function OpenFile({ runId, file, diff }: { runId: string; file: Artifact; diff: 
           className="ghost"
           disabled={open.isPending}
           onClick={() => open.mutate('editor')}
-          title={`opens it with ${diff.editor} on the machine running Pomni`}
+          title={t('run.file.openEditorWhy', { editor: diff.editor })}
           type="button"
         >
-          Open in {diff.editor}
+          {t('run.file.openEditor', { editor: diff.editor })}
         </button>
       ) : (
-        <span className="dim" title="set one with 'pomni editor <command>'">
-          no editor found
+        <span className="dim" title={t('run.file.noEditorWhy')}>
+          {t('run.file.noEditor')}
         </span>
       )}
 
@@ -1222,7 +1227,7 @@ function OpenFile({ runId, file, diff }: { runId: string; file: Artifact; diff: 
         onClick={() => open.mutate('reveal')}
         type="button"
       >
-        Reveal in folder
+        {t('run.file.reveal')}
       </button>
 
       {problem && <span className="dim">{problem}</span>}
@@ -1238,10 +1243,12 @@ function OpenFile({ runId, file, diff }: { runId: string; file: Artifact; diff: 
  * have to be told apart from `-` and `+`, or every diff appears to start by deleting a file.
  */
 function Diff({ diff }: { diff: ArtifactDiff }) {
+  const { t } = useLanguage();
+
   if (!diff.text.trim()) {
     return (
       <div className="dim">
-        nothing changed here{diff.source === 'branch' ? ' on the run’s branch' : ''}
+        {t(diff.source === 'branch' ? 'run.diff.unchangedOnBranch' : 'run.diff.unchanged')}
       </div>
     );
   }
@@ -1256,12 +1263,10 @@ function Diff({ diff }: { diff: ArtifactDiff }) {
         ))}
       </pre>
       {diff.truncated && (
-        <div className="dim">…truncated — this is the first part of a longer diff</div>
+        <div className="dim">{t('run.diff.truncated')}</div>
       )}
       <div className="dim">
-        {diff.source === 'worktree'
-          ? 'uncommitted, in the worktree this run is using'
-          : 'as committed on this run’s branch'}
+        {t(diff.source === 'worktree' ? 'run.diff.fromWorktree' : 'run.diff.fromBranch')}
       </div>
     </>
   );
@@ -1284,6 +1289,7 @@ function diffClass(line: string): string {
  * conversation — there is nothing else to press afterwards.
  */
 export function QuestionBox({ question, runId }: { question: Question; runId: string }) {
+  const { t } = useLanguage();
   const [text, setText] = useState('');
   const [files, setFiles] = useState<ContextFile[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -1331,7 +1337,7 @@ export function QuestionBox({ question, runId }: { question: Question; runId: st
           rows={2}
           value={text}
           onChange={(event) => setText(event.target.value)}
-          placeholder="Your answer — a sentence is usually enough."
+          placeholder={t('console.answerPlaceholder')}
           onKeyDown={(event) => {
             // Enter sends; the box is for a sentence, not an essay.
             if (event.key === 'Enter' && !event.shiftKey && text.trim()) {
@@ -1346,7 +1352,7 @@ export function QuestionBox({ question, runId }: { question: Question; runId: st
           onClick={() => answer.mutate()}
           disabled={(!text.trim() && files.length === 0) || answer.isPending}
         >
-          {answer.isPending ? 'Sending…' : 'Answer'}
+          {answer.isPending ? t('console.sending') : t('console.answer')}
         </button>
       </div>
 

@@ -4,6 +4,7 @@ import { Link } from 'react-router-dom';
 import { api } from './api';
 import { Alert, RUNNING_PIPELINES_KEY, RunningBadge, errorMessage } from './components';
 import { Board } from './board';
+import { useLanguage } from './i18n';
 
 /**
  * What is open, everywhere: every project on the left with its open count, the selected
@@ -12,6 +13,7 @@ import { Board } from './board';
 export function TrackerPage() {
   const [selected, setSelected] = useState<string | null>(null);
   const [showAll, setShowAll] = useState(false);
+  const { t } = useLanguage();
 
   const projects = useQuery({
     queryKey: ['projects'],
@@ -85,7 +87,7 @@ export function TrackerPage() {
   return (
     <>
       <div className="page-head">
-        <h1>Tracker</h1>
+        <h1>{t('tracker.title')}</h1>
         <div className="spacer" />
       </div>
 
@@ -95,7 +97,7 @@ export function TrackerPage() {
         <div className="card tracker-projects">
           {list.length === 0 && !projects.isLoading && !projects.isError ? (
             <div className="row dim">
-              No projects yet. Add one to start tracking its backlog here.
+              {t('projects.empty')}
             </div>
           ) : (
             list.map((project, index) => (
@@ -105,8 +107,10 @@ export function TrackerPage() {
                 onClick={() => setSelected(project.id)}
               >
                 <span className="grow truncate">{project.name}</span>
-                <span className="dim mono tracker-count" title="repos">{project.repoCount}</span>
-                <span className="dim mono tracker-count" title="open items">
+                <span className="dim mono tracker-count" title={t('projects.repoCount')}>
+                  {project.repoCount}
+                </span>
+                <span className="dim mono tracker-count" title={t('projects.openCount')}>
                   {counts[index]?.data?.length ?? '—'}
                 </span>
               </button>
@@ -117,10 +121,10 @@ export function TrackerPage() {
         <div className="tracker-items">
           <div className="row" style={{ border: 'none', padding: '0 0 12px' }}>
             <strong className="grow truncate">
-              {selectedProject ? selectedProject.name : 'Backlog'}
+              {selectedProject ? selectedProject.name : t('tracker.backlog')}
             </strong>
             <button className="ghost" onClick={() => setShowAll((value) => !value)}>
-              {showAll ? 'Only active' : 'Show all'}
+              {showAll ? t('common.onlyActive') : t('common.showAll')}
             </button>
           </div>
 
@@ -128,18 +132,16 @@ export function TrackerPage() {
 
           {!selected ? (
             projects.isLoading ? (
-              <div className="dim">Loading…</div>
+              <div className="dim">{t('common.loading')}</div>
             ) : projects.isError ? null : (
               <div className="card">
-                <div className="empty">Nothing to track until a project exists.</div>
+                <div className="empty">{t('tracker.noProjects')}</div>
               </div>
             )
           ) : itemsData.length === 0 && !items.isLoading && !items.isError ? (
             <div className="card">
               <div className="empty">
-                {showAll
-                  ? 'This project has nothing in its backlog yet.'
-                  : 'This project has nothing open right now.'}
+                {showAll ? t('tracker.emptyAll') : t('tracker.emptyActive')}
               </div>
             </div>
           ) : (

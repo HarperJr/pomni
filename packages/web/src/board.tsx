@@ -11,6 +11,7 @@ import {
 } from './api';
 import { RunningBadge, errorMessage } from './components';
 import { describeUnmet } from './items';
+import { useLanguage } from './i18n';
 
 /**
  * A project's backlog as a board.
@@ -39,6 +40,7 @@ export function Board({
   waitingOn: Map<string, string[]>;
 }) {
   const queryClient = useQueryClient();
+  const { t } = useLanguage();
   const [held, setHeld] = useState<string | null>(null);
   const [refused, setRefused] = useState<{ itemId: string; reason: string } | null>(null);
 
@@ -72,7 +74,9 @@ export function Board({
   });
 
   const movesById = new Map((board.data ?? []).map((entry) => [entry.itemId, entry]));
-  const columns = boardColumns(flow.data?.states ?? [], items);
+  const columns = boardColumns(flow.data?.states ?? [], items, (state) =>
+    t('board.offFlow', { state }),
+  );
 
   return (
     <div className="board">
@@ -136,7 +140,11 @@ export function Board({
  * With no flow configured the states are the built-in ones, because that is what `flowOf`
  * hands back — so the board works before anybody configures anything.
  */
-function boardColumns(states: FlowState[], items: BacklogItem[]): FlowState[] {
+function boardColumns(
+  states: FlowState[],
+  items: BacklogItem[],
+  offFlow: (state: string) => string,
+): FlowState[] {
   const occupied = new Set(items.map((item) => item.status));
   const columns = states.filter((state) => state.board || occupied.has(state.name));
 
@@ -148,7 +156,7 @@ function boardColumns(states: FlowState[], items: BacklogItem[]): FlowState[] {
 
   return [
     ...columns,
-    ...strays.map((name) => ({ name, label: `${name} (off flow)`, board: true, active: true })),
+    ...strays.map((name) => ({ name, label: offFlow(name), board: true, active: true })),
   ];
 }
 
@@ -182,6 +190,7 @@ function Card({
   busy: boolean;
 }) {
   const [menu, setMenu] = useState(false);
+  const { t } = useLanguage();
   const [itemRun] = runs;
   const offers = moves?.transitions ?? [];
 
@@ -202,10 +211,10 @@ function Card({
         <span className="dim mono">{item.id}</span>
         <span className="tag">{item.priority}</span>
         <span className="tag">{item.type}</span>
-        {wave !== undefined && <span className="tag">wave {wave}</span>}
+        {wave !== undefined && <span className="tag">{t('board.wave', { n: wave })}</span>}
         {waitingOn && (
-          <span className="tag warn" title={`waiting on ${waitingOn.join(', ')}`}>
-            waiting
+          <span className="tag warn" title={t('board.waitingOn', { items: waitingOn.join(', ') })}>
+            {t('board.waiting')}
           </span>
         )}
         <RunningBadge runs={runs} />
@@ -219,11 +228,11 @@ function Card({
           same transition call, not a second path with its own rules. */}
       <div className="board-card-moves">
         <button className="ghost" onClick={() => setMenu((was) => !was)} type="button">
-          Move…
+          {t('board.move')}
         </button>
         {menu && (
           <div className="board-menu">
-            {offers.length === 0 && <div className="dim">nowhere from here</div>}
+            {offers.length === 0 && <div className="dim">{t('board.nowhere')}</div>}
             {offers.map((offer) => (
               <button
                 key={offer.to}
@@ -237,7 +246,7 @@ function Card({
                 type="button"
               >
                 {offer.label}
-                {offer.ok ? '' : ' — blocked'}
+                {offer.ok ? '' : ` — ${t('board.blocked')}`}
               </button>
             ))}
           </div>
@@ -255,8 +264,12 @@ function Card({
  * move it could make right now says that instead, because that is the more useful fact.
  */
 function Outstanding({ offers }: { offers: TransitionOffer[] }) {
+  const { t } = useLanguage();
+
   const ready = offers.find((offer) => offer.ok);
-  if (ready) return <div className="hint board-ready">ready for {ready.label}</div>;
+  if (ready) {
+    return <div className="hint board-ready">{t('board.readyFor', { state: ready.label })}</div>;
+  }
 
   const blocked = offers.find((offer) => offer.unmet.length > 0);
   if (!blocked) return null;
