@@ -70,7 +70,7 @@ Metadata is committable; the token is a pointer resolved when git needs it.
 | --- | --- | --- |
 | `pomni cred add <name> --gh` | ✓ | Delegate to the GitHub CLI (`gh auth token`). Nothing stored. |
 | `pomni cred add <name> --env <VAR>` | ✓ | Read from an environment variable. Nothing stored. |
-| `pomni cred add <name> --token <token>` | ✓ | Store in `.pomni/credentials.secret.json` (gitignored, 0600). |
+| `pomni cred add <name> --token <token>` | ✓ | Store in `.pomni/credentials.secret.json` (0600). |
 | ` ` `[--provider] [--host] [--username] [--id]` | ✓ | `--host` is required for `--provider generic`. |
 | `pomni cred list` (`ls`) | ✓ | Id, host, secret source, and whether it currently resolves. |
 | `pomni cred test <id> [--url <url>]` | ✓ | Check the secret resolves; with `--url`, that the remote accepts it. |

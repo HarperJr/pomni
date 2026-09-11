@@ -56,11 +56,23 @@ and you want to query it, it is a row.**
 
 ## 3. On-disk layout
 
+**None of this is versioned by the repository Pomni manages.** `.pomni/` is in that
+repository's `.gitignore` and no file under it is tracked. A repository is the history of a
+codebase; a workspace is what one machine is doing right now — which runs are going, which
+worktrees exist, what a counter is up to. Committing the second into the first makes every
+branch a fork of the project's own bookkeeping, and a `git checkout` then rewrites the backlog
+as file content with no service involved and no event emitted. That happened once, cost three
+item specs and re-issued their ids, and is why this paragraph exists.
+
+What a person is expected to do on a branch switch: nothing. Git does not touch `.pomni/`.
+What a person is expected to do about losing it: back it up. In this repository `.pomni/` is
+itself a git repository, in place, with its own history.
+
 ```
 .pomni/
 ├── config.yaml                       # defaults, server port
-├── credentials.yaml                  # credential METADATA — no secrets, safe to commit
-├── credentials.secret.json           # gitignored, 0600, only for `file` secret refs
+├── credentials.yaml                  # credential METADATA — never the secret itself
+├── credentials.secret.json           # 0600, only for `file` secret refs
 ├── projects/
 │   └── acme-saas/
 │       ├── project.yaml
@@ -69,20 +81,20 @@ and you want to query it, it is a row.**
 │       │   └── api.yaml
 │       └── backlog/
 │           └── ACME-12.md           # frontmatter + prose
-├── workspace/                        # gitignored — cloned working copies
+├── workspace/                        # cloned working copies
 │   └── acme-saas/
 │       ├── web/
 │       └── api/
-├── worktrees/                        # gitignored — one checkout per repo per run
+├── worktrees/                        # one checkout per repo per run
 │   └── acme-saas/
 │       └── web/
 │           └── 01M1RM25VY.../        # named by runId, branch pomni/run/<runId>
-├── runs/                             # gitignored
+├── runs/
 │   └── 01M1RM25VY.../output.log      # one directory per run, named by ULID
-├── sessions/                         # gitignored (M3)
-├── events.ndjson                     # gitignored — cross-process lifecycle stream
-├── .lock/                            # gitignored advisory lock directory
-└── pomni.db                          # gitignored — run history
+├── sessions/                         # (M3)
+├── events.ndjson                     # cross-process lifecycle stream
+├── .lock/                            # advisory lock directory
+└── pomni.db                          # run history
 ```
 
 There is deliberately **no registry file**. The project list is derived by scanning
@@ -190,7 +202,7 @@ the background task checks whether the record still exists before writing anythi
 Metadata is committable; the token is a pointer resolved at use time.
 
 ```yaml
-# credentials.yaml — safe to commit
+# credentials.yaml — metadata only; the secret is never here
 version: 1
 credentials:
   - id: github-personal
@@ -208,7 +220,7 @@ credentials:
 | --- | --- | --- |
 | `env` | an environment variable | nothing |
 | `gh-cli` | the GitHub CLI (`gh auth token`) | nothing |
-| `file` | `.pomni/credentials.secret.json`, mode 0600, gitignored | the token |
+| `file` | `.pomni/credentials.secret.json`, mode 0600 | the token |
 
 Three rules hold everywhere:
 
