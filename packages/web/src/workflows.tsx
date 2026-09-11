@@ -14,8 +14,10 @@ import {
 } from './api';
 import { Alert, Dialog, errorMessage } from './components';
 import { WorkflowGraph } from './graph';
+import { useLanguage } from './i18n';
 
 export function WorkflowsPage() {
+  const { t } = useLanguage();
   const [creating, setCreating] = useState(false);
   const [importing, setImporting] = useState(false);
 
@@ -29,18 +31,17 @@ export function WorkflowsPage() {
   return (
     <>
       <div className="page-head">
-        <h1>Workflows</h1>
+        <h1>{t('workflows.title')}</h1>
         <div className="spacer" />
-        <button onClick={() => setImporting(true)}>Import</button>
+        <button onClick={() => setImporting(true)}>{t('workflows.import')}</button>
         <button className="primary" onClick={() => setCreating(true)}>
-          New workflow
+          {t('workflows.new')}
         </button>
       </div>
 
       {llm.data && !llm.data.configured && (
         <Alert kind="error">
-          No model credentials — {llm.data.auth}. Agents can be authored without them, but
-          generating a prompt or running a pipeline needs them.
+          {t('workflows.noCredentials', { auth: llm.data.auth })}
         </Alert>
       )}
 
@@ -49,8 +50,7 @@ export function WorkflowsPage() {
       {workflows.data?.length === 0 && (
         <div className="card">
           <div className="empty">
-            No pipelines yet. A workflow is one orchestrator that plans and delegates, plus the
-            agents it can call.
+            {t('workflows.empty')}
           </div>
         </div>
       )}
@@ -109,6 +109,7 @@ function projectOf(workflow: WorkflowDetail): string {
 }
 
 function Connections({ workflow, all }: { workflow: WorkflowDetail; all: WorkflowDetail[] }) {
+  const { t } = useLanguage();
   const inbound = inboundOf(workflow, all);
   const out = all.find((candidate) => candidate.id === workflow.handoffTo);
   if (inbound.length === 0 && !out) return null;
@@ -117,12 +118,12 @@ function Connections({ workflow, all }: { workflow: WorkflowDetail; all: Workflo
     <div className="connections dim">
       {inbound.length > 0 && (
         <span>
-          <strong>In</strong> {inbound.map((source) => source.name).join(', ')}
+          <strong>{t('workflows.in')}</strong> {inbound.map((source) => source.name).join(', ')}
         </span>
       )}
       {out && (
         <span>
-          <strong>Out</strong> {out.name}
+          <strong>{t('workflows.out')}</strong> {out.name}
           {projectOf(out)}
         </span>
       )}
@@ -131,6 +132,7 @@ function Connections({ workflow, all }: { workflow: WorkflowDetail; all: Workflo
 }
 
 function NewWorkflowDialog({ onClose }: { onClose: () => void }) {
+  const { t } = useLanguage();
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
   const [suits, setSuits] = useState('');
@@ -154,47 +156,45 @@ function NewWorkflowDialog({ onClose }: { onClose: () => void }) {
 
   return (
     <Dialog
-      title="New workflow"
+      title={t('workflows.newTitle')}
       onClose={onClose}
       footer={
         <>
-          <button onClick={onClose}>Cancel</button>
+          <button onClick={onClose}>{t('common.cancel')}</button>
           <button
             className="primary"
             disabled={!name.trim() || create.isPending}
             onClick={() => create.mutate()}
           >
-            Create
+            {t('projects.create')}
           </button>
         </>
       }
     >
       <Alert kind="error">{error}</Alert>
       <label>
-        <span className="lab">Name</span>
+        <span className="lab">{t('workflows.name')}</span>
         <input value={name} onChange={(event) => setName(event.target.value)} autoFocus />
       </label>
       <label>
-        <span className="lab">What it is for</span>
+        <span className="lab">{t('workflows.purpose')}</span>
         <input value={description} onChange={(event) => setDescription(event.target.value)} />
       </label>
       <label>
-        <span className="lab">Suits</span>
+        <span className="lab">{t('workflows.suits')}</span>
         <input
           value={suits}
           onChange={(event) => setSuits(event.target.value)}
-          placeholder="bug, regression, hotfix"
+          placeholder={t('workflows.suitsPlaceholder')}
         />
-        <span className="hint">
-          Comma-separated hints. When a task does not name a workflow, these are matched
-          against the task text to pick one.
-        </span>
+        <span className="hint">{t('workflows.suitsHint')}</span>
       </label>
     </Dialog>
   );
 }
 
 function ImportDialog({ onClose }: { onClose: () => void }) {
+  const { t } = useLanguage();
   const [content, setContent] = useState('');
   const [error, setError] = useState<string | null>(null);
   const navigate = useNavigate();
@@ -213,24 +213,24 @@ function ImportDialog({ onClose }: { onClose: () => void }) {
 
   return (
     <Dialog
-      title="Import a workflow"
+      title={t('workflows.importTitle')}
       onClose={onClose}
       footer={
         <>
-          <button onClick={onClose}>Cancel</button>
+          <button onClick={onClose}>{t('common.cancel')}</button>
           <button
             className="primary"
             disabled={!content.trim() || run.isPending}
             onClick={() => run.mutate()}
           >
-            Import
+            {t('workflows.import')}
           </button>
         </>
       }
     >
       <Alert kind="error">{error}</Alert>
       <label>
-        <span className="lab">File</span>
+        <span className="lab">{t('workflows.file')}</span>
         <input
           type="file"
           accept=".json,application/json"
@@ -245,7 +245,7 @@ function ImportDialog({ onClose }: { onClose: () => void }) {
         </span>
       </label>
       <label>
-        <span className="lab">Or paste it</span>
+        <span className="lab">{t('workflows.orPaste')}</span>
         <textarea
           rows={8}
           value={content}
@@ -262,6 +262,7 @@ function ImportDialog({ onClose }: { onClose: () => void }) {
 // ---------------------------------------------------------------------------
 
 export function WorkflowPage() {
+  const { t } = useLanguage();
   const { workflowId = '' } = useParams();
   const [adding, setAdding] = useState(false);
   const [editing, setEditing] = useState<string | null>(null);
@@ -295,7 +296,7 @@ export function WorkflowPage() {
   });
 
   if (workflow.isError) return <Alert kind="error">{errorMessage(workflow.error)}</Alert>;
-  if (!workflow.data) return <div className="dim">Loading…</div>;
+  if (!workflow.data) return <div className="dim">{t('common.loading')}</div>;
 
   const data = workflow.data;
   const inbound = inboundOf(data, all.data ?? []);
@@ -313,10 +314,10 @@ export function WorkflowPage() {
         </div>
         <div className="spacer" />
         <a className="button-link" href={`/api/workflows/${workflowId}/export`} download>
-          <button>Export</button>
+          <button>{t('workflows.export')}</button>
         </a>
         <button className="primary" onClick={() => setAdding(true)}>
-          Add agent
+          {t('workflows.addAgent')}
         </button>
         <button
           className="danger"
@@ -324,7 +325,7 @@ export function WorkflowPage() {
             if (confirm(`Delete workflow "${data.name}"?`)) remove.mutate();
           }}
         >
-          Delete
+          {t('workflows.delete')}
         </button>
       </div>
 
@@ -332,7 +333,7 @@ export function WorkflowPage() {
 
       <div className="card">
         <div className="card-head">
-          How it runs
+          {t('workflows.howItRuns')}
           <div className="spacer" />
           <span className="dim" style={{ fontWeight: 400, fontSize: 12 }}>
             the entry orchestrator delegates downwards · click a node to edit it
@@ -345,7 +346,7 @@ export function WorkflowPage() {
 
       <div className="card">
         <div className="card-head">
-          In and Out
+          {t('workflows.inAndOut')}
           <div className="spacer" />
           <span className="dim" style={{ fontWeight: 400, fontSize: 12 }}>
             optional — where work arrives from, and where it goes next
@@ -353,7 +354,7 @@ export function WorkflowPage() {
         </div>
         <div className="row">
           <div className="grow">
-            <span className="lab">In</span>
+            <span className="lab">{t('workflows.in')}</span>
             <div className="dim">
               {inbound.length > 0
                 ? inbound.map((source) => `${source.name}${projectOf(source)}`).join(', ')
@@ -362,12 +363,12 @@ export function WorkflowPage() {
           </div>
           <div className="grow">
             <label style={{ margin: 0 }}>
-              <span className="lab">Out</span>
+              <span className="lab">{t('workflows.out')}</span>
               <select
                 value={data.handoffTo ?? ''}
                 onChange={(event) => handoff.mutate(event.target.value || null)}
               >
-                <option value="">Nothing — this is the end</option>
+                <option value="">{t('workflows.outNothing')}</option>
                 {(all.data ?? [])
                   .filter((candidate) => candidate.id !== data.id)
                   .map((candidate) => (
@@ -377,10 +378,7 @@ export function WorkflowPage() {
                     </option>
                   ))}
               </select>
-              <span className="hint">
-                When this pipeline finishes, its result is what the next one starts from — in
-                its own project, which is usually a different one.
-              </span>
+              <span className="hint">{t('workflows.outHint')}</span>
             </label>
           </div>
         </div>
@@ -388,7 +386,7 @@ export function WorkflowPage() {
 
       {data.problems.length > 0 && (
         <div className="card">
-          <div className="card-head">To fix before this can run</div>
+          <div className="card-head">{t('workflows.toFix')}</div>
           {data.problems.map((problem, index) => (
             <div className="row" key={index}>
               <span className="status-error">!</span>
@@ -399,7 +397,7 @@ export function WorkflowPage() {
       )}
 
       <AgentGroup
-        title="Orchestrator"
+        title={t('workflows.orchestrator')}
         hint="Plans the task, delegates to the agents below, and synthesises what comes back."
         agents={orchestrators}
         workflow={data}
@@ -407,7 +405,7 @@ export function WorkflowPage() {
       />
 
       <AgentGroup
-        title="Agents"
+        title={t('workflows.agents')}
         hint="Each does one job and returns. They do not call each other."
         agents={workers}
         workflow={data}
@@ -440,6 +438,7 @@ function AgentGroup({
   workflow: WorkflowDetail;
   onEdit: (id: string) => void;
 }) {
+  const { t } = useLanguage();
   return (
     <div className="card">
       <div className="card-head">
@@ -464,7 +463,7 @@ function AgentGroup({
               <div className="dim truncate">{firstLine(agent.spec) || 'no spec yet'}</div>
             </div>
             <button className="ghost" onClick={() => onEdit(agent.id)}>
-              Edit
+              {t('common.edit')}
             </button>
           </div>
         ))
@@ -474,6 +473,7 @@ function AgentGroup({
 }
 
 function AddAgentDialog({ workflowId, onClose }: { workflowId: string; onClose: () => void }) {
+  const { t } = useLanguage();
   const [name, setName] = useState('');
   const [role, setRole] = useState<AgentRole>('agent');
   const [error, setError] = useState<string | null>(null);
@@ -490,17 +490,17 @@ function AddAgentDialog({ workflowId, onClose }: { workflowId: string; onClose: 
 
   return (
     <Dialog
-      title="Add an agent"
+      title={t('workflows.addAgentTitle')}
       onClose={onClose}
       footer={
         <>
-          <button onClick={onClose}>Cancel</button>
+          <button onClick={onClose}>{t('common.cancel')}</button>
           <button
             className="primary"
             disabled={!name.trim() || create.isPending}
             onClick={() => create.mutate()}
           >
-            Add
+            {t('common.add')}
           </button>
         </>
       }
@@ -511,7 +511,7 @@ function AddAgentDialog({ workflowId, onClose }: { workflowId: string; onClose: 
         <input value={name} onChange={(event) => setName(event.target.value)} autoFocus />
       </label>
       <label>
-        <span className="lab">Role</span>
+        <span className="lab">{t('workflows.role')}</span>
         <select value={role} onChange={(event) => setRole(event.target.value as AgentRole)}>
           {AGENT_ROLES.map((option: AgentRole) => (
             <option key={option} value={option}>
@@ -540,6 +540,7 @@ function AgentEditor({
   workflow: WorkflowDetail;
   onClose: () => void;
 }) {
+  const { t } = useLanguage();
   const [name, setName] = useState(agent.name);
   const [role, setRole] = useState<AgentRole>(agent.role);
   const [spec, setSpec] = useState(agent.spec);
@@ -651,12 +652,12 @@ function AgentEditor({
               if (confirm(`Remove "${agent.name}" from this workflow?`)) remove.mutate();
             }}
           >
-            Remove
+            {t('common.remove')}
           </button>
           <div className="spacer" style={{ marginRight: 'auto' }} />
-          <button onClick={onClose}>Cancel</button>
+          <button onClick={onClose}>{t('common.cancel')}</button>
           <button className="primary" onClick={() => save.mutate()} disabled={save.isPending}>
-            Save
+            {t('common.save')}
           </button>
         </>
       }
@@ -665,11 +666,11 @@ function AgentEditor({
 
       <div className="field-row">
         <label>
-          <span className="lab">Name</span>
+          <span className="lab">{t('workflows.name')}</span>
           <input value={name} onChange={(event) => setName(event.target.value)} />
         </label>
         <label>
-          <span className="lab">Role</span>
+          <span className="lab">{t('workflows.role')}</span>
           <select value={role} onChange={(event) => setRole(event.target.value as AgentRole)}>
             {AGENT_ROLES.map((option: AgentRole) => (
               <option key={option} value={option}>
@@ -682,7 +683,7 @@ function AgentEditor({
 
       <div className="field-row">
         <label>
-          <span className="lab">Model scale</span>
+          <span className="lab">{t('workflows.modelScale')}</span>
           <select
             value={struggle}
             onChange={(event) => setStruggle(event.target.value as Struggle)}
@@ -695,7 +696,7 @@ function AgentEditor({
           </select>
         </label>
         <label>
-          <span className="lab">Provider</span>
+          <span className="lab">{t('workflows.provider')}</span>
           <select value={provider} onChange={(event) => setProvider(event.target.value)}>
             <option value="">
               Run's provider{runDefault ? ` (${runDefault.label})` : ''}
@@ -720,20 +721,24 @@ function AgentEditor({
           ? (() => {
               const model = resolveModel(selectedProvider, struggle);
               return model
-                ? `On ${selectedProvider.label}, "${struggle}" resolves to ${model}.`
-                : `${selectedProvider.label} has no model configured for any level.`;
+                ? t('workflows.resolvesTo', {
+                    provider: selectedProvider.label,
+                    level: struggle,
+                    model,
+                  })
+                : t('workflows.noModelConfigured', { provider: selectedProvider.label });
             })()
-          : 'Pick a provider to see which model each level resolves to.'}
+          : t('workflows.pickProvider')}
         {needsClaudeCode &&
-          ' This agent reads/writes files, runs commands, or searches the web, so it can only run on a claude-code provider.'}
+          t('workflows.needsClaudeCode')}
       </div>
 
       <label>
-        <span className="lab">What it produces</span>
+        <span className="lab">{t('workflows.produces')}</span>
         <input
           value={outputs}
           onChange={(event) => setOutputs(event.target.value)}
-          placeholder="A unified diff / the cause with file references"
+          placeholder={t('workflows.producesPlaceholder')}
         />
         <span className="hint">
           Shown to the orchestrator when it decides what to delegate here.
@@ -741,16 +746,19 @@ function AgentEditor({
       </label>
 
       <label>
-        <span className="lab">What it may use</span>
+        <span className="lab">{t('workflows.mayUse')}</span>
         <div className="tags" style={{ marginTop: 2 }}>
           <button className={`tag toggle${files ? ' on' : ''}`} onClick={() => setFiles(!files)}>
-            {files ? '✓ ' : '+ '}read and write files
+            {files ? '✓ ' : '+ '}
+            {t('workflows.useFiles')}
           </button>
           <button className={`tag toggle${run ? ' on' : ''}`} onClick={() => setRun(!run)}>
-            {run ? '✓ ' : '+ '}run commands
+            {run ? '✓ ' : '+ '}
+            {t('workflows.useRun')}
           </button>
           <button className={`tag toggle${web ? ' on' : ''}`} onClick={() => setWeb(!web)}>
-            {web ? '✓ ' : '+ '}search the web
+            {web ? '✓ ' : '+ '}
+            {t('workflows.useWeb')}
           </button>
           {(registry.data ?? []).map((tool) => {
             const on = granted.includes(tool.id);
@@ -778,12 +786,12 @@ function AgentEditor({
       </label>
 
       <label>
-        <span className="lab">Spec — what this agent does, in your words</span>
+        <span className="lab">{t('workflows.spec')}</span>
         <textarea
           rows={7}
           value={spec}
           onChange={(event) => setSpec(event.target.value)}
-          placeholder="Given a failing test and a repo, find the cause. Read the test, read the code it exercises, and report the specific line at fault. Do not propose a fix."
+          placeholder={t('workflows.specPlaceholder')}
         />
       </label>
 
@@ -793,7 +801,7 @@ function AgentEditor({
           onClick={() => generate.mutate()}
           disabled={!spec.trim() || generate.isPending}
         >
-          {generate.isPending ? 'Writing the prompt…' : 'Generate prompt'}
+          {generate.isPending ? t('workflows.generating') : t('workflows.generate')}
         </button>
         {stale && !generate.isPending && (
           <span className="status-cloning" style={{ fontSize: 12 }}>
@@ -812,14 +820,14 @@ function AgentEditor({
       </div>
 
       <label>
-        <span className="lab">System prompt — what the model receives</span>
+        <span className="lab">{t('workflows.prompt')}</span>
         <textarea
           ref={promptRef}
           rows={14}
           value={prompt}
           onChange={(event) => setPrompt(event.target.value)}
           className="mono"
-          placeholder="Generated from the spec, or write it yourself."
+          placeholder={t('workflows.promptPlaceholder')}
         />
         <span className="hint">
           Edit it freely — generating again replaces it, but nothing else does.
@@ -864,6 +872,7 @@ function resolveModel(provider: ProviderStatus, struggle: Struggle): string | nu
 
 /** Attached pipelines, shown on the project page. */
 export function ProjectWorkflows({ projectId }: { projectId: string }) {
+  const { t } = useLanguage();
   const queryClient = useQueryClient();
   const [picking, setPicking] = useState(false);
 
@@ -898,10 +907,10 @@ export function ProjectWorkflows({ projectId }: { projectId: string }) {
   return (
     <div className="card">
       <div className="card-head">
-        Workflows
+        {t('workflows.title')}
         <span className="dim" style={{ fontWeight: 400 }}>{attached.data?.length ?? 0}</span>
         <div className="spacer" />
-        <button onClick={() => setPicking(true)}>Attach</button>
+        <button onClick={() => setPicking(true)}>{t('workflows.attach')}</button>
       </div>
 
       {(attached.data ?? []).length === 0 ? (
@@ -925,7 +934,7 @@ export function ProjectWorkflows({ projectId }: { projectId: string }) {
               {workflow.runnable ? 'ready' : 'incomplete'}
             </span>
             <button className="ghost danger" onClick={() => detach.mutate(workflow.id)}>
-              Detach
+              {t('workflows.detach')}
             </button>
           </div>
         ))
@@ -933,12 +942,12 @@ export function ProjectWorkflows({ projectId }: { projectId: string }) {
 
       {picking && (
         <Dialog
-          title="Attach a workflow"
+          title={t('workflows.attachTitle')}
           onClose={() => setPicking(false)}
-          footer={<button onClick={() => setPicking(false)}>Close</button>}
+          footer={<button onClick={() => setPicking(false)}>{t('common.close')}</button>}
         >
           {available.length === 0 ? (
-            <div className="empty">Nothing left to attach.</div>
+            <div className="empty">{t('workflows.nothingToAttach')}</div>
           ) : (
             available.map((workflow) => (
               <div className="row" key={workflow.id}>

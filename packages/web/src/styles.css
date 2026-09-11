@@ -52,8 +52,15 @@ a {
 
 /* -- layout ------------------------------------------------------------- */
 
+/*
+ * Wide, because the things on these screens are wide: a board is one column per state, a run
+ * row carries a branch name and a duration beside its task, and a diff is code. 1100px left
+ * the board scrolling sideways on a screen with room to spare.
+ *
+ * `min()` rather than a plain max-width so the padding is never eaten on a narrow window.
+ */
 .shell {
-  max-width: 1100px;
+  width: min(1560px, 100%);
   margin: 0 auto;
   padding: 0 24px 64px;
 }
@@ -996,15 +1003,23 @@ details.chip .log {
   content: '— ';
 }
 
-/* The retry sits on the run's row, outside the link that wraps the rest of it. */
-.run-entry {
-  position: relative;
+/*
+ * The retry sits beside the run's row, not on top of it.
+ *
+ * It used to be absolutely positioned at the row's top right — which is where the branch name
+ * and the duration are, so it covered both. A flex row gives it its own space and lets the
+ * link take the rest.
+ */
+.run-line {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
 }
 
-.run-entry > .rerun {
-  position: absolute;
-  top: 10px;
-  right: 12px;
+.run-line > .rerun {
+  align-self: center;
+  flex: 0 0 auto;
+  margin-right: 12px;
   padding: 2px 10px;
   font-size: 12px;
 }
@@ -1684,8 +1699,15 @@ button.link:hover { text-decoration: underline; }
   padding-bottom: 6px;
 }
 
+/*
+ * Columns share the width rather than each taking a fixed slice: four states spread out and
+ * eleven stay readable. Only past that does the set scroll sideways, which is the state the
+ * board should reach last rather than first.
+ */
 .board-column {
-  flex: 0 0 260px;
+  flex: 1 1 240px;
+  min-width: 240px;
+  max-width: 340px;
   max-height: 70vh;
   overflow-y: auto;
   background: var(--surface);
@@ -1916,6 +1938,12 @@ button.link:hover { text-decoration: underline; }
 
 /* The language selector, in the top bar. Quiet until you look for it. */
 .language-picker {
+  /* Its own width, not the flex row's: a `select` in a flex container stretches to fill, and
+     in the top bar that meant one dropdown taking the space six nav links share. */
+  flex: 0 0 auto;
+  width: auto;
+  min-width: 0;
+  margin-left: 16px;
   background: none;
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -1928,4 +1956,9 @@ button.link:hover { text-decoration: underline; }
 .language-picker:hover {
   color: var(--text);
   border-color: var(--border-strong);
+}
+
+/* A branch name on a run row is informative and can be long; it takes what is left and no more. */
+.row > .dim.mono.truncate {
+  max-width: 30ch;
 }

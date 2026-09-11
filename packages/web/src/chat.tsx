@@ -11,6 +11,7 @@ import {
 } from './api';
 import { Alert, errorMessage } from './components';
 import { Markdown } from './markdown';
+import { useLanguage } from './i18n';
 
 // ---------------------------------------------------------------------------
 // Conversation list + shell
@@ -24,6 +25,7 @@ export function ChatPage({
   chatId?: string;
   onChoose?: (chatId: string) => void;
 } = {}) {
+  const { t } = useLanguage();
   const params = useParams();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
@@ -57,10 +59,10 @@ export function ChatPage({
   return (
     <>
       <div className="page-head">
-        {routed && <h1>Chat</h1>}
+        {routed && <h1>{t('chat.title')}</h1>}
         <div className="spacer" />
         <button className="primary" onClick={() => choose('')}>
-          New chat
+          {t('chat.new')}
         </button>
       </div>
 
@@ -69,7 +71,7 @@ export function ChatPage({
       <div className="chat-layout">
         <div className="card chat-list">
           {sorted.length === 0 ? (
-            <div className="empty">No conversations yet. Start one to talk to Pomni.</div>
+            <div className="empty">{t('chat.empty')}</div>
           ) : (
             sorted.map((chat) => (
               <div
@@ -78,22 +80,22 @@ export function ChatPage({
               >
                 {routed ? (
                   <Link className="grow truncate" to={`/chat/${chat.id}`}>
-                    {chat.title || 'Untitled chat'}
+                    {chat.title || t('chat.untitled')}
                   </Link>
                 ) : (
                   <button className="grow truncate link" onClick={() => choose(chat.id)}>
-                    {chat.title || 'Untitled chat'}
+                    {chat.title || t('chat.untitled')}
                   </button>
                 )}
                 <button
                   className="ghost danger"
                   onClick={() => {
-                    if (confirm(`Delete chat "${chat.title || 'Untitled chat'}"?`)) {
+                    if (confirm(t('chat.confirmDelete', { title: chat.title || t('chat.untitled') }))) {
                       remove.mutate(chat.id);
                     }
                   }}
                 >
-                  Delete
+                  {t('chat.delete')}
                 </button>
               </div>
             ))
@@ -141,6 +143,7 @@ function ModelPicker({
   model: string;
   onChange: (providerId: string, model: string) => void;
 }) {
+  const { t } = useLanguage();
   const provider = providers.find((entry) => entry.id === providerId);
 
   const live = useQuery({
@@ -164,7 +167,7 @@ function ModelPicker({
           onChange(nextProviderId, nextOptions[0] ?? '');
         }}
       >
-        <option value="">Provider…</option>
+        <option value="">{t('chat.pickProvider')}</option>
         {providers.map((entry) => (
           <option key={entry.id} value={entry.id}>
             {entry.label}
@@ -172,7 +175,7 @@ function ModelPicker({
         ))}
       </select>
       <select value={model} onChange={(event) => onChange(providerId, event.target.value)} disabled={!providerId}>
-        <option value="">Model…</option>
+        <option value="">{t('chat.pickModel')}</option>
         {options.map((entry) => (
           <option key={entry} value={entry}>
             {entry}
@@ -201,6 +204,7 @@ function ChatDraft({
   defaultModel: { providerId: string; model: string } | null;
   onCreated: (id: string) => void;
 }) {
+  const { t } = useLanguage();
   const [providerId, setProviderId] = useState(defaultModel?.providerId ?? '');
   const [model, setModel] = useState(defaultModel?.model ?? '');
   // Whether the header's picker has been touched — while it hasn't, the server's own default is
@@ -232,8 +236,8 @@ function ChatDraft({
     <>
       <div className="card chat-header">
         <div className="grow">
-          <strong>New chat</strong>
-          <div className="dim mono">Say something below to start it.</div>
+          <strong>{t('chat.new')}</strong>
+          <div className="dim mono">{t('chat.startIt')}</div>
         </div>
         {providers.length > 0 && (
           <div className="chat-model-block">
@@ -247,7 +251,7 @@ function ChatDraft({
                 setModel(nextModel);
               }}
             />
-            <span className="chat-hint">Applies to the next turn.</span>
+            <span className="chat-hint">{t('chat.nextTurn')}</span>
           </div>
         )}
       </div>
@@ -264,7 +268,7 @@ function ChatDraft({
             onChange={setText}
             onSubmit={() => providerId && model && create.mutate()}
             disabled={create.isPending || !providerId || !model}
-            placeholder="Message Pomni…"
+            placeholder={t('chat.placeholder')}
             projectId={null}
           />
         )}
@@ -278,6 +282,7 @@ function ChatDraft({
 // ---------------------------------------------------------------------------
 
 function ChatThread({ chatId, providers }: { chatId: string; providers: ProviderStatus[] }) {
+  const { t } = useLanguage();
   const [text, setText] = useState('');
   const [error, setError] = useState<string | null>(null);
   const bottom = useRef<HTMLDivElement | null>(null);
@@ -342,7 +347,7 @@ function ChatThread({ chatId, providers }: { chatId: string; providers: Provider
   }, [chatId, queryClient]);
 
   if (chat.isError) return <Alert kind="error">{errorMessage(chat.error)}</Alert>;
-  if (!chat.data) return <div className="dim">Loading…</div>;
+  if (!chat.data) return <div className="dim">{t('common.loading')}</div>;
 
   const data = chat.data;
   const messages = data.messages;
@@ -373,12 +378,12 @@ function ChatThread({ chatId, providers }: { chatId: string; providers: Provider
               if (providerId && model) setModel.mutate({ providerId, model });
             }}
           />
-          <span className="chat-hint">Applies to the next turn.</span>
+          <span className="chat-hint">{t('chat.nextTurn')}</span>
         </div>
       </div>
 
       <div className="card chat-thread">
-        {messages.length === 0 && <div className="empty">Say something to get started.</div>}
+        {messages.length === 0 && <div className="empty">{t('chat.saySomething')}</div>}
 
         {messages.map((message) => (
           <MessageRow key={message.id} chatId={chatId} message={message} providers={providers} />
@@ -408,7 +413,7 @@ function ChatThread({ chatId, providers }: { chatId: string; providers: Provider
             onChange={setText}
             onSubmit={() => send.mutate(text)}
             disabled={turnPending}
-            placeholder="Message Pomni…"
+            placeholder={t('chat.placeholder')}
             projectId={data.projectId}
           />
         )}
@@ -419,6 +424,7 @@ function ChatThread({ chatId, providers }: { chatId: string; providers: Provider
 
 /** The chat's title, renamed in place — click it, type, Enter or blur to save, Escape to cancel. */
 function ChatTitle({ chatId, title }: { chatId: string; title: string }) {
+  const { t } = useLanguage();
   const queryClient = useQueryClient();
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(title);
@@ -458,13 +464,13 @@ function ChatTitle({ chatId, title }: { chatId: string; title: string }) {
     <button
       type="button"
       className="link chat-title"
-      title="Rename"
+      title={t('chat.rename')}
       onClick={() => {
         setDraft(title);
         setEditing(true);
       }}
     >
-      {title || 'Untitled chat'}
+      {title || t('chat.untitled')}
     </button>
   );
 }
@@ -478,6 +484,8 @@ function MessageRow({
   message: ChatMessage;
   providers: ProviderStatus[];
 }) {
+  const { t } = useLanguage();
+
   if (message.role === 'system') {
     return <div className="chat-system">{message.text}</div>;
   }
@@ -487,7 +495,7 @@ function MessageRow({
   return (
     <div className={`chat-message chat-message-${message.role}`}>
       <div className="chat-message-head">
-        <strong>{message.role === 'user' ? 'You' : 'Assistant'}</strong>
+        <strong>{t(message.role === 'user' ? 'chat.you' : 'chat.assistant')}</strong>
         {message.role === 'assistant' && message.model && (
           <span className="tag">{providerLabel ? `${providerLabel} · ${message.model}` : message.model}</span>
         )}
@@ -530,6 +538,7 @@ function ActionCard({
   messageId: string;
   action: ProposedAction;
 }) {
+  const { t } = useLanguage();
   const queryClient = useQueryClient();
 
   const invalidate = () => queryClient.invalidateQueries({ queryKey: ['chat', chatId] });
@@ -564,14 +573,14 @@ function ActionCard({
             onClick={() => confirm.mutate()}
             disabled={confirm.isPending || reject.isPending}
           >
-            Confirm
+            {t('chat.confirm')}
           </button>
           <button
             className="danger"
             onClick={() => reject.mutate()}
             disabled={confirm.isPending || reject.isPending}
           >
-            Reject
+            {t('chat.reject')}
           </button>
         </div>
       )}
@@ -663,11 +672,6 @@ function time(iso: string): string {
 // note on `describeUnmet` in `items.tsx` for the same constraint elsewhere in this file's
 // neighbourhood), so this pure parser is kept here by hand and must be kept in sync manually.
 // ---------------------------------------------------------------------------
-
-/** The rule, whole, for printing in the composer. Keep it one sentence — that is the point. */
-const ADDRESS_RULE =
-  'Type #project, @agent or /skill at the start of a word — after a space or a new line. ' +
-  '@ may take a workflow/agent form; # and / may not contain a slash; anything inside backticks is left alone.';
 
 type AddressKind = 'project' | 'agent' | 'skill';
 
@@ -979,6 +983,7 @@ function Composer({
   /** The project already in force for this conversation, if any — narrows `@`/`/` before typing. */
   projectId: string | null;
 }) {
+  const { t } = useLanguage();
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const [caret, setCaret] = useState(0);
   const { projects } = useAddressables(null);
@@ -1085,7 +1090,7 @@ function Composer({
           }}
         />
         <button className="primary" onClick={onSubmit} disabled={!value.trim() || disabled}>
-          {disabled ? 'Sending…' : 'Send'}
+          {disabled ? t('chat.sending') : t('chat.send')}
         </button>
       </div>
 
@@ -1106,7 +1111,8 @@ function Composer({
         </div>
       )}
 
-      <div className="chat-hint">{ADDRESS_RULE}</div>
+      {/* The rule, whole. Keep it one sentence — that is the point of printing it here. */}
+      <div className="chat-hint">{t('chat.addressRule')}</div>
       <div className="chat-hint">
         <code>#project</code> sets the context for the rest of this conversation until changed —{' '}
         <code>@agent</code> and <code>/skill</code> apply only to this message.
