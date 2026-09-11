@@ -249,7 +249,7 @@ function RunRow({
   onRerun: (runId: string) => void;
   rerunPending: boolean;
 }) {
-  const { t } = useLanguage();
+  const { t, duration } = useLanguage();
 
   return (
     <>
@@ -290,7 +290,7 @@ function RunRow({
  */
 function LiveFlow({ runId }: { runId: string }) {
   const queryClient = useQueryClient();
-  const { t } = useLanguage();
+  const { t, duration } = useLanguage();
   const scroller = useRef<HTMLDivElement | null>(null);
 
   const run = useQuery({
@@ -577,7 +577,7 @@ interface LogLine {
  */
 export function ConsolePage() {
   const { projectId = '', runId = '' } = useParams();
-  const { t } = useLanguage();
+  const { t, duration } = useLanguage();
   const [log, setLog] = useState<LogLine[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
   const [follow, setFollow] = useState(true);
@@ -981,9 +981,15 @@ function refusedCount(step: PipelineStep): number {
   return step.actions.filter((action) => action.outcome === 'refused').length;
 }
 
-/** Tokens, in the shape a person reads: 1 234 567. */
-function tokens(value: number): string {
-  return value.toLocaleString('en-US').replace(/,/g, ' ');
+/**
+ * Tokens, grouped the way the reader's language groups numbers.
+ *
+ * It used to force `1 234 567` in every language, which is the Russian shape; English readers
+ * expect `1,234,567`, and `Intl` knows both. Taken from the translator rather than a constant
+ * so it follows the chosen language rather than the one this was written in.
+ */
+function useTokens(): (value: number) => string {
+  return useLanguage().number;
 }
 
 /** Tokens, compact: 1.2M, 847k — for a row that already has too much on it. */
@@ -1001,6 +1007,8 @@ function compactTokens(value: number): string {
  * recorded before that split existed; hovering shows the full figures rather than a guess.
  */
 function StepSpend({ step }: { step: PipelineStep }) {
+  const { t } = useLanguage();
+  const tokens = useTokens();
   const totalTokens = step.inputTokens + step.outputTokens;
   if (totalTokens === 0) return null;
 
@@ -1012,13 +1020,15 @@ function StepSpend({ step }: { step: PipelineStep }) {
   const cacheShare =
     step.cacheReadTokens === 0 && step.freshInputTokens === 0
       ? step.inputTokens > 0
-        ? 'cache: unknown'
+        ? t('spend.cacheUnknown')
         : null
-      : `cache: ${Math.round((step.cacheReadTokens / step.inputTokens) * 100)}%`;
+      : t('spend.cacheShare', {
+          percent: Math.round((step.cacheReadTokens / step.inputTokens) * 100),
+        });
 
   const title = [
-    `input: ${tokens(step.inputTokens)}`,
-    `output: ${tokens(step.outputTokens)}`,
+    t('spend.input', { n: tokens(step.inputTokens) }),
+    t('spend.output', { n: tokens(step.outputTokens) }),
     cacheShare,
   ]
     .filter(Boolean)
@@ -1038,6 +1048,8 @@ function StepSpend({ step }: { step: PipelineStep }) {
  * of the column matters more than any single number.
  */
 function Spend({ runs }: { runs: PipelineRun[] }) {
+  const { t, date } = useLanguage();
+  const tokens = useTokens();
   const recent = runs.filter((run) => run.inputTokens + run.outputTokens > 0).slice(0, 10);
   if (recent.length === 0) return null;
 
@@ -1048,14 +1060,16 @@ function Spend({ runs }: { runs: PipelineRun[] }) {
   return (
     <details className="spend">
       <summary>
-        <strong>{tokens(total)}</strong> tokens over {recent.length} runs
+        {t('spend.tokensOver', { tokens: tokens(total), runs: recent.length })}
         {cost > 0 && <span className="dim"> · ${cost.toFixed(2)}</span>}
       </summary>
       {[...recent].reverse().map((run) => {
         const spent = run.inputTokens + run.outputTokens;
         return (
           <div className="spend-row" key={run.id}>
-            <span className="dim mono spend-when">{run.startedAt.slice(5, 16).replace('T', ' ')}</span>
+            <span className="dim mono spend-when">
+              {date(run.startedAt, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
+            </span>
             <span className="spend-bar" style={{ width: `${Math.max(2, (spent / peak) * 100)}%` }} />
             <span className="dim mono spend-n">{tokens(spent)}</span>
             <span className="dim truncate grow">{firstLine(run.task)}</span>
@@ -1415,9 +1429,3 @@ function RunBadge({ status }: { status: string }) {
   );
 }
 
-function duration(ms: number | null): string {
-  if (ms === null) return '';
-  if (ms < 1000) return `${ms}ms`;
-  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
-  return `${Math.floor(ms / 60_000)}m ${Math.round((ms % 60_000) / 1000)}s`;
-}
