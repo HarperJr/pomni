@@ -52,6 +52,57 @@ export const en = {
   'projects.repoCount': 'repos',
   'projects.openCount': 'open items',
 
+  // -- the projects screen --------------------------------------------------
+  'projects.create': 'Create',
+  'projects.emptyLong':
+    'No projects yet. A project is a container — create one, then add the repos it is built from.',
+  'projects.noRepos': 'no repos',
+  'projects.name': 'Name',
+  'projects.nameHint': 'The id is derived from the name and never changes.',
+  'projects.description': 'Description',
+  'projects.nRunning': '{n} running|{n} running',
+
+  // -- a project's blocks ---------------------------------------------------
+  'block.repos': 'Repos',
+  'block.backlog': 'Backlog',
+  'block.runs': 'Agent runs',
+  'block.checks': 'Checks',
+  'block.workflows': 'Workflows',
+  'block.discovery': 'Discovery',
+
+  // -- repos ----------------------------------------------------------------
+  'repo.sync': 'Sync',
+  'repo.syncing': 'Syncing…',
+  'repo.removeCloned': 'This deletes the cloned working copy.',
+  'repo.removeLinked': 'Your folder is left untouched.',
+  'repo.displayName': 'Display name',
+  'repo.role': 'Role',
+  'repo.credential': 'Credential',
+  'repo.credentialAuto': 'Match by host / public repo',
+  'repo.branch': 'Branch or tag',
+  'repo.branchPlaceholder': 'default branch',
+  'repo.forge': 'Forge',
+  'repo.forgeOther': 'Other',
+  'repo.url': 'Repository URL',
+
+  // -- credentials ----------------------------------------------------------
+  'credentials.title': 'Credentials',
+  'credentials.empty': 'No credentials. Public repos work without one.',
+  'credentials.add': 'Add credential',
+  'credentials.name': 'Name',
+  'credentials.namePlaceholder': 'GitHub personal',
+  'credentials.provider': 'Provider',
+  'credentials.host': 'Host',
+  'credentials.username': 'Username',
+  'credentials.usernameOptional': 'Username (optional)',
+  'credentials.tokenSource': 'Where the token comes from',
+  'credentials.fromEnv': 'Environment variable — nothing stored',
+  'credentials.fromFile': 'Store in Pomni (gitignored file)',
+  'credentials.forgetHint': 'The token Pomni was storing will be forgotten.',
+  'credentials.variableName': 'Variable name',
+  'credentials.token': 'Token',
+  'credentials.replaceToken': 'Replace token',
+
   // -- tracker --------------------------------------------------------------
   'tracker.title': 'Tracker',
   'tracker.backlog': 'Backlog',

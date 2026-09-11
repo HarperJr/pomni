@@ -14,9 +14,15 @@ import { ru } from './ru';
 
 const keys = Object.keys(en) as Array<keyof typeof en>;
 
-/** `{name}` placeholders in a phrase, sorted, so two languages can be compared. */
+/**
+ * The distinct `{name}` placeholders in a phrase, sorted.
+ *
+ * Distinct rather than every occurrence: a plural key holds two forms in English and three in
+ * Russian, each mentioning `{n}`, and counting occurrences would call that a mismatch. What is
+ * worth catching is a *name* that exists in one language and not the other.
+ */
 function placeholders(text: string): string[] {
-  return [...text.matchAll(/\{(\w+)\}/g)].map((match) => match[1] as string).sort();
+  return [...new Set([...text.matchAll(/\{(\w+)\}/g)].map((match) => match[1] as string))].sort();
 }
 
 describe('the dictionaries', () => {
@@ -52,6 +58,25 @@ describe('the dictionaries', () => {
       (key) => !sameOnPurpose.has(key) && ru[key] === en[key] && /[a-z]{4}/i.test(en[key]),
     );
     expect(identical).toEqual([]);
+  });
+});
+
+describe('plural keys', () => {
+  // A key whose English holds two forms must hold three in Russian, or `plural()` falls back
+  // to the last form and quietly renders the wrong one for every number but 1.
+  const pluralKeys = keys.filter((key) => en[key].includes('|'));
+
+  it('exist, and carry one form per category in each language', () => {
+    expect(pluralKeys.length).toBeGreaterThan(0);
+    for (const key of pluralKeys) {
+      expect(en[key].split('|'), `en forms for ${key}`).toHaveLength(2);
+      expect(ru[key].split('|'), `ru forms for ${key}`).toHaveLength(3);
+    }
+  });
+
+  it('has no Russian plural where English is a single phrase', () => {
+    const mismatched = keys.filter((key) => !en[key].includes('|') && ru[key].includes('|'));
+    expect(mismatched).toEqual([]);
   });
 });
 
