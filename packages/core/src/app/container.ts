@@ -11,6 +11,7 @@ import type {
 import type { CredentialService } from './credential-service.js';
 import type { BacklogService } from './backlog-service.js';
 import type { ChatService } from './chat-service.js';
+import type { CommentService } from './comment-service.js';
 import type { DoctorService } from './doctor-service.js';
 import type { RunService } from './run-service.js';
 import type { DiscoveryService } from './discovery-service.js';
@@ -39,6 +40,8 @@ export interface PomniContainer {
   repos: RepoService;
   credentials: CredentialService;
   backlog: BacklogService;
+  /** Notes on items and runs, written by people and by agents. */
+  comments: CommentService;
   workflows: WorkflowService;
   discovery: DiscoveryService;
   providers: ProviderService;

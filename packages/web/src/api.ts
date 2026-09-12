@@ -396,6 +396,33 @@ export interface WavePlan {
   scopes: Record<string, PathScope>;
 }
 
+/**
+ * A note on an item or a run.
+ *
+ * Mirrors `Comment` in `packages/core/src/domain/comment.ts`. The author is a discriminated
+ * union on purpose: an agent's note must never render as a person's, and a single `author`
+ * string would make that distinction a matter of what the writer typed.
+ */
+export type CommentAuthor =
+  | { kind: 'person'; name: string }
+  | { kind: 'agent'; agentId: string; agentName: string; runId: string };
+
+export interface Comment {
+  id: string;
+  subject: 'item' | 'run';
+  subjectId: string;
+  projectId: string;
+  author: CommentAuthor;
+  text: string;
+  attachments: { name: string; content: string; origin: string }[];
+  addressedTo: string | null;
+  resolvedAt: string | null;
+  resolvedBy: CommentAuthor | null;
+  createdAt: string;
+  deletedAt: string | null;
+  deletedBy: CommentAuthor | null;
+}
+
 export interface BacklogItemDetail extends BacklogItem {
   /**
    * Every move a UI should draw, each with whether it will work and, when it will not, the
@@ -976,6 +1003,28 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
+  listComments: (subject: 'item' | 'run', subjectId: string, includeDeleted = false) =>
+    request<{ comments: Comment[] }>(
+      `/api/comments/${subject}/${encodeURIComponent(subjectId)}?includeDeleted=${includeDeleted}`,
+    ),
+
+  writeComment: (
+    projectId: string,
+    subject: 'item' | 'run',
+    subjectId: string,
+    body: { text: string; author?: string; addressedTo?: string | null },
+  ) =>
+    request<{ comment: Comment }>(
+      `/api/projects/${encodeURIComponent(projectId)}/comments/${subject}/${encodeURIComponent(subjectId)}`,
+      { method: 'POST', body: JSON.stringify(body) },
+    ),
+
+  deleteComment: (commentId: string, author?: string) =>
+    request<{ comment: Comment }>(`/api/comments/${encodeURIComponent(commentId)}`, {
+      method: 'DELETE',
+      body: JSON.stringify({ author }),
+    }),
+
   health: () => request<SystemHealth>('/api/health'),
 
   restartServer: (opts?: { cancelInFlight?: boolean }) =>

@@ -14,6 +14,7 @@ import {
   type StepStatus,
   type WorkflowDetail,
 } from './api';
+import { Comments } from './comments';
 import { Alert, Dialog, errorMessage } from './components';
 import { Markdown } from './markdown';
 import { useLanguage } from './i18n';
@@ -913,6 +914,8 @@ export function ConsolePage() {
           )}
         </div>
       )}
+
+      <Comments projectId={projectId} subject="run" subjectId={data.id} />
     </>
   );
 }

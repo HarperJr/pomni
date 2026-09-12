@@ -1,7 +1,11 @@
 import { spawn } from 'node:child_process';
+import { readFile } from 'node:fs/promises';
+import { basename, resolve as resolvePath } from 'node:path';
 import {
   BOARD_COLUMNS,
   ItemTypeSchema,
+  authorLabel,
+  isDeleted,
   assertWavesDisjoint,
   describeConflict,
   describeUnmetList,
@@ -9,6 +13,8 @@ import {
   layout,
   stateLabel,
   type BacklogItem,
+  type Comment,
+  type CommentAuthor,
   type Estimate,
   type ItemStatus,
   type ItemType,
@@ -294,6 +300,41 @@ export function registerBacklogCommands(
           ? `${style.green(finished.status)} ${finished.id}`
           : `${style.red(finished.status)} ${finished.id}  ${style.dim(finished.error ?? '')}`,
       );
+    });
+
+  backlog
+    .command('comment <id> [text...]')
+    .description('write a note on an item — with no text, read the notes already there')
+    .option('-p, --project <id>', 'project')
+    .option('--as <name>', 'who is writing it')
+    .option('--to <name>', 'address it to a person, so the item shows it as waiting on them')
+    .option('--resolves <commentId>', 'the addressed note this answers; writing this settles it')
+    .option(
+      '-f, --file <path>',
+      'attach a file; repeat for several',
+      (value: string, all: string[]) => [...all, value],
+      [] as string[],
+    )
+    .action(async (id: string, text: string[], flags: CommentFlags) => {
+      const container = await open();
+      const [projectId, itemId] = await resolve(container, id, flags.project, defaultProject);
+
+      if (text.length === 0) {
+        printComments(await container.comments.list({ subject: 'item', subjectId: itemId }));
+        return;
+      }
+
+      const written = await container.comments.add({
+        subject: 'item',
+        subjectId: itemId,
+        projectId,
+        author: person(flags.as),
+        text: text.join(' '),
+        attachments: await attachments(flags.file),
+        addressedTo: flags.to ?? null,
+        resolvesCommentId: flags.resolves ?? null,
+      });
+      printWritten(written);
     });
 
   backlog
@@ -647,6 +688,78 @@ function parseStatusFilter(value: string | undefined): ItemStatus[] | ItemStatus
  * Item ids carry their project prefix (`ACME-12`), so the project can usually be inferred
  * rather than typed. An explicit `-p` still wins.
  */
+interface CommentFlags {
+  project?: string;
+  as?: string;
+  to?: string;
+  resolves?: string;
+  file: string[];
+}
+
+/**
+ * The author of anything written from a terminal.
+ *
+ * A person, always: an agent writes through the run it is speaking from, and a CLI that could
+ * claim to be one would make {@link authorLabel}'s promise — that an agent's note is never
+ * mistakable for a person's — false in the one direction that matters.
+ */
+export function person(name?: string): CommentAuthor {
+  const trimmed = name?.trim();
+  return trimmed ? { kind: 'person', name: trimmed } : { kind: 'person', name: 'someone' };
+}
+
+/** Read here, not in the service: the paths are relative to the terminal they were typed in. */
+export async function attachments(
+  paths: string[],
+): Promise<{ name: string; content: string; origin: 'attached' }[]> {
+  return Promise.all(
+    paths.map(async (path) => ({
+      name: basename(path),
+      content: await readFile(resolvePath(path), 'utf8'),
+      origin: 'attached' as const,
+    })),
+  );
+}
+
+export function printWritten(comment: Comment): void {
+  console.log(`${style.green('wrote')} ${comment.id.slice(-8)}`);
+  if (comment.addressedTo) {
+    console.log(style.dim(`  addressed to ${comment.addressedTo} — the item shows it as waiting`));
+  }
+  if (comment.attachments.length > 0) {
+    console.log(style.dim(`  attached: ${comment.attachments.map((file) => file.name).join(', ')}`));
+  }
+}
+
+/**
+ * A thread, oldest first. Tombstones are listed rather than hidden: that something was
+ * withdrawn is part of the record, and a gap in a numbered thread explains nothing.
+ */
+export function printComments(comments: Comment[]): void {
+  if (comments.length === 0) {
+    console.log(style.dim('no notes here yet'));
+    return;
+  }
+  for (const comment of comments) {
+    console.log(
+      `${style.dim(comment.id.slice(-8))}  ${style.bold(authorLabel(comment.author))}  ${style.dim(comment.createdAt)}`,
+    );
+    if (isDeleted(comment)) {
+      console.log(style.dim('  (withdrawn)'));
+    } else {
+      for (const line of comment.text.split('\n')) console.log(`  ${line}`);
+      if (comment.addressedTo) {
+        const settled = comment.resolvedAt ? 'answered' : 'waiting';
+        console.log(style.dim(`  → ${comment.addressedTo} (${settled})`));
+      }
+      if (comment.attachments.length > 0) {
+        console.log(style.dim(`  attached: ${comment.attachments.map((file) => file.name).join(', ')}`));
+      }
+    }
+    console.log();
+  }
+}
+
 async function resolve(
   container: PomniContainer,
   itemId: string,
