@@ -25,6 +25,15 @@ The one exception is a backlog item's **prose body** — the Problem, Acceptance
 Plan sections. Those are yours to edit with ordinary file tools; the body round-trips
 byte-exactly, so your formatting survives. Frontmatter still goes through the CLI.
 
+## `.pomni/` is not in the repository's history
+
+It is gitignored, and nothing under it is tracked. A branch switch does not touch it, a `pull`
+does not rewind it, and an agent run cannot sweep it into a code commit — all three of which
+used to happen, and one of them cost three item specs and re-issued their ids.
+
+So: never `git add .pomni`, and never assume the backlog travels with a clone. It is backed up
+as its own git repository, in place; that is where a lost item comes back from.
+
 ## The shape of things
 
 **Project** — a container: a backlog, gates, policy. Holds no code itself.
