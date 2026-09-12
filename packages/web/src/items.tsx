@@ -15,6 +15,7 @@ import {
   type TransitionOffer,
   type UnmetRequirement,
 } from './api';
+import { Comments } from './comments';
 import { Alert, Dialog, errorMessage } from './components';
 import { Markdown } from './markdown';
 import { useLanguage, type Key } from './i18n';
@@ -671,6 +672,8 @@ export function ItemPage() {
           />
         )}
       </div>
+
+      <Comments projectId={projectId} subject="item" subjectId={data.id} />
 
       {showLatest && (
         <Dialog

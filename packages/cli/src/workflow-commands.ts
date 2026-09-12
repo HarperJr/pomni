@@ -15,6 +15,7 @@ import {
 } from '@pomni/core';
 import type { Command } from 'commander';
 import { style, table, visibleLength } from './format.js';
+import { attachments, person, printComments, printWritten } from './backlog-commands.js';
 
 export function registerWorkflowCommands(
   program: Command,
@@ -964,6 +965,62 @@ ${item.body}`;
       }
       console.log(style.dim('  the run picks it up within a second'));
     });
+
+  task
+    .command('comment <id> [text...]')
+    .description('write a note on a run — with no text, read the notes already there')
+    .option('-p, --project <id>', 'project')
+    .option('--as <name>', 'who is writing it')
+    .option('--to <name>', 'address it to a person')
+    .option('--resolves <commentId>', 'the addressed note this answers; writing this settles it')
+    .option(
+      '-f, --file <path>',
+      'attach a file; repeat for several',
+      (value: string, all: string[]) => [...all, value],
+      [] as string[],
+    )
+    .action(
+      async (
+        id: string,
+        text: string[],
+        flags: {
+          project?: string;
+          as?: string;
+          to?: string;
+          resolves?: string;
+          file: string[];
+        },
+      ) => {
+        const container = await open();
+        const projectId = flags.project ?? (await defaultProject());
+
+        // The id is long; accept the tail `task list` prints, as `answer` and `show` do.
+        const runs = await container.pipelines.list({ projectId, limit: 200 });
+        const match = runs.find((run) => run.id === id || run.id.endsWith(id.toUpperCase()));
+        if (!match) {
+          console.log(style.red(`no run here ends with '${id}'`));
+          process.exitCode = 1;
+          return;
+        }
+
+        if (text.length === 0) {
+          printComments(await container.comments.list({ subject: 'run', subjectId: match.id }));
+          return;
+        }
+
+        const written = await container.comments.add({
+          subject: 'run',
+          subjectId: match.id,
+          projectId: match.projectId,
+          author: person(flags.as),
+          text: text.join(' '),
+          attachments: await attachments(flags.file),
+          addressedTo: flags.to ?? null,
+          resolvesCommentId: flags.resolves ?? null,
+        });
+        printWritten(written);
+      },
+    );
 
   task
     .command('show <id>')

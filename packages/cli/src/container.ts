@@ -231,6 +231,7 @@ export function createContainer(root: string, logLevel: LogLevel = 'warn'): Pomn
     repos,
     credentials,
     backlog,
+    comments,
     workflows,
     discovery,
     providers: providerService,

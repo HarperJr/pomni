@@ -1962,3 +1962,73 @@ button.link:hover { text-decoration: underline; }
 .row > .dim.mono.truncate {
   max-width: 30ch;
 }
+
+/* -- comments -------------------------------------------------------------- */
+
+.comment-body {
+  padding: 16px;
+}
+
+.comment-list {
+  list-style: none;
+  margin: 0 0 16px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.comment {
+  border-left: 2px solid var(--border);
+  padding-left: 12px;
+}
+
+/* A withdrawn note keeps its place in the thread: a gap explains nothing about why an agent
+   did what it did, and the tombstone is part of the record. */
+.comment-withdrawn {
+  opacity: 0.55;
+}
+
+.comment-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  margin-bottom: 4px;
+}
+
+.comment-head .ghost {
+  margin-left: auto;
+  padding: 1px 8px;
+  font-size: 11px;
+}
+
+.comment-compose {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border-top: 1px solid var(--border);
+  padding-top: 16px;
+}
+
+.comment-compose textarea {
+  width: 100%;
+  resize: vertical;
+}
+
+.comment-compose-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.comment-compose-row input {
+  flex: 1 1 160px;
+  min-width: 0;
+}
+
+.comment-compose-row .primary {
+  margin-left: auto;
+}
