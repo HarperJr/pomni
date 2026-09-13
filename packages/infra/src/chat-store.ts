@@ -53,8 +53,9 @@ export class SqliteChatStore implements ChatStore {
   async createChat(chat: Chat): Promise<void> {
     this.statement(
       `INSERT INTO chats (id, title, providerId, model, createdAt, updatedAt,
-                          inputTokens, outputTokens, costUsd, projectId, titleGeneratedAt)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                          inputTokens, outputTokens, costUsd, projectId, titleGeneratedAt,
+                          openedGroups)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       chat.id,
       chat.title,
@@ -67,6 +68,7 @@ export class SqliteChatStore implements ChatStore {
       chat.costUsd,
       chat.projectId,
       chat.titleGeneratedAt,
+      JSON.stringify(chat.openedGroups),
     );
   }
 
@@ -103,7 +105,8 @@ export class SqliteChatStore implements ChatStore {
     this.statement(
       `UPDATE chats
          SET title = ?, providerId = ?, model = ?, updatedAt = ?,
-             inputTokens = ?, outputTokens = ?, costUsd = ?, projectId = ?, titleGeneratedAt = ?
+             inputTokens = ?, outputTokens = ?, costUsd = ?, projectId = ?, titleGeneratedAt = ?,
+             openedGroups = ?
        WHERE id = ?`,
     ).run(
       chat.title,
@@ -115,6 +118,7 @@ export class SqliteChatStore implements ChatStore {
       chat.costUsd,
       chat.projectId,
       chat.titleGeneratedAt,
+      JSON.stringify(chat.openedGroups),
       chat.id,
     );
   }
@@ -229,6 +233,7 @@ interface ChatRow {
   costUsd: number | null;
   projectId: string | null;
   titleGeneratedAt: string | null;
+  openedGroups: string | null;
 }
 
 function toChat(row: ChatRow): Chat {
@@ -244,6 +249,7 @@ function toChat(row: ChatRow): Chat {
     costUsd: row.costUsd,
     projectId: row.projectId,
     titleGeneratedAt: row.titleGeneratedAt,
+    openedGroups: parseJsonArray(row.openedGroups),
   });
 }
 
@@ -329,6 +335,8 @@ const MIGRATIONS: string[] = [
    ALTER TABLE chat_messages ADD COLUMN addresses TEXT NOT NULL DEFAULT '[]';
 
    CREATE INDEX IF NOT EXISTS idx_chats_project ON chats(projectId, updatedAt DESC);`,
+
+  `ALTER TABLE chats ADD COLUMN openedGroups TEXT NOT NULL DEFAULT '[]';`,
 ];
 
 function migrate(db: SqliteDatabase): void {

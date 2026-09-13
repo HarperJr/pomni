@@ -19,6 +19,70 @@ export const ChatRoleSchema = z.enum(['user', 'assistant', 'system']);
 export type ChatRole = z.infer<typeof ChatRoleSchema>;
 
 /**
+ * The groups a chat action can belong to, one per CLI noun.
+ *
+ * The catalogue is bigger than a turn can carry: at ~120 bytes per action, seventy actions
+ * are more than `policy.promptBudget` on their own. So a turn lists the groups, and the
+ * actions inside a group only once the model has opened it. The ids are closed here, in the
+ * domain, because a chat stores which groups it has opened and a stored id has to be one
+ * that can be read back — see `openedGroups` on {@link ChatSchema}.
+ *
+ * An action's name starts with its group: `repo.sync` is in `repo`. `doctor` is a verb of
+ * `repo` (`repo.doctor`) rather than a group of one; `question` is its own group even at
+ * two actions because "what is waiting on me" is the question this list has to answer
+ * without opening anything.
+ */
+export const CHAT_ACTION_GROUPS = [
+  'project',
+  'repo',
+  'backlog',
+  'task',
+  'question',
+  'run',
+  'workflow',
+  'tool',
+  'cred',
+  'provider',
+  'worktree',
+  'discover',
+] as const;
+export const ChatActionGroupSchema = z.enum(CHAT_ACTION_GROUPS);
+export type ChatActionGroup = z.infer<typeof ChatActionGroupSchema>;
+
+export function isChatActionGroup(value: unknown): value is ChatActionGroup {
+  return ChatActionGroupSchema.safeParse(value).success;
+}
+
+/**
+ * How many opened groups a chat keeps inline in its system prompt.
+ *
+ * Two, because the two largest groups opened together still fit the budget with everything
+ * else the turn carries, and three do not. An older opening falls out and the model opens it
+ * again if it needs it — one read, not a lost capability.
+ */
+export const MAX_OPENED_GROUPS = 2;
+
+/**
+ * How many times one turn may answer with nothing but `actions.expand` before it has to speak.
+ *
+ * A model that keeps opening groups is reading, not stalling — but it is spending a model call
+ * per read and the person is watching a spinner. Three is enough to walk from the group list
+ * into two groups and still answer; past that the turn ends with what it has and the person
+ * can ask again.
+ */
+export const MAX_EXPANSION_ROUNDS = 3;
+
+/**
+ * Open a group: newest last, no duplicates, oldest dropped past the cap.
+ *
+ * Re-opening a group that is already open moves it to the end, so what the model reached
+ * for most recently is what survives longest.
+ */
+export function openGroup(opened: ChatActionGroup[], group: ChatActionGroup): ChatActionGroup[] {
+  return [...opened.filter((entry) => entry !== group), group].slice(-MAX_OPENED_GROUPS);
+}
+
+/**
  * Where a proposed action is in its life.
  *
  * `proposed` is the model's suggestion and nothing more. `confirmed` is a person saying yes.
@@ -132,6 +196,20 @@ export const ChatSchema = z.object({
    * race against a person who has already named the thing.
    */
   titleGeneratedAt: z.string().nullable().default(null),
+  /**
+   * Action groups the model has opened in this chat, oldest first, at most
+   * {@link MAX_OPENED_GROUPS}. The system prompt lists these groups' actions in full and
+   * every other group as one line.
+   *
+   * Read leniently: a row from before this field reads as nothing opened, and an id that is
+   * no longer a group is dropped rather than failing the whole chat — a renamed group must
+   * not make old conversations unopenable. Whatever survives is re-capped, so a row written
+   * under a larger cap still obeys the current one.
+   */
+  openedGroups: z
+    .array(z.string())
+    .default([])
+    .transform((entries) => entries.filter(isChatActionGroup).slice(-MAX_OPENED_GROUPS)),
   createdAt: z.string(),
   /** Bumped on every message. Chat lists sort by this, not `createdAt`. */
   updatedAt: z.string(),
@@ -271,4 +349,59 @@ export function rollUpUsage(messages: ChatMessage[]): {
   }
 
   return { inputTokens, outputTokens, costUsd };
+}
+
+/**
+ * The identity of a call: its name and its arguments with keys in a fixed order.
+ *
+ * Two proposals with the same key are the same ask. Raw arguments, not parsed ones — the
+ * key is compared against what was stored on the declined action, and that is raw too.
+ * `undefined` values are dropped so `{reason: undefined}` and `{}` are one key.
+ */
+export function proposalKey(name: string, args: Record<string, unknown>): string {
+  return `${name} ${stableStringify(args)}`;
+}
+
+function stableStringify(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
+  if (typeof value === 'object' && value !== null) {
+    const entries = Object.entries(value as Record<string, unknown>)
+      .filter(([, entry]) => entry !== undefined)
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+      .map(([key, entry]) => `${JSON.stringify(key)}:${stableStringify(entry)}`);
+    return `{${entries.join(',')}}`;
+  }
+  return JSON.stringify(value) ?? 'null';
+}
+
+/**
+ * Keys of the proposals the person declined in the assistant turn just before the message
+ * they have now sent.
+ *
+ * "Just before" is the scope on purpose. A decline is an answer to one proposal, not a ban
+ * on the idea: the turn after it must not bring the same call straight back, but a person
+ * who asks for it again two messages later is asking, and the model may propose it then.
+ *
+ * Walks back from the end: the trailing user message is the one being answered and is
+ * skipped; assistant messages are read until the previous user message, which ends the
+ * scope. Derived from the transcript each time — the transcript already records every
+ * decision, so nothing is stored twice.
+ */
+export function recentlyDeclined(messages: ChatMessage[]): Set<string> {
+  const keys = new Set<string>();
+  let index = messages.length - 1;
+
+  // The message(s) being answered now: a user line, or two if they sent twice.
+  while (index >= 0 && messages[index]?.role !== 'assistant') index -= 1;
+
+  for (; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (!message || message.role === 'system') continue;
+    if (message.role === 'user') break;
+    for (const action of message.actions) {
+      if (action.status === 'rejected') keys.add(proposalKey(action.name, action.args));
+    }
+  }
+
+  return keys;
 }

@@ -9,15 +9,19 @@ import type { Agent } from '../domain/agent.js';
 import {
   ChatMessageSchema,
   ChatSchema,
+  MAX_EXPANSION_ROUNDS,
   assertExecutable,
   assertTransition,
   deriveChatTitle,
+  isChatActionGroup,
+  openGroup,
   initialStatus,
   needsConfirmation,
   rollUpUsage,
   type Chat,
   type ChatDetail,
   type ChatFilter,
+  type ChatActionGroup,
   type ChatMessage,
   type ProposedAction,
 } from '../domain/chat.js';
@@ -36,6 +40,7 @@ import type {
 import {
   CHAT_ACTION_PROTOCOL,
   actionBriefing,
+  actionKey,
   describeAction,
   findAction,
   parseActionArgs,
@@ -44,6 +49,10 @@ import {
   type ChatActionServices,
 } from './chat-actions.js';
 import type { BacklogService } from './backlog-service.js';
+import type { CommentService } from './comment-service.js';
+import type { CredentialService } from './credential-service.js';
+import type { DoctorService } from './doctor-service.js';
+import type { WorktreeService } from './worktree-service.js';
 import type { DiscoveryService } from './discovery-service.js';
 import type { PipelineService } from './pipeline-service.js';
 import type { ProjectService } from './project-service.js';
@@ -159,6 +168,13 @@ export class ChatService {
     private readonly events: EventBus,
     private readonly logger: Logger,
     private readonly discovery: DiscoveryService,
+    // POMN-68: the rest of Pomni, so chat can reach every verb the CLI has. Appended rather
+    // than woven in, so a caller that has not grown these yet still passes the earlier ones
+    // in the order it always did.
+    private readonly credentials: CredentialService,
+    private readonly doctor: DoctorService,
+    private readonly comments: CommentService,
+    private readonly worktrees: WorktreeService,
   ) {
     this.services = {
       projects: this.projects,
@@ -168,6 +184,12 @@ export class ChatService {
       tools: this.tools,
       runs: this.runs,
       pipelines: this.pipelines,
+      credentials: this.credentials,
+      providers: this.providers,
+      worktrees: this.worktrees,
+      discovery: this.discovery,
+      doctor: this.doctor,
+      comments: this.comments,
     };
   }
 
@@ -374,30 +396,47 @@ export class ChatService {
 
     // Named once, from the first thing the person said. A later message never renames it,
     // and `nameChat` replaces this with something better if the generation lands.
-    await this.store.updateChat(
-      ChatSchema.parse({
-        ...chat,
-        title: chat.title || deriveChatTitle(asked),
-        // `#project` holds until changed; that is what makes it context rather than a filter.
-        projectId: addressed.projectId,
-        updatedAt: now,
-      }),
-    );
+    let current = ChatSchema.parse({
+      ...chat,
+      title: chat.title || deriveChatTitle(asked),
+      // `#project` holds until changed; that is what makes it context rather than a filter.
+      projectId: addressed.projectId,
+      updatedAt: now,
+    });
+    await this.store.updateChat(current);
     this.announce({ type: 'chat.changed', chatId: id });
 
-    const answer = addressed.agent
+    let answer = addressed.agent
       ? // One agent, its own prompt, its own tools, no delegation. Deliberately not the chat's
         // pinned model: an agent says what struggle its work deserves, and honouring the
         // header here would run it on something it never asked for.
         await this.askAgent(chat, addressed, asked)
-      : await this.askPomni(chat, provider, addressed);
+      : await this.askPomni(current, provider, addressed);
 
-    const { prose, calls } = parseActionCalls(answer.text);
+    let reply = parseActionCalls(answer.text);
+
+    // Reading the catalogue is not answering. A turn whose whole reply is `actions.expand`
+    // has told the person nothing, so the groups are opened and the model is asked again —
+    // bounded, because each round is another model call and another spinner.
+    for (let round = 0; !addressed.agent && round < MAX_EXPANSION_ROUNDS; round += 1) {
+      const groups = onlyExpansions(reply.calls);
+      if (groups === null) break;
+
+      let opened = current.openedGroups;
+      for (const group of groups) opened = openGroup(opened, group);
+      current = ChatSchema.parse({ ...current, openedGroups: opened, updatedAt: this.clock.iso() });
+      await this.store.updateChat(current);
+
+      answer = await this.askPomni(current, provider, addressed);
+      reply = parseActionCalls(answer.text);
+    }
+
+    const { prose, calls } = reply;
     const messageId = ulid(this.clock.now().getTime());
     // Every turn, addressed or not. An agent's answer will rarely contain an action block,
     // but a turn that could skip the confirmation because of how it was addressed would be a
     // way round the one gap this service exists to keep open.
-    const { actions, rejected } = this.plan(calls);
+    const { actions, rejected } = this.plan(calls, await this.declinedKeys(id));
 
     const message = ChatMessageSchema.parse({
       id: messageId,
@@ -536,7 +575,7 @@ export class ChatService {
 
     const result = await port.complete({
       model: chat.model,
-      system: this.systemPrompt(addressed),
+      system: this.systemPrompt(addressed, chat.openedGroups),
       messages: history,
       // Claude Code drives its own thinking; the flag is for the direct API path.
       adaptiveThinking: provider.kind !== 'claude-code',
@@ -888,7 +927,27 @@ export class ChatService {
    * not know, or arguments it cannot use, is dropped and said out loud in the reply — a
    * silently missing action reads as one the assistant chose not to take.
    */
-  private plan(calls: ChatActionCall[]): { actions: ProposedAction[]; rejected: string[] } {
+  /**
+   * Every proposal the person has already declined in this chat.
+   *
+   * Read from the transcript rather than held in memory: the rule has to survive a restart,
+   * and the transcript is the only record of what a person actually said no to.
+   */
+  private async declinedKeys(chatId: string): Promise<Set<string>> {
+    const messages = await this.store.listMessages(chatId);
+    const keys = new Set<string>();
+    for (const message of messages) {
+      for (const action of message.actions) {
+        if (action.status === 'rejected') keys.add(actionKey(action.name, action.args));
+      }
+    }
+    return keys;
+  }
+
+  private plan(
+    calls: ChatActionCall[],
+    declined: Set<string> = new Set(),
+  ): { actions: ProposedAction[]; rejected: string[] } {
     const actions: ProposedAction[] = [];
     const rejected: string[] = [];
 
@@ -896,6 +955,18 @@ export class ChatService {
       try {
         const entry = findAction(call.name);
         parseActionArgs(entry, call.args);
+
+        // Declined stays declined until the person says otherwise. The model can override
+        // this, but only by saying it means to — see `again` on the call.
+        if (!call.again && declined.has(actionKey(entry.name, call.args))) {
+          rejected.push(
+            `_You declined this earlier, so Pomni did not re-propose it: ${describeAction(
+              entry,
+              call.args,
+            )}. Ask again and it will._`,
+          );
+          continue;
+        }
 
         actions.push({
           id: ulid(this.clock.now().getTime()),
@@ -995,7 +1066,7 @@ export class ChatService {
     }, []);
   }
 
-  private systemPrompt(addressed: ResolvedAddresses): string {
+  private systemPrompt(addressed: ResolvedAddresses, opened: ChatActionGroup[] = []): string {
     const base = [
       'You are Pomni, talking to the person who runs this workspace.',
       '',
@@ -1017,7 +1088,7 @@ export class ChatService {
           ]
         : []),
       '',
-      actionBriefing(),
+      actionBriefing(opened),
       '',
       CHAT_ACTION_PROTOCOL,
     ].join('\n');
@@ -1195,4 +1266,22 @@ function renderOutcome(action: ProposedAction): string | null {
     return `- \`${action.name}\` is still waiting for the person to confirm it.`;
   }
   return null;
+}
+
+/**
+ * The groups a reply asked to open, when opening groups is *all* it asked for.
+ *
+ * Null when the reply did anything else — proposed a real action, or said nothing at all —
+ * because then the turn has content and must not be spent on another model call.
+ */
+function onlyExpansions(calls: ChatActionCall[]): ChatActionGroup[] | null {
+  if (calls.length === 0) return null;
+  const groups: ChatActionGroup[] = [];
+  for (const call of calls) {
+    if (call.name !== 'actions.expand') return null;
+    const group = (call.args as { group?: unknown }).group;
+    if (!isChatActionGroup(group)) return null;
+    groups.push(group);
+  }
+  return groups;
 }
