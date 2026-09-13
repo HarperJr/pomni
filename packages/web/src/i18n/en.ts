@@ -60,6 +60,16 @@ export const en = {
   'common.loading': 'Loading…',
   'common.save': 'Save',
   'common.saving': 'Saving…',
+  // -- logs -----------------------------------------------------------------
+  'logs.title': 'Logs',
+  'logs.running': 'Running now',
+  'logs.search': 'Search',
+  'logs.none': 'Nothing logged yet.',
+  'logs.about': 'What Pomni itself has said. A run’s own output is on the run.',
+  'logs.level.debug': 'Everything',
+  'logs.level.info': 'Info and worse',
+  'logs.level.warn': 'Warnings and worse',
+  'logs.level.error': 'Errors only',
   // -- comments -------------------------------------------------------------
   'comments.title': 'Notes',
   'comments.none': 'Nothing written here yet.',

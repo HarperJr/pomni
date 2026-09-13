@@ -1,4 +1,12 @@
-import type { Clock, EmittedEvent, EventBus, Logger, PomniEvent } from '@pomni/core';
+import { scrubSecrets } from '@pomni/core';
+import type {
+  Clock,
+  EmittedEvent,
+  EventBus,
+  Logger,
+  PomniEvent,
+  ServerLogStore,
+} from '@pomni/core';
 
 export class SystemClock implements Clock {
   now(): Date {
@@ -55,6 +63,49 @@ export class ConsoleLogger implements Logger {
     const stream = level === 'error' || level === 'warn' ? process.stderr : process.stdout;
     const suffix = meta === undefined ? '' : ` ${formatMeta(meta)}`;
     stream.write(`${level.padEnd(5)} ${message}${suffix}\n`);
+  }
+}
+
+/**
+ * A logger that also keeps what it said where the interface can read it.
+ *
+ * Wraps rather than replaces `ConsoleLogger`: a terminal that started the server should keep
+ * printing, and the file is an addition for the case where there is no terminal. Both get the
+ * same line, scrubbed once, here — scrubbing at the sink would leave the terminal copy with
+ * the secret in it.
+ */
+export class RecordingLogger implements Logger {
+  constructor(
+    private readonly console: Logger,
+    private readonly store: ServerLogStore,
+    private readonly clock: { iso(): string },
+    private readonly level: LogLevel = 'debug',
+  ) {}
+
+  debug(message: string, meta?: unknown): void {
+    this.write('debug', message, meta);
+  }
+
+  info(message: string, meta?: unknown): void {
+    this.write('info', message, meta);
+  }
+
+  warn(message: string, meta?: unknown): void {
+    this.write('warn', message, meta);
+  }
+
+  error(message: string, meta?: unknown): void {
+    this.write('error', message, meta);
+  }
+
+  private write(level: LogLevel, message: string, meta?: unknown): void {
+    const scrubbed = scrubSecrets(message);
+    const detail = meta === undefined ? '' : scrubSecrets(formatMeta(meta));
+
+    this.console[level](scrubbed, meta === undefined ? undefined : detail);
+
+    if (LEVELS[level] < LEVELS[this.level]) return;
+    this.store.append({ at: this.clock.iso(), level, message: scrubbed, detail });
   }
 }
 

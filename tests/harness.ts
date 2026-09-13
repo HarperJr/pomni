@@ -69,6 +69,8 @@ import {
   SqliteCommentStore,
   SqlitePipelineStore,
   SqliteWorktreeStore,
+  MemoryServerLog,
+  RecordingLogger,
   SilentLogger,
   SqliteRunStore,
 } from '@pomni/infra';
@@ -885,6 +887,7 @@ export interface TestHarness<G extends GitPort = FakeGit> extends PomniContainer
   desktop: FakeDesktop;
   restart: FakeRestartPort;
   logs: MemoryLogSink;
+  serverLog: MemoryServerLog;
   clock: FixedClock;
   dir: string;
   cleanup(): Promise<void>;
@@ -910,7 +913,10 @@ export async function createHarness<G extends GitPort = FakeGit>(
   const git = (options.git ?? (new FakeGit() as unknown as G)) as G;
   const clock = new FixedClock();
   const events = new InMemoryEventBus();
-  const logger = new SilentLogger();
+  // The tests keep the silent console and a log they can read back: POMN-69's point is that
+  // what a service said is retrievable, and a harness that dropped it could not check that.
+  const serverLog = new MemoryServerLog();
+  const logger = new RecordingLogger(new SilentLogger(), serverLog, clock);
   const detection = new DetectorRegistry(fs);
   const secrets = new DefaultCredentialStore(docs);
 
@@ -1047,11 +1053,23 @@ export async function createHarness<G extends GitPort = FakeGit>(
   const restart = new FakeRestartPort();
   // The checkout `system` reports on. Not tracked as a git repo by default, matching a
   // tarball install — a test that wants `behindRepo` calls `git.trackRepo(dir, ...)` itself.
-  const system = new SystemService(dir, restart, pipelines, runs, workspace, git, clock, events, logger);
+  const system = new SystemService(
+    dir,
+    restart,
+    pipelines,
+    runs,
+    workspace,
+    git,
+    clock,
+    events,
+    logger,
+    serverLog,
+  );
 
   return {
     root,
     dir,
+    serverLog,
     workspace,
     projects,
     repos,

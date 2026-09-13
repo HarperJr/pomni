@@ -1,4 +1,12 @@
-import type { Clock, EventBus, GitPort, Logger, RestartPort } from '../ports/index.js';
+import type { LogEntry, LogFilter } from '../domain/log.js';
+import type {
+  Clock,
+  EventBus,
+  GitPort,
+  Logger,
+  RestartPort,
+  ServerLogStore,
+} from '../ports/index.js';
 import type { BuildOutcome, Supervision } from '../ports/restart.js';
 import type { PipelineService } from './pipeline-service.js';
 import type { RunService } from './run-service.js';
@@ -110,6 +118,8 @@ export class SystemService {
     private readonly clock: Clock,
     private readonly events: EventBus,
     private readonly logger: Logger,
+    /** Pomni's own log, so the interface can read what the services said. */
+    private readonly serverLog: ServerLogStore,
   ) {
     this.startedAt = clock.iso();
   }
@@ -169,6 +179,16 @@ export class SystemService {
    * one ends here with its output — a Pomni that will not come back is worse than one that
    * is out of date. Only then is the process replaced.
    */
+  /**
+   * What Pomni has been saying about itself.
+   *
+   * On `SystemService` because it answers the same question `/api/health` does — what is this
+   * server doing — and a person who reaches for one usually wants the other next.
+   */
+  async log(filter: LogFilter = {}): Promise<LogEntry[]> {
+    return this.serverLog.read(filter);
+  }
+
   async restartServer(input: RestartInput = {}): Promise<RestartResult> {
     const supervision = await this.restart.supervision();
     if (supervision.mode === 'unsupported') {

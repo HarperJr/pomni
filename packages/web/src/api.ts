@@ -407,6 +407,16 @@ export type CommentAuthor =
   | { kind: 'person'; name: string }
   | { kind: 'agent'; agentId: string; agentName: string; runId: string };
 
+export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
+
+/** One line Pomni wrote about itself. Mirrors `LogEntry` in `packages/core/src/domain/log.ts`. */
+export interface LogEntry {
+  at: string;
+  level: LogLevel;
+  message: string;
+  detail: string;
+}
+
 export interface Comment {
   id: string;
   subject: 'item' | 'run';
@@ -1024,6 +1034,15 @@ export const api = {
       method: 'DELETE',
       body: JSON.stringify({ author }),
     }),
+
+  logs: (filter: { level?: LogLevel; q?: string; limit?: number } = {}) => {
+    const params = new URLSearchParams();
+    if (filter.level) params.set('level', filter.level);
+    if (filter.q) params.set('q', filter.q);
+    if (filter.limit) params.set('limit', String(filter.limit));
+    const query = params.toString();
+    return request<{ entries: LogEntry[] }>(`/api/logs${query ? `?${query}` : ''}`);
+  },
 
   health: () => request<SystemHealth>('/api/health'),
 

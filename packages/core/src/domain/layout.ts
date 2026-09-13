@@ -43,6 +43,8 @@ export const layout = {
 
   /** Append-only cross-process event stream. Gitignored. */
   events: 'events.ndjson',
+  /** Pomni's own log — what the services said, not what a run's subprocess printed. */
+  serverLog: 'server.log',
 
   database: 'pomni.db',
 

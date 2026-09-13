@@ -55,6 +55,16 @@ export const ru: Dictionary = {
   'common.loading': 'Загрузка…',
   'common.save': 'Сохранить',
   'common.saving': 'Сохраняем…',
+  // -- logs -----------------------------------------------------------------
+  'logs.title': 'Логи',
+  'logs.running': 'Сейчас идёт',
+  'logs.search': 'Поиск',
+  'logs.none': 'Пока ничего не записано.',
+  'logs.about': 'Что говорит сам Pomni. Вывод прогона — на странице прогона.',
+  'logs.level.debug': 'Всё',
+  'logs.level.info': 'Info и хуже',
+  'logs.level.warn': 'Предупреждения и хуже',
+  'logs.level.error': 'Только ошибки',
   // -- comments -------------------------------------------------------------
   'comments.title': 'Заметки',
   'comments.none': 'Здесь пока ничего не написано.',

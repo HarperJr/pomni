@@ -25,6 +25,8 @@ import {
 } from '@pomni/core';
 import {
   ConsoleLogger,
+  FileServerLog,
+  RecordingLogger,
   DefaultCredentialStore,
   DefaultOutputAnalyzer,
   FileLock,
@@ -95,7 +97,10 @@ export function createContainer(root: string, logLevel: LogLevel = 'warn'): Pomn
   const git = new GitCli();
   const clock = new SystemClock();
   const events = new InMemoryEventBus();
-  const logger = new ConsoleLogger(logLevel);
+  // The console copy keeps the terminal's behaviour; the file copy is for the case there is
+  // no terminal, which is every detached `serve`. Both get the same scrubbed line.
+  const serverLog = new FileServerLog(docs.absolute(layout.serverLog));
+  const logger = new RecordingLogger(new ConsoleLogger(logLevel), serverLog, clock);
   const detection = new DetectorRegistry(fs);
   const secrets = new DefaultCredentialStore(docs);
   const executor = new ProcessExecutor();
@@ -205,6 +210,7 @@ export function createContainer(root: string, logLevel: LogLevel = 'warn'): Pomn
     clock,
     events,
     logger,
+    serverLog,
   );
 
   const chatStore = new SqliteChatStore(docs.absolute(layout.database));

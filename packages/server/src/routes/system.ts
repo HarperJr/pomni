@@ -1,4 +1,10 @@
 import { z } from 'zod';
+
+const LogQuery = z.object({
+  level: z.enum(['debug', 'info', 'warn', 'error']).optional(),
+  q: z.string().optional(),
+  limit: z.string().optional(),
+});
 import { ValidationError, type PomniContainer } from '@pomni/core';
 import type { FastifyInstance } from 'fastify';
 
@@ -42,6 +48,24 @@ export async function systemRoutes(app: FastifyInstance, container: PomniContain
    * refusals — is a 200 carrying the discriminated union: the browser renders each arm, it
    * does not catch an error to find out which one happened.
    */
+  /**
+   * What Pomni has been saying about itself.
+   *
+   * Beside `/api/health` because it answers the same question — what is this server doing —
+   * and because a person who reaches for one usually wants the other next. Paged and filtered
+   * server-side: the file has a ceiling but the browser should never hold even that much.
+   */
+  app.get('/api/logs', async (request) => {
+    const query = LogQuery.parse(request.query);
+    return {
+      entries: await container.system.log({
+        ...(query.level === undefined ? {} : { level: query.level }),
+        ...(query.q === undefined ? {} : { q: query.q }),
+        ...(query.limit === undefined ? {} : { limit: Number(query.limit) }),
+      }),
+    };
+  });
+
   app.post('/api/restart', async (request) => {
     const body = RestartBody.parse(request.body ?? {});
     return container.system.restartServer(body);

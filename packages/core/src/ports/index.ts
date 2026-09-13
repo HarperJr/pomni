@@ -1,3 +1,4 @@
+import type { LogEntry, LogFilter } from '../domain/log.js';
 import type { ZodType, ZodTypeDef } from 'zod';
 import type { Capability, CapabilityMap } from '../domain/capability.js';
 import type { Chat, ChatFilter, ChatMessage } from '../domain/chat.js';
@@ -551,6 +552,17 @@ export interface Lock {
 export interface Clock {
   now(): Date;
   iso(): string;
+}
+
+/**
+ * Where Pomni's own log is kept, so a browser can read what the services said.
+ *
+ * A port rather than a file path because the CLI, the tests and the server all need the same
+ * log and only one of them has a disk it should be writing to.
+ */
+export interface ServerLogStore {
+  append(entry: LogEntry): void;
+  read(filter: LogFilter): Promise<LogEntry[]>;
 }
 
 export interface Logger {

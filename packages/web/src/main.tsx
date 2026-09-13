@@ -13,6 +13,7 @@ import { ToolsPage } from './tools';
 import { WorkflowPage, WorkflowsPage } from './workflows';
 import { TrackerPage } from './tracker';
 import { ChatPage } from './chat';
+import { LogsPanel } from './logs';
 import './styles.css';
 import { LanguagePicker, LanguageProvider, useLanguage } from './i18n';
 
@@ -129,6 +130,12 @@ function useServerEvents() {
 
     source.addEventListener('pipeline.started', refreshRunning as EventListener);
     source.addEventListener('pipeline.finished', refreshRunning as EventListener);
+
+    // The log panel refreshes on anything that happened, because anything that happened may
+    // have been logged. Cheap: the query only exists while the panel is mounted.
+    source.addEventListener('message', (() => {
+      void client.invalidateQueries({ queryKey: ['logs'] });
+    }) as EventListener);
 
     return () => source.close();
   }, [client]);
@@ -439,6 +446,7 @@ function Shell() {
   useServerEvents();
   const location = useLocation();
   const [chatting, setChatting] = useState(false);
+  const [logsOpen, setLogsOpen] = useState(false);
   const [chatId, setChatId] = useState('');
   const { t } = useLanguage();
 
@@ -473,6 +481,13 @@ function Shell() {
           <SectionLink section="providers">{t('nav.providers')}</SectionLink>
           <SectionLink section="credentials">{t('nav.credentials')}</SectionLink>
         </nav>
+        <button
+          className="ghost topbar-logs"
+          onClick={() => setLogsOpen((open) => !open)}
+          aria-expanded={logsOpen}
+        >
+          {t('logs.title')}
+        </button>
         <LanguagePicker />
       </div>
 
@@ -492,6 +507,8 @@ function Shell() {
         <Route path="/chat/:chatId" element={<ChatPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
+
+      {logsOpen && <LogsPanel onClose={() => setLogsOpen(false)} />}
 
       <Footer />
 

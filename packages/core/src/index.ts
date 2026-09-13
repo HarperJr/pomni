@@ -2,6 +2,7 @@ export * from './domain/address.js';
 export * from './domain/agent.js';
 export * from './domain/capability.js';
 export * from './domain/chat.js';
+export * from './domain/log.js';
 export * from './domain/comment.js';
 export * from './domain/config.js';
 export * from './domain/credential.js';
