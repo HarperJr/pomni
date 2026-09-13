@@ -1,6 +1,8 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import { basename, resolve } from 'node:path';
 import {
+  ValidationError,
+  type PipelineRun,
   AgentRoleSchema,
   since,
   HANDOVER_PROTOCOL,
@@ -751,10 +753,15 @@ ${item.body}`;
 
   task
     .command('resume <id> [note...]')
+    .option('-p, --project <id>', 'project to search in; without it, every project')
     .description('carry on an interrupted run, keeping what it already did')
-    .action(async (id: string, note: string[]) => {
+    .action(async (id: string, note: string[], flags: { project?: string }) => {
       const container = await open();
-      const { run, completion, reused } = await container.pipelines.resume(id, note.join(' '));
+      const found = await resolveRun(container, id, flags.project);
+      const { run, completion, reused } = await container.pipelines.resume(
+        found.id,
+        note.join(' '),
+      );
 
       console.log(`${style.cyan('resumed')} ${style.bold(run.id)}  ${run.workflowName}`);
       // Offered, not spent: the ledger answers a delegation only when the orchestrator asks
@@ -780,10 +787,12 @@ ${item.body}`;
 
   task
     .command('rerun <id>')
+    .option('-p, --project <id>', 'project to search in; without it, every project')
     .description('run a finished run again, telling the agents why the last one ended')
-    .action(async (id: string) => {
+    .action(async (id: string, flags: { project?: string }) => {
       const container = await open();
-      const { run, completion } = await container.pipelines.rerun(id);
+      const found = await resolveRun(container, id, flags.project);
+      const { run, completion } = await container.pipelines.rerun(found.id);
 
       console.log(`${style.cyan('rerun')} ${style.bold(run.id)}  ${run.workflowName}`);
       console.log(style.dim(`  retrying ${run.rerunOf}`));
@@ -992,16 +1001,7 @@ ${item.body}`;
         },
       ) => {
         const container = await open();
-        const projectId = flags.project ?? (await defaultProject());
-
-        // The id is long; accept the tail `task list` prints, as `answer` and `show` do.
-        const runs = await container.pipelines.list({ projectId, limit: 200 });
-        const match = runs.find((run) => run.id === id || run.id.endsWith(id.toUpperCase()));
-        if (!match) {
-          console.log(style.red(`no run here ends with '${id}'`));
-          process.exitCode = 1;
-          return;
-        }
+        const match = await resolveRun(container, id, flags.project);
 
         if (text.length === 0) {
           printComments(await container.comments.list({ subject: 'run', subjectId: match.id }));
@@ -1028,13 +1028,7 @@ ${item.body}`;
     .option('-p, --project <id>', 'project')
     .action(async (id: string, flags: { project?: string }) => {
       const container = await open();
-      const projectId = flags.project ?? (await defaultProject());
-      const runs = await container.pipelines.list({ projectId, limit: 200 });
-      const match = runs.find((run) => run.id === id || run.id.endsWith(id.toUpperCase()));
-      if (!match) {
-        console.log(style.red(`no run here ends with '${id}'`));
-        return;
-      }
+      const match = await resolveRun(container, id, flags.project);
 
       const detail = await container.pipelines.get(match.id);
       console.log(`${style.bold(detail.id.slice(-8))}  ${detail.workflowName}  ${detail.status}`);
@@ -1066,7 +1060,7 @@ ${item.body}`;
       console.log(carried(detail.steps));
 
       if (detail.itemId) {
-        const item = await container.pipelines.itemSpend(projectId, detail.itemId);
+        const item = await container.pipelines.itemSpend(match.projectId, detail.itemId);
         if (item.runs > 1) {
           const total = item.costUsd === null ? style.dim('not reported') : `$${item.costUsd.toFixed(2)}`;
           // The number that answers whether the agents were worth it. One run's figure
@@ -1082,10 +1076,12 @@ ${item.body}`;
 
   task
     .command('cancel <id>')
+    .option('-p, --project <id>', 'project to search in; without it, every project')
     .description('stop a run, or close out one whose process is gone')
-    .action(async (id: string) => {
+    .action(async (id: string, flags: { project?: string }) => {
       const container = await open();
-      const run = await container.pipelines.cancel(id);
+      const found = await resolveRun(container, id, flags.project);
+      const run = await container.pipelines.cancel(found.id);
       console.log(
         run.status === 'cancelled'
           ? `${style.green('cancelled')} ${run.id}  ${style.dim(run.error ?? '')}`
@@ -1488,4 +1484,46 @@ export function lintReport(
 
     return { id: agent.id, prompt, scaffolding, total, flags };
   });
+}
+
+/**
+ * The run an id names, searched across every project unless one is given.
+ *
+ * A run id does not carry its project the way an item id carries its prefix, but it does not
+ * have to: the run is a row and the row says which project it is in. Refusing before looking
+ * made `-p` the toll for using a run id rather than the way to disambiguate, and made two
+ * halves of the same CLI answer the same question differently.
+ *
+ * Every match is collected before deciding, because an ambiguous id has to be reported with
+ * both candidates named — picking one silently is the outcome that loses work.
+ */
+export async function resolveRun(
+  container: PomniContainer,
+  id: string,
+  explicit: string | undefined,
+): Promise<PipelineRun> {
+  const wanted = id.toUpperCase();
+  const projectIds = explicit ? [explicit] : await container.projects.listIds();
+
+  const matches: PipelineRun[] = [];
+  for (const projectId of projectIds) {
+    const runs = await container.pipelines.list({ projectId, limit: 200 });
+    matches.push(...runs.filter((run) => run.id === id || run.id.endsWith(wanted)));
+  }
+
+  if (matches.length === 1) return matches[0] as PipelineRun;
+
+  if (matches.length === 0) {
+    throw new ValidationError(
+      explicit
+        ? `no run matches '${id}' in project '${explicit}'`
+        : `no run matches '${id}' in any project (searched: ${projectIds.join(', ')})`,
+    );
+  }
+
+  throw new ValidationError(
+    `'${id}' matches runs in several projects: ${matches
+      .map((run) => `${run.projectId} (${run.id})`)
+      .join(', ')} — pass -p <id> to choose`,
+  );
 }
