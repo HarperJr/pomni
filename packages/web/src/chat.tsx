@@ -312,9 +312,12 @@ function ChatThread({ chatId, providers }: { chatId: string; providers: Provider
     onError: (caught) => setError(errorMessage(caught)),
   });
 
+  // Re-runs as a streamed reply grows, not only when a new message shows up — `messages.length`
+  // alone would miss every chunk that lands inside the last message.
+  const transcriptSize = chat.data?.messages.reduce((sum, entry) => sum + entry.text.length, 0) ?? 0;
   useEffect(() => {
     bottom.current?.scrollIntoView({ block: 'end' });
-  }, [chat.data?.messages.length]);
+  }, [chat.data?.messages.length, transcriptSize]);
 
   // The backstop poll stays off on purpose: `chat.changed`, `chat.action.*` and
   // `chat.turn.finished` on the shared bus are what make a reply, a running action or a model
@@ -557,14 +560,27 @@ function ActionCard({
 
   return (
     <div className={`action-card${pendingWrite ? ' action-pending' : ''}`}>
-      <div className="action-card-head">
-        <span className="mono">{action.name}</span>
-        {pendingWrite && <span className="tag warn">change to your workspace</span>}
-        <ActionStatusBadge status={action.status} />
-        {action.runId && <RunLink runId={action.runId} />}
-      </div>
-
-      <div className="action-description">{action.description}</div>
+      {pendingWrite ? (
+        // A proposal, not a record: the sentence naming the change leads, the raw action name
+        // and the run it would start trail behind it in mono.
+        <>
+          <div className="action-proposal-headline">{action.description}</div>
+          <div className="action-card-head action-card-head-secondary">
+            <span className="mono">{action.name}</span>
+            <span className="tag warn">{t('chat.action.writeTag')}</span>
+            {action.runId && <RunLink runId={action.runId} />}
+          </div>
+        </>
+      ) : (
+        <>
+          <div className="action-card-head">
+            <span className="mono">{action.name}</span>
+            <ActionStatusBadge status={action.status} />
+            {action.runId && <RunLink runId={action.runId} />}
+          </div>
+          <div className="action-description">{action.description}</div>
+        </>
+      )}
 
       {pendingWrite && (
         <div className="action-buttons">
@@ -575,11 +591,7 @@ function ActionCard({
           >
             {t('chat.confirm')}
           </button>
-          <button
-            className="danger"
-            onClick={() => reject.mutate()}
-            disabled={confirm.isPending || reject.isPending}
-          >
+          <button onClick={() => reject.mutate()} disabled={confirm.isPending || reject.isPending}>
             {t('chat.reject')}
           </button>
         </div>
@@ -587,11 +599,17 @@ function ActionCard({
 
       {action.status === 'running' && (
         <div className="dim" style={{ marginTop: 6 }}>
-          <span className="dot spin" style={{ background: 'var(--warn)' }} /> running…
+          <span className="dot spin" style={{ background: 'var(--warn)' }} /> {t('chat.action.running')}
         </div>
       )}
       {action.status === 'executed' && action.result && (
-        <pre className="log action-result">{formatResult(action.result)}</pre>
+        action.name === 'actions.expand' ? (
+          <div className="action-result-note">
+            {t('chat.action.expanded', { group: expandedGroupName(action.result) })}
+          </div>
+        ) : (
+          <pre className="log action-result">{formatResult(action.result)}</pre>
+        )
       )}
       {action.status === 'failed' && action.error && (
         <div className="status-error" style={{ marginTop: 6, fontSize: 12 }}>
@@ -600,7 +618,7 @@ function ActionCard({
       )}
       {action.status === 'rejected' && (
         <div className="dim" style={{ marginTop: 6, fontSize: 12 }}>
-          Declined — nothing ran.
+          {t('chat.action.rejectedNote')}
         </div>
       )}
     </div>
@@ -657,6 +675,16 @@ function formatResult(result: string): string {
     return JSON.stringify(JSON.parse(result), null, 2);
   } catch {
     return result;
+  }
+}
+
+/** `actions.expand`'s own result names the group it opened, in its `openedGroup` field. */
+function expandedGroupName(result: string): string {
+  try {
+    const parsed = JSON.parse(result) as { openedGroup?: unknown };
+    return typeof parsed.openedGroup === 'string' ? parsed.openedGroup : '';
+  } catch {
+    return '';
   }
 }
 

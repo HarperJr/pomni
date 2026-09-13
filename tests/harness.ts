@@ -1031,6 +1031,15 @@ export async function createHarness<G extends GitPort = FakeGit>(
     events,
     logger,
     discovery,
+    // POMN-68 grows ChatActionServices to cover credentials, doctor, comments and worktrees —
+    // every one of these is already built above for the container's other services, so the
+    // harness reuses them rather than building second copies. Appended after `discovery`
+    // rather than woven into the existing order, so a constructor that has not grown these
+    // params yet still receives everything before them unchanged.
+    credentials,
+    doctor,
+    comments,
+    worktrees,
   );
 
   await workspace.init();

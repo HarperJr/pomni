@@ -290,6 +290,69 @@ export interface PipelineRunDetail extends PipelineRun {
   questions: Question[];
 }
 
+/** One run's line in a spend report. Only what the run and its steps already record. */
+export interface RunSpend {
+  id: string;
+  task: string;
+  itemId: string | null;
+  status: PipelineStatus;
+  startedAt: string;
+  inputTokens: number;
+  outputTokens: number;
+  /** Summed from the steps; a run from before cache accounting reads as 0. */
+  cacheReadTokens: number;
+  /** Null when the provider reported no cost — not zero, see `rollUpUsage` in chat. */
+  costUsd: number | null;
+}
+
+export interface SpendSummary {
+  runs: RunSpend[];
+  totals: {
+    runs: number;
+    inputTokens: number;
+    outputTokens: number;
+    cacheReadTokens: number;
+    /** Null until some run reports a cost; then the sum of the ones that did. */
+    costUsd: number | null;
+  };
+}
+
+/**
+ * What the pipelines have been costing, as one record instead of one per run.
+ *
+ * The chat's `task.spend` returns this so "what did it cost" is a single exchange. Pure: the
+ * caller lists and fetches the runs; this only adds them up, in the order it was given.
+ */
+export function spendSummary(details: PipelineRunDetail[]): SpendSummary {
+  const runs = details.map<RunSpend>((run) => ({
+    id: run.id,
+    task: run.task,
+    itemId: run.itemId,
+    status: run.status,
+    startedAt: run.startedAt,
+    inputTokens: run.inputTokens,
+    outputTokens: run.outputTokens,
+    cacheReadTokens: run.steps.reduce((sum, step) => sum + step.cacheReadTokens, 0),
+    costUsd: run.costUsd,
+  }));
+
+  let costUsd: number | null = null;
+  for (const run of runs) {
+    if (run.costUsd !== null) costUsd = (costUsd ?? 0) + run.costUsd;
+  }
+
+  return {
+    runs,
+    totals: {
+      runs: runs.length,
+      inputTokens: runs.reduce((sum, run) => sum + run.inputTokens, 0),
+      outputTokens: runs.reduce((sum, run) => sum + run.outputTokens, 0),
+      cacheReadTokens: runs.reduce((sum, run) => sum + run.cacheReadTokens, 0),
+      costUsd,
+    },
+  };
+}
+
 export interface PipelineFilter {
   projectId?: string;
   workflowId?: string;

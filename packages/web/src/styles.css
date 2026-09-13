@@ -1197,6 +1197,10 @@ details.chip .log {
   align-self: flex-end;
 }
 
+.chat-message-assistant {
+  align-self: flex-start;
+}
+
 .chat-message-head {
   display: flex;
   align-items: center;
@@ -1367,10 +1371,6 @@ details.chip .log {
   color: var(--text-dim);
 }
 
-.action-pending .action-description {
-  color: var(--text);
-}
-
 .action-buttons {
   display: flex;
   gap: 8px;
@@ -1381,6 +1381,29 @@ details.chip .log {
   margin-top: 8px;
   max-height: 200px;
   border-radius: var(--radius);
+}
+
+.action-result-note {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+/* A pending write reads as a proposal: the sentence naming the change is the headline, and the
+   raw action name it will run is a secondary, monospace line underneath. */
+.action-proposal-headline {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.action-card-head-secondary {
+  margin-top: 6px;
+  font-size: 12px;
+}
+
+.action-card-head-secondary .mono {
+  color: var(--text-dim);
 }
 
 /* Chat is not a place you go: a floating button on every page, and a panel that opens over
@@ -1457,8 +1480,40 @@ details.chip .log {
 .chat-overlay-body {
   flex: 1;
   min-height: 0;
-  overflow: auto;
   padding: 0 20px 20px;
+  display: flex;
+  overflow: hidden;
+}
+
+/* Inside the overlay the transcript is the thing that scrolls; the header and the composer
+   above and below it stay put. Without this, the whole body scrolled as one column and a long
+   thread pushed the composer out of view along with it. */
+.chat-overlay-body .chat-layout {
+  flex: 1;
+  min-height: 0;
+  align-items: stretch;
+}
+
+.chat-overlay-body .chat-list {
+  overflow: auto;
+}
+
+.chat-overlay-body .chat-detail {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+}
+
+.chat-overlay-body .chat-detail > .chat-thread {
+  flex: 1;
+  min-height: 0;
+  max-height: none;
+}
+
+.chat-overlay-body .chat-detail > .chat-header,
+.chat-overlay-body .chat-detail > .chat-composer {
+  flex: 0 0 auto;
 }
 
 /* Inside the overlay a conversation is a button, not a link: navigating would move the page

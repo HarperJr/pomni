@@ -1,6 +1,13 @@
+import { createRequire } from 'node:module';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { layout, parseActionCalls, type Chat, type ChatMessage } from '@pomni/core';
+import {
+  MAX_EXPANSION_ROUNDS,
+  layout,
+  parseActionCalls,
+  type Chat,
+  type ChatMessage,
+} from '@pomni/core';
 import { SqliteChatStore } from '@pomni/infra';
 import { createHarness, makeNodeRepo, type TestHarness } from './harness.js';
 
@@ -10,7 +17,10 @@ const PROVIDER = 'claude-code';
 const MODEL = 'claude-sonnet-5';
 
 /** What the assistant sends back when it wants Pomni to do something. */
-function propose(prose: string, ...calls: Array<{ name: string; args?: unknown }>): string {
+function propose(
+  prose: string,
+  ...calls: Array<{ name: string; args?: unknown; again?: boolean }>
+): string {
   return [
     prose,
     '',
@@ -347,5 +357,218 @@ describe('a chat is pinned to a model', () => {
 
     expect(await harness.chat.list()).toHaveLength(0);
     expect(await harness.chatStore.listMessages(chat.id)).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// POMN-68: reach — every CLI verb reachable from chat, a grouped registry, a declined
+// proposal that stays declined, and "how is it going" in one exchange.
+//
+// Written before the registry exists: a name, field or export missing here is the feature
+// not being there yet, not a mistake in the test. See `tests/chat-actions.test.ts` for the
+// registry's own shape and the prompt-budget checks.
+// ---------------------------------------------------------------------------
+
+describe('creating a project from chat, end to end', () => {
+  it('proposes each write and performs none of them before it is confirmed', async () => {
+    const chat = await newChat();
+
+    harness.llm.replies = [
+      propose('Setting up the project.', { name: 'project.create', args: { name: 'Widgets' } }),
+    ];
+    const created = await harness.chat.sendMessage(chat.id, 'Create a project called Widgets');
+    const createAction = onlyAction(created);
+    expect(createAction.name).toBe('project.create');
+    expect(createAction.status).toBe('proposed');
+    expect((await harness.projects.list()).some((project) => project.name === 'Widgets')).toBe(
+      false,
+    );
+
+    const confirmedCreate = await harness.chat.confirmAction(chat.id, created.id, createAction.id);
+    expect(onlyAction(confirmedCreate).status).toBe('executed');
+    const project = (await harness.projects.list()).find((entry) => entry.name === 'Widgets');
+    expect(project).toBeDefined();
+    const projectId = project!.id;
+
+    harness.llm.replies = [
+      propose('Adding the repo.', {
+        name: 'repo.add',
+        args: {
+          project: projectId,
+          source: { kind: 'git', url: 'https://forge.test/acme/widgets.git' },
+        },
+      }),
+    ];
+    const added = await harness.chat.sendMessage(chat.id, 'Add the widgets repo, from git');
+    const addAction = onlyAction(added);
+    expect(addAction.status).toBe('proposed');
+    expect(await harness.repos.list(projectId)).toHaveLength(0);
+
+    const confirmedAdd = await harness.chat.confirmAction(chat.id, added.id, addAction.id);
+    expect(onlyAction(confirmedAdd).status).toBe('executed');
+    const repos = await harness.repos.list(projectId);
+    expect(repos).toHaveLength(1);
+    const repoId = repos[0]!.id;
+
+    harness.llm.replies = [
+      propose('Syncing it.', { name: 'repo.sync', args: { project: projectId, repo: repoId } }),
+    ];
+    const synced = await harness.chat.sendMessage(chat.id, 'Sync the widgets repo');
+    const syncAction = onlyAction(synced);
+    expect(syncAction.status).toBe('proposed');
+
+    const confirmedSync = await harness.chat.confirmAction(chat.id, synced.id, syncAction.id);
+    const settledSync = onlyAction(confirmedSync);
+    expect(settledSync.status).toBe('executed');
+    expect(settledSync.error).toBeNull();
+  });
+});
+
+describe('a declined proposal is not retried silently', () => {
+  it('waits to be asked again rather than re-proposing on its own', async () => {
+    const itemId = await specced('Magic link');
+    const chat = await newChat();
+
+    harness.llm.replies = [
+      propose('Removing it.', {
+        name: 'backlog.remove',
+        args: { project: 'acme', item: itemId },
+      }),
+    ];
+    const first = await harness.chat.sendMessage(chat.id, `Remove ${itemId}`);
+    await harness.chat.rejectAction(chat.id, first.id, onlyAction(first).id);
+
+    harness.llm.replies = [
+      propose('Removing it.', {
+        name: 'backlog.remove',
+        args: { project: 'acme', item: itemId },
+      }),
+    ];
+    const second = await harness.chat.sendMessage(chat.id, 'Go ahead anyway, please.');
+    expect(second.actions).toHaveLength(0);
+    expect(second.text).toContain('did not re-propose');
+
+    harness.llm.replies = [
+      propose('Removing it, as asked.', {
+        name: 'backlog.remove',
+        args: { project: 'acme', item: itemId },
+        again: true,
+      }),
+    ];
+    const third = await harness.chat.sendMessage(chat.id, 'Yes, I mean it — remove it.');
+    expect(third.actions).toHaveLength(1);
+    expect(onlyAction(third).name).toBe('backlog.remove');
+    expect(onlyAction(third).status).toBe('proposed');
+  });
+});
+
+describe('opening an action group', () => {
+  it('reads through actions.expand before proposing a write that was inside it', async () => {
+    const chat = await newChat();
+
+    harness.llm.replies = [
+      propose('Let me see what I can do with projects.', {
+        name: 'actions.expand',
+        args: { group: 'project' },
+      }),
+      propose('Creating it.', { name: 'project.create', args: { name: 'Widgets' } }),
+    ];
+
+    const answer = await harness.chat.sendMessage(chat.id, 'Create a project called Widgets');
+
+    expect(answer.actions).toHaveLength(1);
+    expect(answer.actions[0]?.name).toBe('project.create');
+    expect(answer.actions[0]?.status).toBe('proposed');
+
+    const stored = await harness.chat.get(chat.id);
+    expect(stored.openedGroups).toContain('project');
+
+    const secondCall = harness.llm.calls[harness.llm.calls.length - 1];
+    expect(secondCall?.system ?? '').toContain('project.create');
+  });
+
+  it('stops after MAX_EXPANSION_ROUNDS rounds of nothing but expansion', async () => {
+    const chat = await newChat();
+    harness.llm.replies = [
+      propose('Opening project.', { name: 'actions.expand', args: { group: 'project' } }),
+      propose('Opening repo.', { name: 'actions.expand', args: { group: 'repo' } }),
+      propose('Opening backlog.', { name: 'actions.expand', args: { group: 'backlog' } }),
+      propose('Opening task.', { name: 'actions.expand', args: { group: 'task' } }),
+    ];
+
+    const before = harness.llm.calls.length;
+    await harness.chat.sendMessage(chat.id, 'What can you do?');
+    const madeCalls = harness.llm.calls.length - before;
+
+    // The first call starts the turn; the loop then makes at most MAX_EXPANSION_ROUNDS more
+    // before it gives up on a reply that never asked for anything but another group.
+    expect(madeCalls).toBeLessThanOrEqual(1 + MAX_EXPANSION_ROUNDS);
+  });
+});
+
+describe('answering "how is it going" in one exchange', () => {
+  it('runs task.spend, backlog.next, backlog.waves, question.list and repo.doctor together', async () => {
+    await specced('Magic link');
+    const chat = await newChat();
+
+    harness.llm.replies = [
+      propose(
+        'Checking on things.',
+        { name: 'task.spend', args: { project: 'acme' } },
+        { name: 'backlog.next', args: { project: 'acme' } },
+        { name: 'backlog.waves', args: { project: 'acme' } },
+        { name: 'question.list', args: { project: 'acme' } },
+        { name: 'repo.doctor', args: { project: 'acme' } },
+      ),
+    ];
+
+    const answer = await harness.chat.sendMessage(chat.id, 'How is Pomni doing?');
+
+    expect(answer.actions).toHaveLength(5);
+    for (const action of answer.actions) {
+      expect(action.status, `'${action.name}' did not run`).toBe('executed');
+      expect(action.error, `'${action.name}' failed: ${action.error}`).toBeNull();
+    }
+
+    const spend = answer.actions.find((action) => action.name === 'task.spend');
+    const parsed = JSON.parse(spend?.result ?? 'null') as { runs?: unknown; totals?: unknown };
+    expect(parsed).toHaveProperty('runs');
+    expect(parsed).toHaveProperty('totals');
+  });
+});
+
+describe('opened groups persist', () => {
+  it('survives a store reopen', async () => {
+    const chat = await newChat();
+    const current = await harness.chatStore.getChat(chat.id);
+    await harness.chatStore.updateChat({ ...current!, openedGroups: ['repo', 'backlog'] });
+
+    const reopened = new SqliteChatStore(join(harness.root, layout.database));
+    try {
+      expect((await reopened.getChat(chat.id))?.openedGroups).toEqual(['repo', 'backlog']);
+    } finally {
+      reopened.close();
+    }
+  });
+
+  it('reads a row whose openedGroups is the bare column default as nothing opened', async () => {
+    const chat = await newChat();
+
+    const { DatabaseSync } = createRequire(import.meta.url)('node:sqlite') as {
+      DatabaseSync: new (path: string) => {
+        prepare(sql: string): { run(...args: unknown[]): unknown };
+        close(): void;
+      };
+    };
+    const raw = new DatabaseSync(join(harness.root, layout.database));
+    try {
+      // The column's own default is '[]' — this is the row a pre-migration write leaves
+      // behind, before anything in this codebase knew the column existed.
+      raw.prepare(`UPDATE chats SET openedGroups = '[]' WHERE id = ?`).run(chat.id);
+    } finally {
+      raw.close();
+    }
+
+    expect((await harness.chatStore.getChat(chat.id))?.openedGroups).toEqual([]);
   });
 });

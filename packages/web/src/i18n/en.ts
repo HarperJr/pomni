@@ -51,6 +51,10 @@ export const en = {
   'chat.sending': 'Sending…',
   'chat.addressRule':
     'Type #project, @agent or /skill at the start of a word — after a space or a new line. @ may take a workflow/agent form; # and / may not contain a slash; anything inside backticks is left alone.',
+  'chat.action.writeTag': 'change to your workspace',
+  'chat.action.running': 'running…',
+  'chat.action.expanded': 'Opened the {group} actions.',
+  'chat.action.rejectedNote': 'Declined — nothing ran.',
 
   // -- shared ---------------------------------------------------------------
   'common.loading': 'Loading…',
