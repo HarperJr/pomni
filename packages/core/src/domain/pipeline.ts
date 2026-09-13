@@ -176,6 +176,49 @@ export type ContextFile = z.infer<typeof ContextFileSchema>;
 export const MAX_CONTEXT_FILE_BYTES = 256_000;
 export const MAX_CONTEXT_BYTES = 512_000;
 
+/**
+ * What syncing a repo before the run found.
+ *
+ * The first six are `FastForwardResult.status`, copied verbatim. `skipped` is the one the
+ * fast-forward cannot say for itself: the sync was not attempted — `--no-sync` was passed, or
+ * the repo is linked from the user's own disk and is never advanced (rule 4).
+ */
+export const RunBaseSyncSchema = z.enum([
+  'advanced',
+  'current',
+  'diverged',
+  'dirty',
+  'no-upstream',
+  'unavailable',
+  'skipped',
+]);
+export type RunBaseSync = z.infer<typeof RunBaseSyncSchema>;
+
+/**
+ * The code one repo of a run started from.
+ *
+ * On the run rather than in its log, because "which code was this?" is the first question
+ * about a surprising result and should not need archaeology. A run cut from a clone nobody
+ * had synced in a month reasons confidently about code that is not there any more, and the
+ * confident report is the expensive outcome.
+ */
+export const RunBaseSchema = z.object({
+  repoId: z.string(),
+  name: z.string(),
+  /**
+   * The commit the worktree was cut from. Null when it could not be read — a repo that fell
+   * back to its shared directory has no worktree, and so no head this run can vouch for.
+   */
+  commit: z.string().nullable(),
+  sync: RunBaseSyncSchema,
+  /** HEAD before and after the fast-forward. Only differ when `sync` is `advanced`. */
+  from: z.string().nullable().default(null),
+  to: z.string().nullable().default(null),
+  /** One sentence a person reads. Always set; the status alone does not explain itself. */
+  detail: z.string(),
+});
+export type RunBase = z.infer<typeof RunBaseSchema>;
+
 export const PipelineRunSchema = z.object({
   id: z.string(),
   projectId: z.string(),
@@ -210,6 +253,17 @@ export const PipelineRunSchema = z.object({
    * It never means the run worked in the repo directory; `unmet` says that in words.
    */
   branch: z.string().nullable().default(null),
+  /**
+   * What each repo this run isolated started from, one entry per repo in the order they were
+   * taken. Empty means "not recorded" — a run from before this field — never "no repos".
+   */
+  bases: z.array(RunBaseSchema).default([]),
+  /**
+   * True iff the run was started with `--no-sync`. Kept apart from every base reading
+   * `skipped`: a run that chose not to sync answers "which code was this?" differently from
+   * one that synced and found itself current.
+   */
+  noSync: z.boolean().default(false),
   task: z.string(),
   status: PipelineStatusSchema,
   /**

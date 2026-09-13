@@ -758,8 +758,12 @@ describe('POMN-70: a run syncs the code it is about to work in', () => {
     harness.llm.replies = ['Done.'];
     const { run, completion } = await harness.pipelines.start({ projectId: 'acme', task: 'Ship it' });
 
-    const touched = harness.git.ordered.filter((call) => call.dir === workingDir);
-    expect(touched).toHaveLength(0);
+    // The repo is still isolated into its own worktree (addWorktree runs) — what must never
+    // happen for a linked repo is the branch being advanced.
+    const advanced = harness.git.ordered.filter(
+      (call) => call.dir === workingDir && (call.method === 'fetch' || call.method === 'fastForward'),
+    );
+    expect(advanced).toHaveLength(0);
 
     const base = run.bases.find((entry) => entry.repoId === repoId);
     expect(base?.sync).toBe('skipped');
@@ -782,7 +786,11 @@ describe('POMN-70: a run syncs the code it is about to work in', () => {
 
     expect(run.noSync).toBe(true);
     expect(harness.git.fetched).toHaveLength(0);
-    expect(harness.git.ordered.some((call) => call.dir === workingDir)).toBe(false);
+    expect(
+      harness.git.ordered.some(
+        (call) => call.dir === workingDir && (call.method === 'fetch' || call.method === 'fastForward'),
+      ),
+    ).toBe(false);
     expect(run.bases.every((entry) => entry.sync === 'skipped')).toBe(true);
 
     await completion;
@@ -806,6 +814,30 @@ describe('POMN-70: a run syncs the code it is about to work in', () => {
       (call) => call.method === 'fetch' && call.dir === workingDir,
     );
     expect(fetches).toHaveLength(1);
+  });
+
+  it('keeps bases and noSync when the run is read back from storage', async () => {
+    const { id: repoId, workingDir } = await addCloned('web');
+    harness.git.trackRepo(workingDir, { branch: 'main', head: 'bbb' });
+    harness.git.fastForwardResult = {
+      status: 'advanced',
+      branch: 'main',
+      upstream: 'origin/main',
+      from: 'aaa',
+      to: 'bbb',
+      detail: "'main' advanced to origin/main",
+    };
+
+    harness.llm.replies = ['Done.'];
+    const { run, completion } = await harness.pipelines.start({ projectId: 'acme', task: 'Ship it' });
+    await completion;
+
+    const reloaded = await harness.pipelines.get(run.id);
+
+    expect(reloaded.bases).toEqual(run.bases);
+    expect(reloaded.bases[0]).toMatchObject({ repoId, sync: 'advanced', from: 'aaa', to: 'bbb' });
+    expect(reloaded.noSync).toBe(run.noSync);
+    expect(reloaded.noSync).toBe(false);
   });
 
   it('reads bases and noSync as empty and false on a run recorded before they existed', () => {

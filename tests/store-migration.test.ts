@@ -111,6 +111,8 @@ describe('a database whose schema diverged from this one', () => {
       inputTokens: 0,
       outputTokens: 0,
       costUsd: null,
+      bases: [],
+      noSync: false,
     });
 
     const db = new DatabaseSync(path);

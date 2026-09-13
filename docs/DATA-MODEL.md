@@ -312,7 +312,9 @@ CREATE TABLE runs (
   ended_at    INTEGER,
   duration_ms INTEGER,
   log_path    TEXT NOT NULL,
-  summary     TEXT
+  summary     TEXT,
+  bases       TEXT NOT NULL DEFAULT '[]',    -- JSON array of RunBase: per-repo base commit + sync outcome
+  no_sync     INTEGER NOT NULL DEFAULT 0     -- 1 if --no-sync was passed, 0 otherwise
 );
 
 CREATE TABLE run_artifacts (
