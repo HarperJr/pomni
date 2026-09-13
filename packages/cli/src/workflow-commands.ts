@@ -668,6 +668,7 @@ export function registerTaskCommands(
       (value: string, all: string[]) => [...all, value],
       [] as string[],
     )
+    .option('--no-sync', "don't fast-forward the repos first; work from what is there")
     .action(
       async (
         text: string[],
@@ -677,6 +678,7 @@ export function registerTaskCommands(
           item?: string;
           repo?: string;
           file: string[];
+          sync: boolean;
         },
       ) => {
         const container = await open();
@@ -707,6 +709,7 @@ ${item.body}`;
           itemId: flags.item?.toUpperCase(),
           repoId: flags.repo,
           context,
+          sync: flags.sync,
         });
 
         console.log(`${style.cyan('run')} ${style.bold(run.id)}  ${run.workflowName}`);
@@ -715,6 +718,7 @@ ${item.body}`;
             style.dim(`  context:   ${run.context.map((file) => file.name).join(', ')}`),
           );
         }
+        printBases(run);
         console.log(style.dim(`  watch it:  http://localhost:7777/p/${projectId}/console/${run.id}`));
         console.log();
 
@@ -1033,6 +1037,7 @@ ${item.body}`;
       const detail = await container.pipelines.get(match.id);
       console.log(`${style.bold(detail.id.slice(-8))}  ${detail.workflowName}  ${detail.status}`);
       if (detail.itemId) console.log(style.dim(`item ${detail.itemId}`));
+      printBases(detail);
       console.log();
 
       console.log(
@@ -1497,6 +1502,18 @@ export function lintReport(
  * Every match is collected before deciding, because an ambiguous id has to be reported with
  * both candidates named — picking one silently is the outcome that loses work.
  */
+/**
+ * One line per repo the run started from — the base commit it resolved and whether sync
+ * moved it — so "which code was this?" doesn't need a log.
+ */
+function printBases(run: Pick<PipelineRun, 'bases' | 'noSync'>): void {
+  if (run.noSync) console.log(style.dim('  --no-sync — worked from what was there'));
+  for (const base of run.bases) {
+    const commit = base.commit ? base.commit.slice(0, 8) : style.dim('(unknown)');
+    console.log(style.dim(`  ${base.name} ${commit} (${base.sync}: ${base.detail})`));
+  }
+}
+
 export async function resolveRun(
   container: PomniContainer,
   id: string,

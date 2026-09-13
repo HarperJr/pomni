@@ -130,6 +130,19 @@ export class FakeGit implements GitPort {
   fetched: string[] = [];
   failNextClone: string | null = null;
   authSeen: Array<GitAuth | undefined> = [];
+  /**
+   * A directory a test wants `fetch` to fail for, keyed by `dirKey`. Modelling a remote that
+   * is unreachable for one repo and fine for the rest — POMN-70's "fetch happens once per
+   * repo" needs a failure that does not take every repo in the run down with it.
+   */
+  failFetch = new Set<string>();
+  /**
+   * `fetch` and `addWorktree` calls, in the order this fake actually saw them, across every
+   * repo. A run that syncs before it cuts a worktree needs to be checked as an ordering, not
+   * as two counts that happen to both be right — a caller that cuts the worktree first and
+   * syncs after would pass a count-only assertion and start every run from stale code anyway.
+   */
+  ordered: Array<{ method: 'fetch' | 'fastForward' | 'addWorktree'; dir: string }> = [];
 
   /** Directories a test has declared to be git repositories, keyed by `dirKey`. */
   private readonly tracked = new Map<
@@ -228,7 +241,16 @@ export class FakeGit implements GitPort {
   }
 
   async fetch(dir: string): Promise<void> {
+    this.ordered.push({ method: 'fetch', dir });
+    if (this.failFetch.has(dirKey(dir))) {
+      throw new Error(`git fetch failed: could not reach origin for ${dir}`);
+    }
     this.fetched.push(dir);
+  }
+
+  /** Declare that `fetch` should throw for this directory — the "remote unreachable" case. */
+  failFetchFor(dir: string): void {
+    this.failFetch.add(dirKey(dir));
   }
 
   /** Every `diff` asked for, so a test can assert which range was used. */
@@ -316,6 +338,7 @@ export class FakeGit implements GitPort {
     repoDir: string,
     options: { path: string; branch: string; baseRef: string },
   ): Promise<{ head: string }> {
+    this.ordered.push({ method: 'addWorktree', dir: repoDir });
     if (this.failNextAddWorktree) {
       const message = this.failNextAddWorktree;
       this.failNextAddWorktree = null;
@@ -537,6 +560,7 @@ export class FakeGit implements GitPort {
   }
 
   async fastForward(dir: string, options: { branch?: string } = {}): Promise<FastForwardResult> {
+    this.ordered.push({ method: 'fastForward', dir });
     if (this.fastForwardResult) return this.fastForwardResult;
     const info = await this.info(dir);
     const branch = options.branch ?? info?.currentBranch ?? null;

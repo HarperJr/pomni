@@ -51,8 +51,9 @@ export class SqlitePipelineStore implements PipelineStore {
       `INSERT INTO pipeline_runs (id, project_id, workflow_id, workflow_name, provider_id,
                                   item_id, rerun_of, task, context, status, pid, result, error,
                                   gate_status, gate_summary, item_status, outcome, unmet,
-                                  started_at, ended_at, duration_ms, cost_usd, branch, started_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                                  started_at, ended_at, duration_ms, cost_usd, branch, started_by,
+                                  bases, no_sync)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       run.id,
       run.projectId,
@@ -80,6 +81,8 @@ export class SqlitePipelineStore implements PipelineStore {
       // value SQLite can bind — it fails with a parameter number and no clue which field.
       run.branch ?? null,
       run.startedBy ?? null,
+      JSON.stringify(run.bases),
+      run.noSync ? 1 : 0,
     );
   }
 
@@ -91,7 +94,8 @@ export class SqlitePipelineStore implements PipelineStore {
       `UPDATE pipeline_runs
          SET status = ?, pid = ?, result = ?, error = ?, gate_status = ?, gate_summary = ?,
              item_status = ?, outcome = ?, unmet = ?, ended_at = ?, duration_ms = ?,
-             input_tokens = ?, output_tokens = ?, cost_usd = ?, context = ?, branch = ?
+             input_tokens = ?, output_tokens = ?, cost_usd = ?, context = ?, branch = ?,
+             bases = ?, no_sync = ?
        WHERE id = ?`,
     ).run(
       run.status,
@@ -110,6 +114,8 @@ export class SqlitePipelineStore implements PipelineStore {
       run.costUsd,
       JSON.stringify(run.context),
       run.branch ?? null,
+      JSON.stringify(run.bases),
+      run.noSync ? 1 : 0,
       id,
     );
   }
@@ -390,6 +396,8 @@ interface RunRow {
   input_tokens: number | null;
   output_tokens: number | null;
   cost_usd: number | null;
+  bases: string | null;
+  no_sync: number | null;
 }
 
 interface StepRow {
@@ -452,6 +460,8 @@ function toRun(row: RunRow): PipelineRun {
     inputTokens: row.input_tokens ?? 0,
     outputTokens: row.output_tokens ?? 0,
     costUsd: row.cost_usd,
+    bases: toBases(row.bases),
+    noSync: !!row.no_sync,
   };
 }
 
@@ -482,6 +492,17 @@ function toContext(raw: string | null): PipelineRun['context'] {
   if (!raw) return [];
   try {
     return JSON.parse(raw) as PipelineRun['context'];
+  } catch {
+    return [];
+  }
+}
+
+/** Runs written before the column existed have no record of what they started from. */
+function toBases(raw: string | null): PipelineRun['bases'] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    return Array.isArray(parsed) ? (parsed as PipelineRun['bases']) : [];
   } catch {
     return [];
   }
@@ -662,6 +683,9 @@ const MIGRATIONS: string[] = [
   `ALTER TABLE pipeline_steps ADD COLUMN sent_bytes INTEGER NOT NULL DEFAULT 0;`,
 
   `ALTER TABLE pipeline_runs ADD COLUMN started_by TEXT;`,
+
+  `ALTER TABLE pipeline_runs ADD COLUMN bases TEXT NOT NULL DEFAULT '[]';
+   ALTER TABLE pipeline_runs ADD COLUMN no_sync INTEGER NOT NULL DEFAULT 0;`,
 ];
 
 function migrate(db: SqliteDatabase): void {

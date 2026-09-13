@@ -39,6 +39,7 @@ import {
   type PipelineStep,
   type PromptParts,
   type Question,
+  type RunBase,
   type Verdict,
 } from '../domain/pipeline.js';
 import { detectProvider } from '../domain/source.js';
@@ -107,6 +108,14 @@ export interface StartRunInput {
    * had already seen. Only `rerun()` sets it; a first attempt has nothing to be since.
    */
   commentsSince?: CommentsSince;
+  /**
+   * Whether to fast-forward each repo's base branch before cutting its worktree. Absent means
+   * yes: a run that reasons about stale code produces confident, wrong work. `false` is
+   * `--no-sync`, for a remote that is slow or absent when the person means to work from what
+   * is there — and is recorded on the run, because it answers "which code was this?"
+   * differently.
+   */
+  sync?: boolean;
 }
 
 export interface StartRunResult {
@@ -376,6 +385,11 @@ export class PipelineService {
 
     const { run, taken, workspace } = await this.claim(input.projectId, async () => {
       await this.assertNotInUse(input.projectId, isolated);
+      // Read the tree that exists now. The clone's base branch only ever moved when a person
+      // ran `repo sync` by hand, so a worktree was cut from whenever that last happened — on a
+      // machine where nobody had, the clone date. Once per repo, here, inside the claim: the
+      // fetch is paid for once however many agents the run has.
+      const synced = await this.syncBases(input.projectId, isolated, input.sync !== false);
       const taken = await this.worktrees.take(input.projectId, runId, isolated, { pid, branch });
       const workspace = this.workspace(usable, taken.dirs, input.repoId);
 
@@ -391,6 +405,11 @@ export class PipelineService {
         // Filled in by `deliver()` when there is a commit to point at. Null until then, which
         // is honest: a run that has not committed has no branch worth naming.
         branch: null,
+        bases: isolated.map((repo) => ({
+          ...synced[repo.id]!,
+          commit: taken.heads[repo.id] ?? null,
+        })),
+        noSync: input.sync === false,
         task,
         context,
         status: 'running',
@@ -3236,6 +3255,63 @@ export class PipelineService {
         );
       }
     }
+  }
+
+  /**
+   * Fast-forward each repo's base branch, and say what each one found.
+   *
+   * Never throws and never skips a repo: diverged, dirty, no upstream and unreachable are all
+   * normal states, and a run that refuses to start because a remote was down is worse than one
+   * working from yesterday's code, as long as it says so. Which is what the entry is for.
+   *
+   * A repo linked from the user's own disk is fetched by nobody and advanced by nobody:
+   * `RepoService.sync` answers `advanced: null` for it, and that reads as `skipped` here —
+   * rule 4, and this is not the hole in it. `--no-sync` skips every repo the same way, without
+   * calling `sync` at all, so a slow remote is not so much as touched.
+   *
+   * `commit` is left null: the worktree has not been cut yet, and the head it is cut from is
+   * what `WorktreeService.take` returns.
+   */
+  private async syncBases(
+    projectId: string,
+    repos: ResolvedRepo[],
+    sync: boolean,
+  ): Promise<Record<string, Omit<RunBase, 'commit'> & { commit: null }>> {
+    const bases: Record<string, Omit<RunBase, 'commit'> & { commit: null }> = {};
+
+    for (const repo of repos) {
+      const base = { repoId: repo.id, name: repo.name, commit: null as null, from: null, to: null };
+
+      if (!sync) {
+        bases[repo.id] = { ...base, sync: 'skipped', detail: 'sync skipped: --no-sync was passed' };
+        continue;
+      }
+
+      try {
+        const { advanced } = await this.repos.sync(projectId, repo.id);
+        bases[repo.id] = advanced
+          ? {
+              ...base,
+              sync: advanced.status,
+              from: advanced.from,
+              to: advanced.to,
+              detail: advanced.detail,
+            }
+          : {
+              ...base,
+              sync: 'skipped',
+              detail: `sync skipped: '${repo.name}' is not a clone Pomni manages, so its branch is never advanced`,
+            };
+      } catch (error) {
+        // `sync` already swallows a failed fetch; this is a fast-forward that threw, or a
+        // repo that could not be re-read. Either way the run goes on from what is there.
+        const detail = `sync failed for '${repo.name}' (${firstLine(error)}) — the run is working from the clone as it was`;
+        this.logger.warn(detail);
+        bases[repo.id] = { ...base, sync: 'unavailable', detail };
+      }
+    }
+
+    return bases;
   }
 
   /**

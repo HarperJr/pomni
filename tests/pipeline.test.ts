@@ -634,3 +634,231 @@ describe('what kind of change a run is for', () => {
     expect(String(harness.llm.calls[0]?.messages[0]?.content ?? '')).not.toContain('Size the team');
   });
 });
+
+describe('POMN-70: a run syncs the code it is about to work in', () => {
+  /** A cloned repo, isolated by default (git kind, not a linked directory). */
+  async function addCloned(name: string): Promise<{ id: string; workingDir: string }> {
+    const { repo, completion } = await harness.repos.add('acme', {
+      source: { kind: 'git', url: `https://forge.test/acme/${name}.git` },
+    });
+    await completion;
+    const workingDir = (await harness.repos.get('acme', repo.id)).workingDir;
+    return { id: repo.id, workingDir };
+  }
+
+  /** A repo linked from the user's own disk — must never have its branch advanced. */
+  async function addLinked(name: string): Promise<{ id: string; workingDir: string }> {
+    const dir = await makeNodeRepo(join(harness.dir, name));
+    harness.git.trackRepo(dir);
+    const { repo, completion } = await harness.repos.add('acme', {
+      source: { kind: 'local', path: dir },
+    });
+    await completion;
+    // 'always' so the linked repo is still isolated into its own worktree — the sync
+    // question ("was the branch advanced") is independent of the isolation question.
+    await harness.repos.update('acme', repo.id, { worktrees: 'always' });
+    return { id: repo.id, workingDir: dir };
+  }
+
+  it('syncs a repo before cutting its worktree, and records what the sync found', async () => {
+    const { id: repoId, workingDir } = await addCloned('web');
+    // The head `addWorktree` will report once the branch has been fast-forwarded.
+    harness.git.trackRepo(workingDir, { branch: 'main', head: 'bbb' });
+    harness.git.fastForwardResult = {
+      status: 'advanced',
+      branch: 'main',
+      upstream: 'origin/main',
+      from: 'aaa',
+      to: 'bbb',
+      detail: "'main' advanced to origin/main",
+    };
+
+    harness.llm.replies = ['Done.'];
+    const { run, completion } = await harness.pipelines.start({ projectId: 'acme', task: 'Ship it' });
+
+    expect(run.bases).toHaveLength(1);
+    expect(run.bases[0]).toMatchObject({
+      repoId,
+      sync: 'advanced',
+      from: 'aaa',
+      to: 'bbb',
+      commit: 'bbb',
+    });
+
+    // Read the tree that exists now, not whatever it happened to be at when someone last
+    // synced by hand: the fetch and fast-forward on the repo's own directory must be recorded
+    // before the worktree is cut from it.
+    const relevant = harness.git.ordered.filter((call) => call.dir === workingDir);
+    const fetchIndex = relevant.findIndex((call) => call.method === 'fetch');
+    const worktreeIndex = relevant.findIndex((call) => call.method === 'addWorktree');
+    expect(fetchIndex).toBeGreaterThanOrEqual(0);
+    expect(worktreeIndex).toBeGreaterThanOrEqual(0);
+    expect(fetchIndex).toBeLessThan(worktreeIndex);
+
+    await completion;
+  });
+
+  it('carries on when the sync could not fast-forward, with the reason on the run', async () => {
+    const { workingDir } = await addCloned('web');
+    harness.git.fastForwardResult = {
+      status: 'unavailable',
+      branch: 'main',
+      upstream: null,
+      from: null,
+      to: null,
+      detail: 'origin could not be reached',
+    };
+
+    harness.llm.replies = ['Done.'];
+    const { run, completion } = await harness.pipelines.start({ projectId: 'acme', task: 'Ship it' });
+    const finished = await completion;
+
+    // A remote being down is not the run's failure — a run that refuses to start over a
+    // stale clone is worse than one that says so and carries on.
+    expect(finished.status).toBe('passed');
+    expect(run.bases[0]?.sync).toBe('unavailable');
+    expect(run.bases[0]?.detail).toBeTruthy();
+  });
+
+  it('carries on when the fetch itself throws', async () => {
+    const { workingDir } = await addCloned('web');
+    harness.git.failFetchFor(workingDir);
+
+    harness.llm.replies = ['Done.'];
+    // start() itself must not reject — an unreachable remote is a normal state, not an
+    // exception a caller has to catch.
+    const { completion } = await harness.pipelines.start({ projectId: 'acme', task: 'Ship it' });
+    const finished = await completion;
+
+    expect(finished.status).toBe('passed');
+  });
+
+  it.each(['diverged', 'dirty'] as const)('records a %s base as what it is, and still runs', async (status) => {
+    const { workingDir } = await addCloned('web');
+    harness.git.fastForwardResult = {
+      status,
+      branch: 'main',
+      upstream: 'origin/main',
+      from: 'aaa',
+      to: 'aaa',
+      detail: `the branch is ${status}`,
+    };
+
+    harness.llm.replies = ['Done.'];
+    const { run, completion } = await harness.pipelines.start({ projectId: 'acme', task: 'Ship it' });
+    const finished = await completion;
+
+    expect(finished.status).toBe('passed');
+    expect(run.bases[0]?.sync).toBe(status);
+  });
+
+  it('never advances a repo linked from the user\'s own disk', async () => {
+    const { id: repoId, workingDir } = await addLinked('web');
+
+    harness.llm.replies = ['Done.'];
+    const { run, completion } = await harness.pipelines.start({ projectId: 'acme', task: 'Ship it' });
+
+    // The repo is still isolated into its own worktree (addWorktree runs) — what must never
+    // happen for a linked repo is the branch being advanced.
+    const advanced = harness.git.ordered.filter(
+      (call) => call.dir === workingDir && (call.method === 'fetch' || call.method === 'fastForward'),
+    );
+    expect(advanced).toHaveLength(0);
+
+    const base = run.bases.find((entry) => entry.repoId === repoId);
+    expect(base?.sync).toBe('skipped');
+    // Still isolated into its own worktree, so there is still a commit to point at.
+    expect(base?.commit).toBeTruthy();
+
+    await completion;
+  });
+
+  it('--no-sync skips every repo and says so on the run', async () => {
+    const { workingDir } = await addCloned('web');
+
+    harness.llm.replies = ['Done.'];
+    const { run, completion } = await harness.pipelines.start({
+      projectId: 'acme',
+      task: 'Ship it',
+      sync: false,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any);
+
+    expect(run.noSync).toBe(true);
+    expect(harness.git.fetched).toHaveLength(0);
+    expect(
+      harness.git.ordered.some(
+        (call) => call.dir === workingDir && (call.method === 'fetch' || call.method === 'fastForward'),
+      ),
+    ).toBe(false);
+    expect(run.bases.every((entry) => entry.sync === 'skipped')).toBe(true);
+
+    await completion;
+  });
+
+  it('fetches a repo once per run, no matter how many agents touch it', async () => {
+    const { workingDir } = await addCloned('web');
+    await harness.workflows.updateAgent('discovery', 'analyst', { tools: { files: true } });
+
+    harness.llm.replies = [
+      delegate('look at the first thing'),
+      'First thing looked at.',
+      delegate('look at the second thing'),
+      'Second thing looked at.',
+      'Done.',
+    ];
+
+    await (await harness.pipelines.start({ projectId: 'acme', task: 'Multi-step change' })).completion;
+
+    const fetches = harness.git.ordered.filter(
+      (call) => call.method === 'fetch' && call.dir === workingDir,
+    );
+    expect(fetches).toHaveLength(1);
+  });
+
+  it('keeps bases and noSync when the run is read back from storage', async () => {
+    const { id: repoId, workingDir } = await addCloned('web');
+    harness.git.trackRepo(workingDir, { branch: 'main', head: 'bbb' });
+    harness.git.fastForwardResult = {
+      status: 'advanced',
+      branch: 'main',
+      upstream: 'origin/main',
+      from: 'aaa',
+      to: 'bbb',
+      detail: "'main' advanced to origin/main",
+    };
+
+    harness.llm.replies = ['Done.'];
+    const { run, completion } = await harness.pipelines.start({ projectId: 'acme', task: 'Ship it' });
+    await completion;
+
+    const reloaded = await harness.pipelines.get(run.id);
+
+    expect(reloaded.bases).toEqual(run.bases);
+    expect(reloaded.bases[0]).toMatchObject({ repoId, sync: 'advanced', from: 'aaa', to: 'bbb' });
+    expect(reloaded.noSync).toBe(run.noSync);
+    expect(reloaded.noSync).toBe(false);
+  });
+
+  it('reads bases and noSync as empty and false on a run recorded before they existed', () => {
+    const parsed = PipelineRunSchema.parse({
+      id: 'pre-pomn-70',
+      projectId: 'acme',
+      workflowId: 'discovery',
+      workflowName: 'Discovery',
+      providerId: 'claude-code',
+      itemId: null,
+      task: 'something recorded before this run tracked its base',
+      status: 'passed',
+      result: 'Done.',
+      error: null,
+      costUsd: null,
+      endedAt: new Date().toISOString(),
+      durationMs: 1000,
+      startedAt: new Date(Date.now() - 60_000).toISOString(),
+    });
+
+    expect(parsed.bases).toEqual([]);
+    expect(parsed.noSync).toBe(false);
+  });
+});

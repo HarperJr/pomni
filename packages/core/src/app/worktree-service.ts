@@ -34,6 +34,11 @@ import type {
 export interface TakenWorktrees {
   /** Keyed by repo id. Every repo passed in appears here — a fallback maps to its own dir. */
   dirs: Record<string, string>;
+  /**
+   * The commit each worktree was cut from, keyed by repo id. Absent for a fallback: a repo
+   * working in its shared directory has no head this run can vouch for.
+   */
+  heads: Record<string, string>;
   /** Repos that are sharing their directory with everyone else, and why. */
   fallbacks: Array<{ repoId: string; name: string; reason: string }>;
 }
@@ -98,8 +103,9 @@ export class WorktreeService {
     options: { pid?: number; branch?: string } = {},
   ): Promise<TakenWorktrees> {
     const dirs: Record<string, string> = {};
+    const heads: Record<string, string> = {};
     const fallbacks: TakenWorktrees['fallbacks'] = [];
-    if (repos.length === 0) return { dirs, fallbacks };
+    if (repos.length === 0) return { dirs, heads, fallbacks };
 
     // Asked once for the whole call: it is a property of the git on this machine, not of a repo.
     const gitSupportsWorktrees = await this.git.supportsWorktrees().catch(() => false);
@@ -162,6 +168,7 @@ export class WorktreeService {
           path,
         });
         dirs[repo.id] = path;
+        heads[repo.id] = head;
       } catch (error) {
         // The branch already exists, the disk is full, the filesystem cannot do links, the
         // repo is itself somebody's worktree. All of it is a shared directory, not a dead run.
@@ -172,7 +179,7 @@ export class WorktreeService {
       }
     }
 
-    return { dirs, fallbacks };
+    return { dirs, heads, fallbacks };
   }
 
   /**
@@ -196,12 +203,15 @@ export class WorktreeService {
     options: { pid?: number; branch?: string } = {},
   ): Promise<ReclaimedWorktrees> {
     const dirs: Record<string, string> = {};
+    // A reclaimed tree's head is where the earlier attempt left off, not the base it was cut
+    // from; the row's `baseCommit` keeps that. Only a tree cut fresh here reports one.
+    const heads: Record<string, string> = {};
     const fallbacks: TakenWorktrees['fallbacks'] = [];
     const reclaimed: string[] = [];
     // Repos whose earlier tree could not be restored. Told apart from an ordinary fallback
     // because this one means replayed answers no longer describe the files on disk.
     const lost: string[] = [];
-    if (repos.length === 0) return { dirs, fallbacks, reclaimed, lost };
+    if (repos.length === 0) return { dirs, heads, fallbacks, reclaimed, lost };
 
     for (const repo of repos) {
       const row = await this.store.forRun(runId, repo.id);
@@ -235,6 +245,7 @@ export class WorktreeService {
 
         const cut = await this.take(projectId, runId, [repo], options);
         dirs[repo.id] = cut.dirs[repo.id] ?? repo.workingDir;
+        Object.assign(heads, cut.heads);
         fallbacks.push(...cut.fallbacks);
         continue;
       }
@@ -273,7 +284,7 @@ export class WorktreeService {
       }
     }
 
-    return { dirs, fallbacks, reclaimed, lost };
+    return { dirs, heads, fallbacks, reclaimed, lost };
   }
 
   /**
