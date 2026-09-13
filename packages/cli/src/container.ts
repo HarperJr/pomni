@@ -222,6 +222,10 @@ export function createContainer(root: string, logLevel: LogLevel = 'warn'): Pomn
     events,
     logger,
     discovery,
+    credentials,
+    doctor,
+    comments,
+    worktrees,
   );
 
   return {

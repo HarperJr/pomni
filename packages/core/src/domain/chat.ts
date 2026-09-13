@@ -63,6 +63,16 @@ export function isChatActionGroup(value: unknown): value is ChatActionGroup {
 export const MAX_OPENED_GROUPS = 2;
 
 /**
+ * How many times one turn may answer with nothing but `actions.expand` before it has to speak.
+ *
+ * A model that keeps opening groups is reading, not stalling — but it is spending a model call
+ * per read and the person is watching a spinner. Three is enough to walk from the group list
+ * into two groups and still answer; past that the turn ends with what it has and the person
+ * can ask again.
+ */
+export const MAX_EXPANSION_ROUNDS = 3;
+
+/**
  * Open a group: newest last, no duplicates, oldest dropped past the cap.
  *
  * Re-opening a group that is already open moves it to the end, so what the model reached
