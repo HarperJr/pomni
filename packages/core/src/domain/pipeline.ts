@@ -798,16 +798,49 @@ export function parseDelegations(text: string): Delegation[] | null {
   return null;
 }
 
-/** Every fenced or bare JSON object in a reply, most likely first. */
+/**
+ * Every fenced or bare JSON object in a reply, most likely first.
+ *
+ * Fences are paired by walking the lines, not by a regex over the whole reply. A regex looking
+ * for an opening fence cannot tell one from a closing fence, so a reply carrying a labelled
+ * block before its JSON — ```handover, then ```json — pairs the *closing* fence of the first
+ * with the *opening* fence of the second and captures the JSON as text inside a block that
+ * never existed. Not hypothetical: that is what swallowed the delegation on runs KF1HCPKF and
+ * NSP5X8MW, ending both after two steps while reporting passed.
+ *
+ * Only blocks whose info string is empty or `json` are read. A ```handover block is somebody
+ * else's payload and must not be parsed as an object just because it happens to look like one.
+ */
 function jsonBlocks(text: string): unknown[] {
   const found: unknown[] = [];
+  let info: string | null = null;
+  let body: string[] = [];
 
-  const fenced = /```(?:json)?\s*\n([\s\S]*?)\n```/g;
-  let match: RegExpExecArray | null;
-  while ((match = fenced.exec(text)) !== null) {
-    const parsed = tryParse(match[1] ?? '');
-    if (parsed !== undefined) found.push(parsed);
+  const take = (): void => {
+    if (info === '' || info === 'json') {
+      const parsed = tryParse(body.join('\n'));
+      if (parsed !== undefined) found.push(parsed);
+    }
+  };
+
+  for (const line of text.split(/\r?\n/)) {
+    const fence = /^\s{0,3}```(.*)$/.exec(line);
+    if (fence) {
+      if (info === null) {
+        info = (fence[1] ?? '').trim().toLowerCase();
+        body = [];
+      } else {
+        take();
+        info = null;
+      }
+      continue;
+    }
+    if (info !== null) body.push(line);
   }
+
+  // A block the model never closed. What it holds is still what the model meant to send, and a
+  // reply cut off after the object is likelier than one cut off inside it.
+  if (info !== null) take();
 
   // Some models skip the fence entirely when the whole reply is the object.
   if (found.length === 0) {
@@ -819,6 +852,20 @@ function jsonBlocks(text: string): unknown[] {
   }
 
   return found;
+}
+
+/**
+ * Whether a reply was *trying* to delegate, when {@link parseDelegations} found nothing it
+ * could act on.
+ *
+ * The difference between "the orchestrator is finished" and "the orchestrator asked for work
+ * and the request could not be read" is the whole of POMN-67. Only the second is a fault, and
+ * a run must never record it as the first.
+ */
+export function looksLikeDelegation(text: string): boolean {
+  return jsonBlocks(text).some(
+    (block) => typeof block === 'object' && block !== null && 'delegate' in block,
+  );
 }
 
 function tryParse(raw: string): unknown {

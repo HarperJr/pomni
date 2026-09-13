@@ -21,6 +21,7 @@ import {
   MAX_CONTEXT_FILE_BYTES,
   HANDOVER_PROTOCOL,
   ORCHESTRATOR_PROTOCOL,
+  looksLikeDelegation,
   parseDelegations,
   bytes,
   parseHandover,
@@ -188,6 +189,14 @@ interface RunBudget {
   steps: number;
   /** The sentence explaining the stop, once one has happened. Null while the run may go on. */
   stopped: string | null;
+  /**
+   * Work the run planned and never did — a delegation block that could not be read.
+   *
+   * Kept beside the budget because it is the other run-wide fact a step discovers and the
+   * finish has to know about. A run carrying one did not pass, whatever its last agent said:
+   * the orchestrator asked for something and nothing came back to tell it otherwise.
+   */
+  dropped: string[];
 }
 /** How many agents one round may run at once. */
 const MAX_PARALLEL = 4;
@@ -1194,7 +1203,7 @@ export class PipelineService {
   ): Promise<PipelineRun> {
     const { cwd } = workspace;
     const started = Date.now();
-    const budget: RunBudget = { cost: 0, steps: 0, stopped: null };
+    const budget: RunBudget = { cost: 0, steps: 0, stopped: null, dropped: [] };
     /** Assigned by whichever arm ends the run; the finally releases against it. */
     let settled: PipelineRun | undefined;
 
@@ -1225,6 +1234,10 @@ export class PipelineService {
       // A run that ran out of budget did not finish the work, whatever its last agent said
       // about the part it did reach. The stop outranks the verdict for that reason.
       const stopped = budget.stopped;
+      // Work the run planned and never did. Like a budget stop, it out-ranks the verdict: an
+      // orchestrator whose delegation was dropped has no way to know it, so its own account of
+      // the run is written without the one fact that matters most about it.
+      const dropped = budget.dropped.length > 0 ? budget.dropped.join('; ') : null;
 
       let finished: PipelineRun = {
         ...run,
@@ -1235,15 +1248,18 @@ export class PipelineService {
         context: this.withHandovers(run),
         status: this.cancelled.has(run.id)
           ? 'cancelled'
-          : stopped || verdict.outcome === 'blocked'
+          : stopped || dropped || verdict.outcome === 'blocked'
             ? 'failed'
             : 'passed',
-        error: stopped ?? (verdict.outcome === 'blocked' ? verdict.unmet.join('; ') || 'blocked' : null),
+        error:
+          stopped ??
+          dropped ??
+          (verdict.outcome === 'blocked' ? verdict.unmet.join('; ') || 'blocked' : null),
         pid: null,
-        outcome: stopped ? 'blocked' : verdict.outcome,
+        outcome: stopped || dropped ? 'blocked' : verdict.outcome,
         // The agents' unmet list, after whatever the run already could not give itself —
         // a repo it had to share is as much a shortfall as a job it did not finish.
-        unmet: [...run.unmet, ...verdict.unmet, ...(stopped ? [stopped] : [])],
+        unmet: [...run.unmet, ...verdict.unmet, ...(stopped ? [stopped] : []), ...budget.dropped],
         result: result.answer,
         endedAt: this.clock.iso(),
         durationMs: Date.now() - started,
@@ -1626,6 +1642,25 @@ export class PipelineService {
         const delegations = orchestrating ? parseDelegations(result.text) : null;
         if (!delegations) {
           answer = result.text;
+
+          // It asked for work and the request could not be read. Silently treating this as
+          // "the orchestrator is finished" is what ended runs KF1HCPKF and NSP5X8MW after two
+          // steps while reporting passed. Say it, once, where both the run and a person can
+          // see it — and let it out-rank the verdict at the finish.
+          if (orchestrating && looksLikeDelegation(result.text)) {
+            const note =
+              `'${agent.name}' asked to delegate and the block could not be read as a` +
+              ' delegation, so nothing was run for it';
+            budget.dropped.push(note);
+            this.logger.warn(note, { runId: run.id, stepId: step.id });
+            this.events.emit({
+              type: 'pipeline.delegation.dropped',
+              runId: run.id,
+              stepId: step.id,
+              agentName: agent.name,
+              reason: note,
+            });
+          }
 
           // An agent that cannot settle something on its own says so rather than guessing.
           // Critical means the work genuinely stops here, so we put it to a person and give

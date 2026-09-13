@@ -620,6 +620,14 @@ export type PomniEvent =
       agentName: string;
       question: string;
     }
+  | {
+      /** An orchestrator asked for work in a block that could not be read as a delegation. */
+      type: 'pipeline.delegation.dropped';
+      runId: string;
+      stepId: string;
+      agentName: string;
+      reason: string;
+    }
   | { type: 'pipeline.cancelling'; runId: string }
   | {
       type: 'pipeline.finished';
@@ -741,6 +749,7 @@ export const DURABLE_EVENT_TYPES: ReadonlySet<string> = new Set([
   'pipeline.step.finished',
   'pipeline.flow',
   'pipeline.escalated',
+  'pipeline.delegation.dropped',
   'pipeline.question.asked',
   'pipeline.question.answered',
   'pipeline.finished',
