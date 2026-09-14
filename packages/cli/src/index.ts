@@ -17,6 +17,7 @@ import { createContainer, openContainer, rootForInit, type ContainerOptions } fr
 import { describeCapabilities, repoRow, statusLabel, style, table } from './format.js';
 import { createOutput, exitCodeFor, reportError as reportErrorTo, type Output } from './output.js';
 import { registerBacklogCommands } from './backlog-commands.js';
+import { registerNotifyCommands } from './notify-commands.js';
 import { registerRunCommands } from './run-commands.js';
 import { registerToolCommands } from './tool-commands.js';
 import { registerWorktreeCommands } from './worktree-commands.js';
@@ -951,6 +952,7 @@ export async function main(argv: string[], options: MainOptions = {}): Promise<n
 
   registerRunCommands(program, open, defaultProject, out);
   registerBacklogCommands(program, open, defaultProject, out);
+  registerNotifyCommands(program, open, defaultProject, out);
   registerWorkflowCommands(program, open, defaultProject, out);
   registerDiscoveryCommands(program, open, defaultProject, out);
   registerProviderCommands(program, open, out);

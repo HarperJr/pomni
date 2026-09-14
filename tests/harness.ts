@@ -74,6 +74,14 @@ import {
   SilentLogger,
   SqliteRunStore,
 } from '@pomni/infra';
+// POMN-75: neither of these exists yet. `packages/core/src/ports/notify.ts` and
+// `packages/core/src/app/notification-service.ts` are the paths the domain-designer and
+// codebase-scout handovers fixed for `WebhookPort`/`WebhookRequest` and `NotificationService`
+// respectively — imported by their real path, not through the `@pomni/core` barrel, so this
+// file fails to load with a module-not-found error until they are written, rather than an
+// obscure "not a function" once the barrel forwards an undefined export.
+import type { WebhookPort, WebhookRequest } from '../packages/core/src/ports/notify.js';
+import { NotificationService } from '../packages/core/src/app/notification-service.js';
 
 const run = promisify(execFile);
 
@@ -602,6 +610,13 @@ export class FakeDesktop implements DesktopPort {
   installed = new Set<string>();
   opened: Array<{ command: string; path: string }> = [];
   revealed: string[] = [];
+  /** Every toast this fake was asked to show, in order. */
+  notified: Array<{ title: string; body: string }> = [];
+  /**
+   * A message to throw instead of showing a toast — "no display", the DesktopPort case a
+   * notifier must survive. Null (the default) is a desktop that always manages to show one.
+   */
+  notifyFails: string | null = null;
 
   async canRun(command: string): Promise<boolean> {
     return this.installed.has(command);
@@ -614,6 +629,35 @@ export class FakeDesktop implements DesktopPort {
 
   async reveal(path: string): Promise<void> {
     this.revealed.push(path);
+  }
+
+  /** POMN-75: the toast half of `DesktopPort`. */
+  async notify(title: string, body: string): Promise<void> {
+    if (this.notifyFails) {
+      const message = this.notifyFails;
+      throw new Error(message);
+    }
+    this.notified.push({ title, body });
+  }
+}
+
+/**
+ * A webhook that records every POST it was asked to make instead of reaching the network.
+ *
+ * Styled after `FakeForge`: a one-shot `failNext` for the "webhook down" case, and `posted`
+ * for a test to read what a notification actually carried.
+ */
+export class FakeWebhook implements WebhookPort {
+  posted: WebhookRequest[] = [];
+  failNext: string | null = null;
+
+  async post(request: WebhookRequest): Promise<void> {
+    if (this.failNext) {
+      const message = this.failNext;
+      this.failNext = null;
+      throw new Error(message);
+    }
+    this.posted.push(request);
   }
 }
 
@@ -926,6 +970,10 @@ export interface TestHarness<G extends GitPort = FakeGit> extends PomniContainer
   serverLog: MemoryServerLog;
   clock: FixedClock;
   dir: string;
+  /** POMN-75: the webhook channel a notification is posted through. */
+  webhook: FakeWebhook;
+  /** POMN-75: the subscriber wired to the three notifying events. Never started by the harness. */
+  notifications: NotificationService;
   cleanup(): Promise<void>;
 }
 
@@ -960,6 +1008,7 @@ export async function createHarness<G extends GitPort = FakeGit>(
   const logs = new MemoryLogSink();
   const forge = new FakeForge();
   const desktop = new FakeDesktop();
+  const webhook = new FakeWebhook();
   const runStore = new SqliteRunStore(docs.absolute(layout.database));
 
   const workspace = new WorkspaceService(docs, fs);
@@ -993,6 +1042,18 @@ export async function createHarness<G extends GitPort = FakeGit>(
   );
   // Shares pomni.db with the pipeline store, as the real container does.
   const pipelineStore = new SqlitePipelineStore(docs.absolute(layout.database));
+  // POMN-75: built here, not by `serve` — the harness has no long-lived process to start it
+  // the way `system-service.ts` will. Every test drives it explicitly, and it is never
+  // `start()`-ed, so a test's own `events.emit` is the only thing that ever reaches it.
+  const notifications = new NotificationService({
+    events,
+    store: pipelineStore,
+    workspace,
+    credentials,
+    desktop,
+    webhook,
+    logger,
+  });
   const worktreeStore = new SqliteWorktreeStore(docs.absolute(layout.database));
   const worktrees = new WorktreeService(
     docs,
@@ -1125,6 +1186,8 @@ export async function createHarness<G extends GitPort = FakeGit>(
     executor,
     forge,
     desktop,
+    webhook,
+    notifications,
     restart,
     llm,
     llmFactory,

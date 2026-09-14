@@ -15,6 +15,7 @@ export * from './desktop.js';
 export * from './sqlite.js';
 export * from './llm.js';
 export * from './llm-factory.js';
+export * from './notify-webhook.js';
 export * from './openai-llm.js';
 export * from './pipeline-store.js';
 export * from './lock.js';

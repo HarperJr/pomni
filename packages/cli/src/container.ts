@@ -9,6 +9,7 @@ import {
   CommentService,
   DiscoveryService,
   DoctorService,
+  NotificationService,
   NotInitializedError,
   ProjectService,
   PipelineService,
@@ -48,6 +49,7 @@ import {
   SqliteCommentStore,
   SqliteWorktreeStore,
   SystemClock,
+  WebhookClient,
   findWorkspaceRoot,
   type LogLevel,
 } from '@pomni/infra';
@@ -144,6 +146,20 @@ export function createContainer(root: string, logLevel: LogLevel = 'warn'): Pomn
   // Shares pomni.db with the pipeline store, so it is constructed here rather than beside
   // the other worktree wiring below.
   const pipelineStore = new SqlitePipelineStore(docs.absolute(layout.database));
+  // Not hosted: this process exits once its command is done, so it must never subscribe to
+  // the bus — a subscriber that never outlives the send would claim the dedupe row for a
+  // notification nobody received. `serve` is what starts the hosted one.
+  const webhook = new WebhookClient();
+  const notifications = new NotificationService({
+    events,
+    store: pipelineStore,
+    workspace,
+    credentials,
+    desktop,
+    webhook,
+    logger,
+    hosted: false,
+  });
   const worktreeStore = new SqliteWorktreeStore(docs.absolute(layout.database));
   const commentStore = new SqliteCommentStore(docs.absolute(layout.database));
   const worktrees = new WorktreeService(
@@ -259,6 +275,7 @@ export function createContainer(root: string, logLevel: LogLevel = 'warn'): Pomn
     fs,
     git,
     desktop,
+    notifications,
     logger,
   };
 }
