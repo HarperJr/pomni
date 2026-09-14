@@ -5,7 +5,7 @@ different surface. The CLI is authoritative for naming.
 
 | Surface | Form | Status |
 | --- | --- | --- |
-| CLI | `pomni <noun> <verb> [args]` | shipped for project / repo / cred / run / worktree / backlog / serve |
+| CLI | `pomni <noun> <verb> [args]` | shipped across project / repo / cred / run / worktree / backlog / workflow / task / provider / tool / discover / mcp / editor / serve |
 | HTTP | `GET/POST/PATCH/DELETE /api/…` — see [SERVER.md](SERVER.md) | shipped |
 | Web UI | `pomni serve` | shipped for projects, repos, credentials, runs, backlog |
 | Slash command | `/project`, `/backlog`, `/run` inside a Claude session | shipped |
@@ -14,16 +14,14 @@ different surface. The CLI is authoritative for naming.
 Global flags: `--root <path>` (workspace directory; defaults to the nearest `.pomni`,
 searching upward like git), `--verbose`.
 
-Legend: **✓** shipped · **·** designed, not yet built.
-
 ## Workspace
 
 | Command | | Does |
 | --- | --- | --- |
 | `pomni init` | ✓ | Create `.pomni/` in the current directory. Idempotent. Warns if git is missing. |
 | `pomni serve [--port 7777] [--host] [--token] [--open]` | ✓ | Start the management server and UI. Non-loopback `--host` requires `--token` or the server refuses to start. Running by hand in a terminal is unsupervised — `POST /api/restart` is unavailable and the UI shows no restart button. Set `POMNI_SUPERVISED=1` when running under a supervisor (systemd, pm2, container restart policy) to enable restarts. |
-| `pomni doctor [--repair]` | · | Environment, registry and database integrity. |
-| `pomni config get/set <key> [value]` | · | Read/write `.pomni/config.yaml`. |
+| `pomni mcp` | ✓ | Run the MCP server over stdio (for Claude Code and other MCP clients). |
+| `pomni editor [--clear]` | ✓ | What opens a file when Pomni is asked to open one — with no argument, what it would use now. `--clear` forgets the configured editor and goes back to looking on PATH. |
 
 ## Projects
 
@@ -75,6 +73,7 @@ Metadata is committable; the token is a pointer resolved when git needs it.
 | `pomni cred add <name> --token <token>` | ✓ | Store in `.pomni/credentials.secret.json` (0600). |
 | ` ` `[--provider] [--host] [--username] [--id]` | ✓ | `--host` is required for `--provider generic`. |
 | `pomni cred list` (`ls`) | ✓ | Id, host, secret source, and whether it currently resolves. |
+| `pomni cred edit <id>` | ✓ | Change a credential, or rotate its token. |
 | `pomni cred test <id> [--url <url>]` | ✓ | Check the secret resolves; with `--url`, that the remote accepts it. |
 | `pomni cred remove <id>` (`rm`) | ✓ | Forget the credential and any stored secret. |
 
@@ -95,7 +94,6 @@ project that declares it — a repo without a `lint` script is skipped, not fail
 | `pomni runs show <id> [--full]` | ✓ | One run: command, cwd, exit code, failed tests, log tail. Accepts the short id from `runs list`. |
 | `pomni runs tail <id>` | ✓ | Follow a run that is still going. |
 | `pomni runs cancel <id>` | ✓ | Stop it — by pid, so it works across processes. |
-| `pomni dev [--repo]` / `pomni dev stop` | · | Start/stop a background dev capability. |
 
 Exit code is 1 when any run fails, so `pomni verify` drops straight into a shell script or CI.
 
@@ -139,7 +137,6 @@ the engine enforces; the body is prose you and an agent both edit. `pomni b` is 
 | `pomni backlog next [-p]` | ✓ | The highest-priority `ready` item. |
 | `pomni backlog waves [-p] [--explain] [--run]` | ✓ | Group `ready` items into waves that may launch concurrently; deterministic, no model call. `--explain` prints the conflict graph and each item's path scope. `--run` launches wave 1, one item per launch, and exits non-zero if any failed. |
 | `pomni backlog open <ID>` | ✓ | Open the item file in `$EDITOR`. |
-| `pomni backlog groom [-p]` | · | Agent-assisted dedupe and re-prioritisation (M5). |
 
 The project is usually inferred from the item id (`ACME-12` → project with prefix `ACME`),
 so `-p` is rarely needed.
@@ -295,6 +292,7 @@ only capabilities a repo already declared.
 A `SessionStart` hook injects the project list, the active backlog and recent run failures,
 so a session begins knowing what exists.
 
-Planned: `/feature spec|plan|implement|verify|land` and `pomni_context_pack` (M3), which
-given an item id returns everything needed to start work — conventions, spec, dependency
-outcomes, touched files, the tail of the last failing run, and each repo's working directory.
+The M3 feature loop (spec, plan, implement, verify, land) shipped as `pomni task run` and
+`pomni backlog waves --run`, not as the originally planned `/feature spec|plan|implement|
+verify|land`. POMN-47 (context packs: an agent starting from an item's touched files and what
+other agents already found) is still open.
