@@ -1129,9 +1129,9 @@ ${item.body}`;
         // because both are "what happened here", and a person reading a drain id off `task
         // list` should not have to know it needs a different verb.
         if (error instanceof PomniError && error.code === 'not_found') {
-          const drain = await container.pipelines.getDrain(id);
+          const drain = await resolveDrain(container, id, flags.project);
           if (drain) {
-            const runs = await container.pipelines.list({ drainId: drain.id });
+            const runs = await container.pipelines.drainRuns(drain);
             out().report({ ...drain, runs }, () => printDrain(drain, runs));
             return;
           }
@@ -1713,6 +1713,36 @@ function describeStopReason(reason: NonNullable<Drain['stopReason']>): string {
     case 'error':
       return reason.itemId ? `stopped: ${reason.itemId} did not start: ${reason.message}` : `stopped: ${reason.message}`;
   }
+}
+
+/**
+ * A drain by its full id or by the tail `task list` prints — the same courtesy `resolveRun`
+ * extends to runs, for the same reason: nobody retypes a 26-character ULID off a listing.
+ * Null when nothing matches; the caller has a run-flavoured not-found to throw already.
+ */
+export async function resolveDrain(
+  container: PomniContainer,
+  id: string,
+  explicit: string | undefined,
+): Promise<Drain | null> {
+  const exact = await container.pipelines.getDrain(id);
+  if (exact) return exact;
+
+  const wanted = id.toUpperCase();
+  const projectIds = explicit ? [explicit] : await container.projects.listIds();
+  const matches: Drain[] = [];
+  for (const projectId of projectIds) {
+    const drains = await container.pipelines.listDrains({ projectId, limit: 200 });
+    matches.push(...drains.filter((drain) => drain.id.endsWith(wanted)));
+  }
+  if (matches.length > 1) {
+    throw new ValidationError(
+      `'${id}' matches drains in several projects: ${matches
+        .map((drain) => `${drain.projectId} (${drain.id})`)
+        .join(', ')} — pass -p <id> to choose`,
+    );
+  }
+  return matches[0] ?? null;
 }
 
 export async function resolveRun(

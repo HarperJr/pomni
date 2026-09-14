@@ -34,6 +34,7 @@ import {
   type AgentReport,
   type ContextFile,
   type Drain,
+  drainRunIds,
   type DrainFilter,
   type DrainRunResult,
   type DrainStopReason,
@@ -613,6 +614,22 @@ export class PipelineService {
 
   async getDrain(id: string): Promise<Drain | null> {
     return this.store.getDrain(id);
+  }
+
+  /**
+   * Every run a drain launched, by the ids on its record — not a listing. A listing is capped
+   * (`DEFAULT_LISTED`, `MAX_LISTED`) and a drain's verdict must see all of its runs: a green
+   * drain of thirty-one runs read through a thirty-run list was judged red for the one it
+   * could not see. A run the store no longer has is simply absent; `drainSucceeded` reads
+   * absence as failure, which is the right reading of a record that lost a run.
+   */
+  async drainRuns(drain: Pick<Drain, 'waves'>): Promise<PipelineRun[]> {
+    const runs: PipelineRun[] = [];
+    for (const id of drainRunIds(drain)) {
+      const run = await this.store.getRun(id);
+      if (run) runs.push(run);
+    }
+    return runs;
   }
 
   /** Drains, newest first, capped the same way `list` caps runs. */

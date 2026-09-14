@@ -431,6 +431,36 @@ describe('task list and task show know about drains', () => {
     expect(body.stopReason).toEqual(drain.stopReason);
   });
 
+  it('finds the drain by the tail task list prints, as it does for a run', async () => {
+    const drain = await runADrain();
+
+    const result = await runCli(harness, ['--json', 'task', 'show', drain.id.slice(-8)]);
+
+    expect(result.code).toBe(0);
+    expect((result.last as Drain).id).toBe(drain.id);
+  });
+
+  it('judges a drain by every run it launched, not by a page of them', async () => {
+    // Thirty-one green items, one wave: more runs than a listing returns by default. Read
+    // through a capped list the verdict saw thirty and called the drain red for the one it
+    // could not see.
+    for (let index = 0; index < 31; index += 1) {
+      await readyItem(`I${index}`, { touches: [`src/i${index}.ts`] });
+    }
+    harness.llm.replies = Array.from({ length: 31 }, () => pass());
+
+    const result = await runCli(harness, ['--json', 'backlog', 'waves', '-p', 'acme', '--run', '--all']);
+
+    expect(result.code).toBe(0);
+    const drain = result.last as Drain & { runs: unknown[] };
+    expect(drain.status).toBe('completed');
+    expect(drain.itemsLaunched).toBe(31);
+    expect(drain.runs).toHaveLength(31);
+
+    const shown = await runCli(harness, ['--json', 'task', 'show', drain.id]);
+    expect((shown.last as { runs: unknown[] }).runs).toHaveLength(31);
+  });
+
   it('exits 3 with a not_found envelope for a drain id that matches nothing', async () => {
     const result = await runCli(harness, ['--json', 'task', 'show', '01NOSUCHDRAIN000000000000']);
 

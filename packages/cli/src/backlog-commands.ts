@@ -1006,7 +1006,7 @@ async function runDrain(
 
   const final = await container.pipelines.getDrain(drainId);
   if (!final) throw new Error(`drain '${drainId}' vanished`);
-  const runs = await container.pipelines.list({ drainId: final.id });
+  const runs = await container.pipelines.drainRuns(final);
 
   out.report({ ...final, runs }, () => {});
   if (!drainSucceeded(final, runs)) out.fail(1);
