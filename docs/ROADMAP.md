@@ -46,6 +46,14 @@ rewriting anything earlier — the ports/adapters split in `ARCHITECTURE.md` is 
   `GET /api/projects/:id/doctor`; run list, run detail and live log in the UI
 - 26 more tests (69 total)
 
+**Since then**
+
+- POMN-14 → a run orphaned by a dead process can be cancelled
+- POMN-37 → agent runs listed as running first, latest five, the rest behind *Show all*
+- POMN-66 → a run id is enough to find the run; no `-p` needed
+- POMN-71 → a run the executor killed reports `timed out after …`, not the tests it interrupted;
+  `repo edit --timeout <capability=duration>`
+
 ---
 
 ## M1 — Backlog — **shipped**
@@ -67,6 +75,11 @@ rewriting anything earlier — the ports/adapters split in `ARCHITECTURE.md` is 
   drag-drop reordering are M2)
 - 28 more tests (97 total)
 
+**Since then**
+
+- POMN-27 → `backlog list` orders by priority and agrees with `backlog next`
+- POMN-55 → a resumed run that succeeds no longer leaves its item stuck in `blocked`
+
 ---
 
 ## M2 — Board and live updates (no AI)
@@ -75,14 +88,28 @@ rewriting anything earlier — the ports/adapters split in `ARCHITECTURE.md` is 
 problem+json errors, `ETag`/`If-Match` and the SSE transport shipped in M0a; this milestone
 adds the backlog surface and closes the multi-writer loop.
 
-- `chokidar` watcher turning external file edits into bus events — the last piece of the
-  multi-writer story, so a Claude session's edit lands in the browser without a refetch
-- Kanban board with drag-drop transitions; spec editor with a conflict diff on 409
-- Backlog and dev-server routes (see `SERVER.md`)
-- Project settings: capabilities, gates, policy, doctor report
+**Shipped**
 
-**Done when:** you can groom a backlog, edit a spec, press *Test*, and watch the log stream —
-without a model in the loop — while a Claude session editing the same files shows up live.
+- POMN-28 → `pomni backlog board`, `pomni backlog flow`, gated `pomni backlog move`, and the
+  Tracker tab: kanban board with drag-drop, guarded moves
+- POMN-1 → Tracker tab: projects on the left, task cards on the right
+- POMN-3 → running pipelines shown on project cards and tracker task cards
+- POMN-15 → Unblock button, and Move-to restricted to legal transitions, in the web UI
+- POMN-16 → Project page sidebar: one block at a time instead of six stacked
+- POMN-22 → task workflow per project, with gates and checklists on each transition
+- POMN-29 → `backlog move` refuses a still-placeholder item
+- POMN-33 → transitions can be automatic or manual; `backlog move --comment`
+- POMN-34 → `backlog comment`, `task comment`
+- POMN-31 → back navigation from a run returns to the block you came from
+- POMN-18 → long task lines no longer overflow the Agents block
+- POMN-32 → language selector: Russian and English across the web UI
+- POMN-42 → agent output rendered as markdown, not a wall of text
+- POMN-45 → reload picks up a new build, not just a repaint of the tab
+- POMN-69 → a button and a page for reading logs
+
+**Still open**
+
+- POMN-80 — a file watcher feeding external `.pomni` edits into the event bus
 
 ---
 
@@ -90,17 +117,32 @@ without a model in the loop — while a Claude session editing the same files sh
 
 **Goal:** the core value — spec, plan, implement, verify, land — driven from a live session.
 
-- `ContextPackBuilder` (project conventions, spec, deps, touched files, last failure, git state)
-- `SessionService` + `InlineAgentRunner`
-- `VerificationService` + `Gate` evaluation; junit/coverage parsers
-- `/feature spec|plan|implement|verify|land|status`
-- Skills: `feature-spec`, `feature-plan`, `verify-loop`
-- Subagents: spec-writer, planner, verifier
-- Branch management, `PostToolUse` file tracking, `Stop` reminder hook
-- Web UI gains read-only session views and gate status on the board
+**Shipped** as `pomni task run|resume|rerun|show|list|cancel` and `pomni workflow` (agents are
+configurable per workflow, not fixed spec-writer/planner/verifier roles)
 
-**Done when:** a backlog line becomes a green, committed branch without leaving the session,
-and every stage is recorded.
+- POMN-7 → `human` delegate target: an orchestrator can wait on a person
+- POMN-9 → agents can escalate; a critical one asks a person
+- POMN-8 → attach files when answering a question
+- POMN-4 → attach context files to a task run
+- POMN-13 → `task rerun`, carrying forward why the last run ended
+- POMN-39 → `task resume`
+- POMN-40 → an agent can verify without being given a shell
+- POMN-23 → `pomni provider`, chosen per agent
+- POMN-5 / POMN-6 → `pomni tool`, tool grants in the agent editor
+- POMN-63 → the orchestrator sizes the team to the change; authors verify their own work
+- POMN-11 → Write and Edit permitted to agents
+- POMN-12 → agents see every repo in the project, not just the first
+- POMN-10 → a run's status reflects what its agents actually reported
+- POMN-67 → a run no longer ends after the orchestrator's first delegation
+- POMN-30 → artifacts: scrollable, with diffs, and files you can open
+- POMN-35 → an agent can search the web, as an option alongside files and run
+
+**Still open**
+
+- POMN-47 (in_review) — context packs: an agent starts from the item's touched files and what
+  the other agents just found
+- POMN-82 — inside a run, Pomni's own MCP server is dead: the worktree's `.mcp.json` points at
+  a `dist/` nobody built, so agents cannot read the workspace they work for
 
 ---
 
@@ -108,15 +150,20 @@ and every stage is recorded.
 
 **Goal:** the same loop without a human in the chair.
 
-- `SdkAgentRunner` on `@anthropic-ai/claude-agent-sdk`; streaming to the event bus; transcripts
-- Budgets: turns, cost, wall clock; clean `budget_exceeded` termination
-- `session start|list|show|resume|abort`
-- `feature next` and a simple queue: drain N ready items, stop on first red gate
-- `--push` / `--pr` landing via `gh`
-- Exit codes and `--json` everywhere, so CI and cron can call Pomni
+**Shipped**
 
-**Done when:** `pomni feature next --project web` produces a PR unattended, or fails with a
-transcript and a failing run explaining why.
+- POMN-54, POMN-65, POMN-62, POMN-2 → budgets enforced mid-run: `project edit
+  --max-cost/--max-turns/--max-session-turns`, `workflow lint`
+- POMN-24, POMN-46, POMN-64 → `task spend`, `task show`: cost and turns accounted per step
+- POMN-48, POMN-51, POMN-49, POMN-53, POMN-50, POMN-70, POMN-56 → landing: commit and push,
+  a merge request opened through the forge (`project edit
+  --auto-commit/--auto-push/--auto-mr`), `verify --land`
+- POMN-25 → `feature next` → `backlog waves --run`
+
+**Still open**
+
+- POMN-73 — JSON output and exit codes on every command, so CI and cron can call Pomni
+- POMN-74 — drain the queue: run wave after wave unattended, stop at the first red gate
 
 ---
 
@@ -124,16 +171,20 @@ transcript and a failing run explaining why.
 
 **Goal:** Pomni gets better at its own job by reading its history.
 
-- `test_results` ingestion; flaky-test detection across runs
-- `pomni stats` and a UI analytics view: throughput, gate pass rate, cost per landed item,
-  slowest capabilities
-- Failure clustering: group runs by failure signature, surface repeats in context packs
-- `backlog groom` (agent-assisted dedupe, re-prioritization, staleness flags)
-- `doctor --repair` reconciliation between doc store and database
-- Coverage deltas attached to items
+**Shipped**
 
-**Done when:** context packs cite prior failures automatically and `pomni stats` answers
-"where is time going" without leaving the terminal.
+- POMN-41 → `workflow signals`, `workflow amend`
+- POMN-17 → the commands, skills and MCP calls an agent actually ran, on record
+- POMN-60 → `repo doctor` reports branches a run left behind
+- POMN-59 → the schema counter reports divergence, not just depth
+
+**Still open**
+
+- POMN-76 — `doctor --repair` reconciling the doc store and the database
+- POMN-77 — flaky-test detection across runs
+- POMN-78 — `pomni stats`: where the time and the money are going
+- POMN-79 — warn a run it is about to fail the way a prior run did
+- `backlog groom` — no item filed
 
 ---
 
@@ -141,18 +192,19 @@ transcript and a failing run explaining why.
 
 **Goal:** Pomni acts when you are not looking, and shows you what happened.
 
-- AI actions in the web UI: `POST /api/sessions` over the existing `SessionService`, live
-  session streaming, approve/reject a proposed diff — the conversational half of this
-  (`POST /api/chats`, a typed action catalogue, confirm/reject per action) landed ahead of
-  schedule as Chat; see `SERVER.md` §4 Chats. What is still open here is a session that writes
-  code, not a conversation
-- Notifications (desktop / webhook) on gate failures and landed items
-- Scheduled work: nightly grooming, dependency-update items, scheduled `feature next`
-- Remote `Executor` adapter (container or SSH) for heavy builds
-- Optional auth + `Identity` port, so the server can be reachable from another machine
+**Shipped**
 
-**Done when:** an overnight run lands a dependency bump and the morning board shows it,
-with the transcript one click away.
+- POMN-21, POMN-38, POMN-68 → Chat: every Pomni verb, behind a confirm
+  (`POST /api/chats`, a typed action catalogue, confirm/reject per action; see `SERVER.md`
+  §4 Chats)
+
+**Still open**
+
+- POMN-75 — notifications for questions, red gates and landed work
+- POMN-81 — scheduled work: a nightly drain of the ready queue, dependency-update items that
+  file themselves
+- a remote `Executor` adapter, and optional auth for a server reachable from another machine —
+  no item filed
 
 ---
 
@@ -160,18 +212,22 @@ with the transcript one click away.
 
 **Goal:** many projects, real teams.
 
-- `IssueTracker` port with GitHub Issues and Linear adapters (two-way sync)
-- Cross-project items and a dependency graph across registered projects
-- Monorepo support: sub-projects with inherited capabilities
-- Stack adapters as loadable plugins; adapter authoring guide
-- Multi-agent execution: parallel items, now that per-run worktree isolation, conflict
-  detection on non-isolatable repos, and wave grouping of ready items (`pomni backlog
-  waves`, see COMMANDS.md §Waves) have all shipped — what is still open is running more
-  than wave 1 unattended, and folding wave selection into `feature next`
-- Policy profiles per project (autonomy levels from suggest-only to auto-land)
+**Shipped**
 
-**Done when:** Pomni coordinates work across several repositories without any of them knowing
-it exists.
+- POMN-26 → `pomni worktree list|prune|remove`, `repo edit --worktrees`
+- POMN-25 → `pomni backlog waves`, conflict detection
+- POMN-44 → resume lands in the run's own worktree, not the shared repo on master
+- POMN-52 → sync no longer dirties a tracked file
+- POMN-57 → Pomni's own state moved out of the repo it manages
+- POMN-58 → the workspace search no longer escapes a run's checkout
+- POMN-43 → Windows: multi-word permissions no longer shredded before the CLI sees them
+- POMN-19 → Windows: atomic write no longer fails when the server holds the file open
+
+**Still open**
+
+- POMN-74 — running more than wave 1 unattended (also filed under M4)
+- an `IssueTracker` port, cross-project items, stack adapters as loadable plugins, policy
+  profiles per project — no item filed
 
 ---
 
@@ -198,4 +254,6 @@ them is an adapter behind a port defined in M0-M3.
 - Replacing the project's own CI
 - A general-purpose issue tracker for non-engineering work
 - Multi-user collaboration or hosted/shared instances before M6
-- Supporting model providers other than Claude before M7
+- Supporting model providers other than Claude as the *default* — `pomni provider` (POMN-23) can
+  point an agent at an OpenAI-compatible endpoint, but the harness is developed and tested
+  against Claude Code, and only that provider gets the tool grants and permission model

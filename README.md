@@ -79,12 +79,16 @@ Inside a Claude session opened in this repo, the same things are `/project`, `/b
 
 **Shipped:** projects and repos (git clone with token auth, or link a local folder), stack
 detection for Node/Python/Go/Rust/Make, credentials, running a repo's own commands with full
-run history, gates, doctor, **a Markdown-file backlog with guarded transitions**, an MCP
-server with slash commands and a session hook, the HTTP API and the web UI. 97 tests.
+run history, gates, doctor, a Markdown-file backlog with a guarded state machine and a kanban
+**board**, **task** runs in per-run git worktrees, **waves** of items grouped to run
+concurrently, per-run **budgets** (turns, cost, session turns), **commit/push and merge-request
+landing** through the forge, **signals and prompt amendments** learned from prior runs, and
+**Chat** as the way to work — every Pomni verb behind a confirm. 46 test files, 861 tests
+passed, 1 skipped.
 
-**In progress:** Chat — a web-only tab where you talk to Pomni and it proposes actions
-(backlog moves, starting a task, attaching a workflow or tool) that run only once you confirm
-them, through the same application services as the CLI.
+**In progress:** POMN-47 (context packs: an agent starting from the item's touched files and
+what other agents already found).
 
-**Next:** the kanban board and live file watching (M2), then the rest of the AI feature loop (M3).
-See [docs/ROADMAP.md](docs/ROADMAP.md).
+**Next:** POMN-73 (JSON output and exit codes on every command), POMN-74 (draining the queue
+unattended past wave 1), POMN-75 (notifications for questions, red gates and landed work).
+See `pomni backlog list` for the rest.

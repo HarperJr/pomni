@@ -5,7 +5,7 @@ different surface. The CLI is authoritative for naming.
 
 | Surface | Form | Status |
 | --- | --- | --- |
-| CLI | `pomni <noun> <verb> [args]` | shipped for project / repo / cred / run / worktree / backlog / serve |
+| CLI | `pomni <noun> <verb> [args]` | shipped across project / repo / cred / run / worktree / backlog / workflow / task / provider / tool / discover / mcp / editor / serve |
 | HTTP | `GET/POST/PATCH/DELETE /api/…` — see [SERVER.md](SERVER.md) | shipped |
 | Web UI | `pomni serve` | shipped for projects, repos, credentials, runs, backlog |
 | Slash command | `/project`, `/backlog`, `/run` inside a Claude session | shipped |
@@ -14,16 +14,14 @@ different surface. The CLI is authoritative for naming.
 Global flags: `--root <path>` (workspace directory; defaults to the nearest `.pomni`,
 searching upward like git), `--verbose`.
 
-Legend: **✓** shipped · **·** designed, not yet built.
-
 ## Workspace
 
 | Command | | Does |
 | --- | --- | --- |
 | `pomni init` | ✓ | Create `.pomni/` in the current directory. Idempotent. Warns if git is missing. |
 | `pomni serve [--port 7777] [--host] [--token] [--open]` | ✓ | Start the management server and UI. Non-loopback `--host` requires `--token` or the server refuses to start. Running by hand in a terminal is unsupervised — `POST /api/restart` is unavailable and the UI shows no restart button. Set `POMNI_SUPERVISED=1` when running under a supervisor (systemd, pm2, container restart policy) to enable restarts. |
-| `pomni doctor [--repair]` | · | Environment, registry and database integrity. |
-| `pomni config get/set <key> [value]` | · | Read/write `.pomni/config.yaml`. |
+| `pomni mcp` | ✓ | Run the MCP server over stdio (for Claude Code and other MCP clients). |
+| `pomni editor [--clear]` | ✓ | What opens a file when Pomni is asked to open one — with no argument, what it would use now. `--clear` forgets the configured editor and goes back to looking on PATH. |
 
 ## Projects
 
@@ -34,8 +32,9 @@ A project is a container: a backlog, gates and policy. It holds no code itself.
 | `pomni project create <name> [--id] [-d <text>]` | ✓ | Create a project. The id and item prefix are derived from the name and never change. |
 | `pomni project list` (`ls`) | ✓ | Projects with repo counts. |
 | `pomni project show <id>` | ✓ | Config, gate, and a table of repos with stack and status. |
-| `pomni project remove <id> [--purge]` | ✓ | Unregister. `--purge` also deletes cloned working copies; linked local folders are never deleted. |
+| `pomni project edit <id>` | ✓ | Change the project's name, description, item prefix, or policies (`--auto-commit`, `--auto-push`, `--auto-mr`, `--max-cost`, `--max-turns`, `--max-session-turns`). |
 | `pomni project use <id>` | ✓ | Set the default project, so `-p` can be omitted. |
+| `pomni project remove <id> [--purge]` | ✓ | Unregister. `--purge` also deletes cloned working copies; linked local folders are never deleted. |
 
 ## Repos
 
@@ -74,6 +73,7 @@ Metadata is committable; the token is a pointer resolved when git needs it.
 | `pomni cred add <name> --token <token>` | ✓ | Store in `.pomni/credentials.secret.json` (0600). |
 | ` ` `[--provider] [--host] [--username] [--id]` | ✓ | `--host` is required for `--provider generic`. |
 | `pomni cred list` (`ls`) | ✓ | Id, host, secret source, and whether it currently resolves. |
+| `pomni cred edit <id>` | ✓ | Change a credential, or rotate its token. |
 | `pomni cred test <id> [--url <url>]` | ✓ | Check the secret resolves; with `--url`, that the remote accepts it. |
 | `pomni cred remove <id>` (`rm`) | ✓ | Forget the credential and any stored secret. |
 
@@ -94,7 +94,6 @@ project that declares it — a repo without a `lint` script is skipped, not fail
 | `pomni runs show <id> [--full]` | ✓ | One run: command, cwd, exit code, failed tests, log tail. Accepts the short id from `runs list`. |
 | `pomni runs tail <id>` | ✓ | Follow a run that is still going. |
 | `pomni runs cancel <id>` | ✓ | Stop it — by pid, so it works across processes. |
-| `pomni dev [--repo]` / `pomni dev stop` | · | Start/stop a background dev capability. |
 
 Exit code is 1 when any run fails, so `pomni verify` drops straight into a shell script or CI.
 
@@ -124,11 +123,13 @@ the engine enforces; the body is prose you and an agent both edit. `pomni b` is 
 | Command | | Does |
 | --- | --- | --- |
 | `pomni backlog add <title> [-p -t --priority -e -r -l --depends-on]` | ✓ | Capture an item. Starts in `backlog` with a spec template. |
-| `pomni backlog list [-p -s -t --priority -l -r -q]` | ✓ | Filterable list. `-s active` excludes done and cancelled. |
+| `pomni backlog list [-p -s -t --priority -l -r -q]` | ✓ | Filterable list. `-s active` excludes done and cancelled. `--eligible` shows `ready` items that can run now. |
 | `pomni backlog board [-p]` | ✓ | Items grouped by column. |
 | `pomni backlog show <ID>` | ✓ | Frontmatter, dependency state, acceptance progress, full spec. |
 | `pomni backlog edit <ID> [--title -t --priority -e -r -l --branch --touches]` | ✓ | Change fields. `--touches <comma,separated,paths>` overrides the paths parsed from the Plan section. |
-| `pomni backlog move <ID> <status> [--reason] [-f]` | ✓ | Run a transition through the state machine. |
+| `pomni backlog move <ID> <status> [--comment\|--reason <text>] [-f] [--no-run]` | ✓ | Run a transition through the state machine. `--comment` is why, recorded in the item's log and history (`--reason` is its alias). `-f` skips the guards and is recorded as forced. If a workflow is attached to this transition it fires, unless `--no-run`. |
+| `pomni backlog comment <ID> [text...]` | ✓ | Write a note on an item — with no text, read the notes already there. |
+| `pomni backlog flow [-p]` | ✓ | Show status transitions and workflows attached to each. |
 | `pomni backlog block <ID> <reason>` / `unblock <ID>` | ✓ | Block, and restore the prior status on unblock. |
 | `pomni backlog link <ID> --depends-on <IDs>` | ✓ | Add dependency edges (cycles refused). |
 | `pomni backlog reopen <ID>` | ✓ | `done` back to `in_progress`. |
@@ -136,7 +137,6 @@ the engine enforces; the body is prose you and an agent both edit. `pomni b` is 
 | `pomni backlog next [-p]` | ✓ | The highest-priority `ready` item. |
 | `pomni backlog waves [-p] [--explain] [--run]` | ✓ | Group `ready` items into waves that may launch concurrently; deterministic, no model call. `--explain` prints the conflict graph and each item's path scope. `--run` launches wave 1, one item per launch, and exits non-zero if any failed. |
 | `pomni backlog open <ID>` | ✓ | Open the item file in `$EDITOR`. |
-| `pomni backlog groom [-p]` | · | Agent-assisted dedupe and re-prioritisation (M5). |
 
 The project is usually inferred from the item id (`ACME-12` → project with prefix `ACME`),
 so `-p` is rarely needed.
@@ -175,16 +175,96 @@ An item whose scope names no paths is read as touching its whole repo, so it nev
 wave with anything else in that repo. A `ready` item whose dependency is neither `done` nor
 itself in the plan is reported as blocked and placed in no wave.
 
-## Feature loop — M3
+## Tasks — agent pipeline runs
 
-| Command | Reads | Writes | Transition |
-| --- | --- | --- | --- |
-| `pomni feature spec <id>` | title, conventions, codebase survey | problem, acceptance criteria | `backlog → specced` |
-| `pomni feature plan <id>` | spec, file map, dependencies | file-level plan | `specced → ready` |
-| `pomni feature implement <id>` | context pack | code, on a branch | `ready → in_progress` |
-| `pomni verify <id>` | project gate | run records, failure summary | `in_progress → in_review` |
-| `pomni feature land <id> [--pr]` | land gate | commit, optional PR | `in_review → done` |
-| `pomni feature next [-p]` | backlog | picks the top `ready` item and implements it | — |
+A task is one run of a workflow: an orchestrator and the agents it delegates to, working in a
+per-run worktree of each repo, verified by the gate, and — under the project's policy —
+committed, pushed and opened as a merge request. Descriptions below are the CLI's own.
+
+| Command | | Does |
+| --- | --- | --- |
+| `pomni task run [text...] [-p] [-w] [-i <ID>] [-r] [-f <path>] [--no-sync]` | ✓ | Run a task, or a backlog item, through a workflow. `-i` makes the item's spec the task; `-f` attaches a file as context (repeat for several); `--no-sync` skips the fast-forward of the repos first. |
+| `pomni task resume <id> [note...]` | ✓ | Carry on an interrupted run, keeping what it already did. |
+| `pomni task rerun <id>` | ✓ | Run a finished run again, telling the agents why the last one ended. |
+| `pomni task spend [-p]` | ✓ | What the pipelines have been costing, run by run. A report; budgets are set with `project edit`. |
+| `pomni task questions [-p]` | ✓ | What the running pipelines are waiting to be told. |
+| `pomni task answer <questionId> [text...] [-f <path>]` | ✓ | Answer a question a run is waiting on; `-f` attaches a file with the answer. |
+| `pomni task comment <id> [text...]` | ✓ | Write a note on a run — with no text, read the notes already there. |
+| `pomni task show <id>` | ✓ | One run, broken down by agent — which one was expensive. |
+| `pomni task cancel <id>` | ✓ | Stop a run, or close out one whose process is gone. |
+| `pomni task list [-p]` | ✓ | Recent pipeline runs. |
+
+## Workflows — agent pipelines
+
+A workflow is an orchestrator plus the agents it may delegate to, each with a spec, a
+struggle level, an optional provider and the tools it is granted. Attached to a project; a
+task picks one.
+
+| Command | | Does |
+| --- | --- | --- |
+| `pomni workflow create <name>` | ✓ | Create a workflow. |
+| `pomni workflow list` (`ls`) | ✓ | List workflows. |
+| `pomni workflow show <id>` | ✓ | Show a workflow and its agents. |
+| `pomni workflow lint <id>` | ✓ | What each agent will carry on every turn, before a run pays for it. |
+| `pomni workflow signals [id]` | ✓ | What keeps going wrong in a workflow, from the runs that already happened. |
+| `pomni workflow amend <workflow> <agent>` | ✓ | Propose a spec change from what keeps going wrong, and never apply it silently. |
+| `pomni workflow generate <id>` | ✓ | Generate the system prompt for every agent that has a spec but no prompt. |
+| `pomni workflow export <id> [-o <path>]` | ✓ | Write a workflow to a portable file (default `<id>.pomni.json`). |
+| `pomni workflow import <path>` | ✓ | Import a workflow file. |
+| `pomni workflow attach <id> [-p]` | ✓ | Attach a workflow to a project. |
+| `pomni workflow detach <id> [-p]` | ✓ | Detach a workflow from a project. |
+| `pomni workflow remove <id>` (`rm`) | ✓ | Delete a workflow. |
+
+### Agents inside a workflow
+
+| Command | | Does |
+| --- | --- | --- |
+| `pomni workflow agent add <workflow> <name>` | ✓ | Add an agent. |
+| `pomni workflow agent prompt <workflow> <agent>` | ✓ | Generate the agent's system prompt from its spec. |
+| `pomni workflow agent edit <workflow> <agent> [-n] [-r] [-s\|--spec-file] [--prompt-file] [-m] [--provider] [-o] [--delegates-to] [--tools] [--files\|--no-files] [--run\|--no-run] [--verify\|--no-verify] [--web\|--no-web]` | ✓ | Change an agent: its name, role (`orchestrator` \| `agent`), spec, prompt, struggle level, provider, outputs, delegates, tool grants, and whether it may touch files, run commands, run the repos' declared checks without a shell, or search the web. |
+| `pomni workflow agent show <workflow> <agent>` | ✓ | Show an agent and its prompt. |
+| `pomni workflow agent remove <workflow> <agent>` (`rm`) | ✓ | Remove an agent. |
+
+## Providers — where models run
+
+A provider is where an agent's model runs: Claude Code, an API key, or a local
+openai-compatible endpoint. Each names a model per struggle level (`low`, `medium`, `high`,
+`max`); an agent picks a provider, or inherits the run's.
+
+| Command | | Does |
+| --- | --- | --- |
+| `pomni provider list` | ✓ | Providers and whether each one works right now. |
+| `pomni provider add <label> [-k claude-code\|anthropic\|openai] [--id] [-u <base-url>] [--api-key-env <VAR>] [--low\|--medium\|--high\|--max <model>]` | ✓ | Add a provider. The key is named by env var, never given. |
+| `pomni provider use <id>` | ✓ | Make this the default provider. |
+| `pomni provider models <id>` | ✓ | Ask an openai-compatible endpoint what models it serves. |
+| `pomni provider remove <id>` (`rm`) | ✓ | Remove a provider. |
+
+## Tools — MCP servers and CLI programs
+
+A tool is an MCP server or a CLI program an agent may be granted. Registered once, attached
+to projects, and granted per agent with `workflow agent edit --tools`.
+
+| Command | | Does |
+| --- | --- | --- |
+| `pomni tool list` (`ls`) | ✓ | Every registered tool. |
+| `pomni tool show <id>` | ✓ | Everything about one tool. |
+| `pomni tool add <name> [--cli --bin] [--mcp --command --arg\|--http\|--sse] [-d] [-u\|--usage-file] [--env] [--env-from] [--credential --credential-env] [--check] [-p]` | ✓ | Register an MCP server or a CLI program. `-u` is how to drive it — the part agents actually need; `--check` is a command that proves it works; `-p` attaches it to a project straight away. |
+| `pomni tool edit <id>` | ✓ | Change a registered tool. |
+| `pomni tool rm <id>` | ✓ | Remove a tool, and detach it from every project. |
+| `pomni tool attach <id> [-p]` | ✓ | Make a tool available to a project. |
+| `pomni tool detach <id> [-p]` | ✓ | Take a tool away from a project. |
+| `pomni tool check [ids...]` | ✓ | Run each tool's check command. |
+
+## Discovery — agents, skills and rules already in a repo
+
+`pomni discover` scans a project's repos for the agents, skills and rules they already carry
+(`.claude/agents`, skills, `CLAUDE.md`-style rules) and can bring an agent into a workflow.
+
+| Command | | Does |
+| --- | --- | --- |
+| `pomni discover list [-p]` | ✓ | Scan the repos and list what is there. |
+| `pomni discover show <assetId>` | ✓ | Print a discovered asset in full. |
+| `pomni discover import <assetId> [--into <workflow>] [-p]` | ✓ | Add a discovered agent to a workflow, prompt and all. |
 
 ## Slash commands and MCP tools
 
@@ -216,6 +296,7 @@ only capabilities a repo already declared.
 A `SessionStart` hook injects the project list, the active backlog and recent run failures,
 so a session begins knowing what exists.
 
-Planned: `/feature spec|plan|implement|verify|land` and `pomni_context_pack` (M3), which
-given an item id returns everything needed to start work — conventions, spec, dependency
-outcomes, touched files, the tail of the last failing run, and each repo's working directory.
+The M3 feature loop (spec, plan, implement, verify, land) shipped as `pomni task run` and
+`pomni backlog waves --run`, not as the originally planned `/feature spec|plan|implement|
+verify|land`. POMN-47 (context packs: an agent starting from an item's touched files and what
+other agents already found) is still open.
