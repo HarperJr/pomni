@@ -69,6 +69,14 @@ async function seed(): Promise<void> {
     spec: 'Owns the work.',
     prompt: 'You lead.',
   });
+  // An orchestrator with nobody to delegate to is refused at start, and a drain whose every
+  // run refuses to start records an `error` stop — which is what this file's first version
+  // measured, and mistook for the service. The analyst is never called; it has to exist.
+  await harness.workflows.addAgent('discovery', {
+    name: 'Analyst',
+    spec: 'Answers questions.',
+    prompt: 'You analyse.',
+  });
   await harness.workflows.attach('acme', 'discovery');
 
   const dir = await makeNodeRepo(join(harness.dir, 'web'));
@@ -188,11 +196,13 @@ describe('draining the whole queue', () => {
     if (drain.stopReason?.kind === 'red_gate') {
       expect(drain.stopReason.itemId).toBe(a.id);
     }
+    // A wave is what may run at once, so B was launched beside A and finished on its own.
+    // What the red gate stops is the *next* wave: C, which depended on B and was plannable
+    // the moment B passed, is never launched.
     expect(drain.waves).toHaveLength(1);
-    expect(drain.itemsLaunched).toBe(1);
-    // B was next in the same wave and never got the chance.
+    expect(drain.itemsLaunched).toBe(2);
     expect(drain.waves[0]?.itemIds).toEqual([a.id, b.id]);
-    expect(drain.waves[0]?.runIds).toHaveLength(1);
+    expect(drain.waves[0]?.runIds).toHaveLength(2);
 
     const runs = await launchedRuns(drain);
     expect(drainSucceeded(drain, runs)).toBe(false);

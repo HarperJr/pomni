@@ -709,11 +709,12 @@ export class PipelineService {
     const end = async (
       status: 'completed' | 'stopped',
       stopReason: DrainStopReason | null,
+      leftBlocked = 0,
     ): Promise<void> => {
       closed = true;
       unsubscribe();
       await write({ ...drain, status, stopReason, endedAt: this.clock.iso(), pid: null });
-      const summary = describeDrainEnd(drain);
+      const summary = describeDrainEnd(drain, leftBlocked);
       this.logger.info(`drain ${drain.id} ${summary}`);
       this.events.emit({
         type: 'drain.finished',
@@ -760,7 +761,12 @@ export class PipelineService {
 
         const wanted = (plan.waves[0]?.itemIds ?? []).filter((id) => !skipped.has(id));
         if (wanted.length === 0) {
-          await end('completed', null);
+          // "Completed" means nothing more can be launched, not that the backlog is empty.
+          // Under the default flow a passing run lands its item in `in_review`, and
+          // `planWaves` counts a dependency as met only at `done` — so the dependants of
+          // everything this drain just delivered are exactly what is left blocked, until a
+          // person reviews and merges. The drain does not merge; it says how much is waiting.
+          await end('completed', null, plan.blocked.length);
           break;
         }
 
@@ -4008,13 +4014,19 @@ function describeResume(
  * One line saying how a drain ended — what `drain.finished` carries and the log prints.
  * `stopped: red gate on POMN-3 (run 01H…)`, `completed: 3 runs, $0.42`.
  */
-function describeDrainEnd(drain: Drain): string {
+function describeDrainEnd(drain: Drain, leftBlocked = 0): string {
   const runs = drain.itemsLaunched;
   const plural = (count: number, noun: string) => `${count} ${noun}${count === 1 ? '' : 's'}`;
   const spent = `$${drain.costUsd.toFixed(2)}`;
   const reason = drain.stopReason;
 
-  if (!reason) return `completed: ${plural(runs, 'run')}, ${spent}`;
+  if (!reason) {
+    const waiting =
+      leftBlocked > 0
+        ? `; ${plural(leftBlocked, 'item')} still blocked on dependencies not yet done — review and merge to free them`
+        : '';
+    return `completed: ${plural(runs, 'run')}, ${spent}${waiting}`;
+  }
 
   switch (reason.kind) {
     case 'red_gate':
