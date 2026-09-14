@@ -1,4 +1,5 @@
 import { relative } from 'node:path';
+import { ZodError } from 'zod';
 import { NotFoundError, NotInitializedError, PomniError, RequirementsNotMetError, ValidationError } from '@pomni/core';
 import { style } from './format.js';
 
@@ -13,6 +14,11 @@ export interface Output {
   readonly exitCode: number;
   report<T>(value: T, human: () => void): void;
   warn(message: string): void;
+  /**
+   * A line about work in flight — "cloning …", "run started". stdout for a person, stderr
+   * under --json, where stdout is reserved for the one document a script will parse.
+   */
+  progress(message: string): void;
   fail(code?: number): void;
 }
 
@@ -38,6 +44,9 @@ export function createOutput({ json, stdout, stderr }: OutputOptions): Output {
     warn(message) {
       stderr.write(`${message}\n`);
     },
+    progress(message) {
+      (json() ? stderr : stdout).write(`${message}\n`);
+    },
     fail(code = 1) {
       if (code > exitCode) exitCode = code;
     },
@@ -49,7 +58,15 @@ export function exitCodeFor(error: unknown): number {
   if (error instanceof RequirementsNotMetError) return 1;
   if (error instanceof NotFoundError || error instanceof NotInitializedError) return 3;
   if (error instanceof ValidationError) return 2;
-  if (error instanceof PomniError) return 1;
+  // By code as well as by class: a service may raise a plain PomniError with a richer message
+  // than the class constructors format, and the code is what the table is keyed on.
+  if (error instanceof PomniError) {
+    if (error.code === 'not_found' || error.code === 'not_initialized') return 3;
+    if (error.code === 'validation') return 2;
+    return 1;
+  }
+  // A schema rejection is bad input, the same as any other validation failure.
+  if (error instanceof ZodError) return 2;
   return 1;
 }
 
@@ -75,6 +92,9 @@ export function errorEnvelope(
         ...(error.details !== undefined ? { details: error.details } : {}),
       },
     };
+  }
+  if (error instanceof ZodError) {
+    return { error: { code: 'validation', message: error.message, details: error.issues } };
   }
   return { error: { code: 'internal', message: error instanceof Error ? error.message : String(error) } };
 }

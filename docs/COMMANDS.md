@@ -334,6 +334,7 @@ The global `--json` flag makes every command output structured data instead of f
 - `details` may contain structured context for programmatic inspection.
 
 **Compatibility:**
-- The JSON structure is the same object the MCP tool for that verb returns — no second shape
-  to keep in step. See `packages/mcp/` for the TypeScript types.
+- A document is the object the service returned — the same object the MCP tool for that verb
+  hands to an MCP client, since both call the same service. The shapes are the domain types in
+  `packages/core/src/domain/` (`BacklogItem`, `Run`, `PipelineRun`, `GateReport`, …).
 - Scripts should rely on exit codes for the answer, not on parsing prose.

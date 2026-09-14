@@ -26,23 +26,25 @@ export function registerToolCommands(
       const container = await open();
       const tools = await container.tools.list();
 
-      if (tools.length === 0) {
-        console.log(style.dim('no tools yet — add one with `pomni tool add`'));
-        return;
-      }
+      out().report({ tools }, () => {
+        if (tools.length === 0) {
+          console.log(style.dim('no tools yet — add one with `pomni tool add`'));
+          return;
+        }
 
-      console.log(
-        table(
-          tools.map((entry) => [
-            entry.id,
-            entry.kind,
-            describe(entry),
-            entry.projects.join(', ') || style.dim('—'),
-            health(entry),
-          ]),
-          ['ID', 'KIND', 'WHERE IT POINTS', 'PROJECTS', 'STATE'],
-        ),
-      );
+        console.log(
+          table(
+            tools.map((entry) => [
+              entry.id,
+              entry.kind,
+              describe(entry),
+              entry.projects.join(', ') || style.dim('—'),
+              health(entry),
+            ]),
+            ['ID', 'KIND', 'WHERE IT POINTS', 'PROJECTS', 'STATE'],
+          ),
+        );
+      });
     });
 
   tool
@@ -52,27 +54,29 @@ export function registerToolCommands(
       const container = await open();
       const entry = await container.tools.get(id);
 
-      console.log(`${style.bold(entry.name)} ${style.dim(`(${entry.id})`)}  ${entry.kind}`);
-      if (entry.description) console.log(entry.description);
-      console.log();
-      console.log(`${style.dim('points at')}  ${describe(entry)}`);
-      console.log(`${style.dim('projects')}   ${entry.projects.join(', ') || '—'}`);
-      console.log(`${style.dim('check')}      ${entry.check ?? '—'}`);
-      if (entry.credential) {
-        console.log(`${style.dim('credential')} ${entry.credential} → ${entry.credentialEnv}`);
-      }
-      if (entry.envFrom.length > 0) {
-        console.log(`${style.dim('env from')}   ${entry.envFrom.join(', ')}`);
-      }
-      if (entry.problems.length > 0) {
+      out().report(entry, () => {
+        console.log(`${style.bold(entry.name)} ${style.dim(`(${entry.id})`)}  ${entry.kind}`);
+        if (entry.description) console.log(entry.description);
         console.log();
-        for (const problem of entry.problems) console.log(style.red(`  ! ${problem}`));
-      }
-      if (entry.usage) {
-        console.log();
-        console.log(style.dim('usage given to agents:'));
-        console.log(entry.usage);
-      }
+        console.log(`${style.dim('points at')}  ${describe(entry)}`);
+        console.log(`${style.dim('projects')}   ${entry.projects.join(', ') || '—'}`);
+        console.log(`${style.dim('check')}      ${entry.check ?? '—'}`);
+        if (entry.credential) {
+          console.log(`${style.dim('credential')} ${entry.credential} → ${entry.credentialEnv}`);
+        }
+        if (entry.envFrom.length > 0) {
+          console.log(`${style.dim('env from')}   ${entry.envFrom.join(', ')}`);
+        }
+        if (entry.problems.length > 0) {
+          console.log();
+          for (const problem of entry.problems) console.log(style.red(`  ! ${problem}`));
+        }
+        if (entry.usage) {
+          console.log();
+          console.log(style.dim('usage given to agents:'));
+          console.log(entry.usage);
+        }
+      });
     });
 
   tool
@@ -115,18 +119,17 @@ export function registerToolCommands(
         check: flags.check ?? null,
       });
 
-      console.log(`${style.green('added')} ${style.bold(created.id)}  ${describe(created)}`);
+      if (flags.project) await container.tools.attach(flags.project, created.id);
+      const entry = await container.tools.get(created.id);
 
-      if (flags.project) {
-        await container.tools.attach(flags.project, created.id);
-        console.log(style.dim(`  attached to ${flags.project}`));
-      }
-
-      const problems = (await container.tools.get(created.id)).problems;
-      for (const problem of problems) console.log(style.red(`  ! ${problem}`));
-      console.log(
-        style.dim('  give it to an agent: `pomni workflow agent edit <wf> <agent> --tools ' + created.id + '`'),
-      );
+      out().report(entry, () => {
+        console.log(`${style.green('added')} ${style.bold(created.id)}  ${describe(created)}`);
+        if (flags.project) console.log(style.dim(`  attached to ${flags.project}`));
+        for (const problem of entry.problems) console.log(style.red(`  ! ${problem}`));
+        console.log(
+          style.dim('  give it to an agent: `pomni workflow agent edit <wf> <agent> --tools ' + created.id + '`'),
+        );
+      });
     });
 
   tool
@@ -162,7 +165,7 @@ export function registerToolCommands(
         enabled: flags.enable ? true : flags.disable ? false : undefined,
       });
 
-      console.log(`${style.green('updated')} ${updated.id}`);
+      out().report(updated, () => console.log(`${style.green('updated')} ${updated.id}`));
     });
 
   tool
@@ -171,7 +174,7 @@ export function registerToolCommands(
     .action(async (id: string) => {
       const container = await open();
       await container.tools.remove(id);
-      console.log(`${style.green('removed')} ${id}`);
+      out().report({ removed: id }, () => console.log(`${style.green('removed')} ${id}`));
     });
 
   tool
@@ -182,8 +185,10 @@ export function registerToolCommands(
       const container = await open();
       const projectId = flags.project ?? (await defaultProject());
       const attached = await container.tools.attach(projectId, id);
-      console.log(`${style.green('attached')} ${id} → ${projectId}`);
-      console.log(style.dim(`  ${projectId} now has: ${attached.join(', ')}`));
+      out().report({ projectId, toolId: id, tools: attached }, () => {
+        console.log(`${style.green('attached')} ${id} → ${projectId}`);
+        console.log(style.dim(`  ${projectId} now has: ${attached.join(', ')}`));
+      });
     });
 
   tool
@@ -194,7 +199,9 @@ export function registerToolCommands(
       const container = await open();
       const projectId = flags.project ?? (await defaultProject());
       await container.tools.detach(projectId, id);
-      console.log(`${style.green('detached')} ${id} from ${projectId}`);
+      out().report({ projectId, toolId: id }, () =>
+        console.log(`${style.green('detached')} ${id} from ${projectId}`),
+      );
     });
 
   tool
@@ -204,21 +211,24 @@ export function registerToolCommands(
       const container = await open();
       const results = await container.tools.check(ids);
 
-      if (results.length === 0) {
-        console.log(style.dim('nothing to check'));
-        return;
-      }
+      out().report({ results }, () => {
+        if (results.length === 0) {
+          console.log(style.dim('nothing to check'));
+          return;
+        }
 
-      for (const result of results) {
-        const mark =
-          result.status === 'ok'
-            ? style.green('ok')
-            : result.status === 'failed'
-              ? style.red('failed')
-              : style.dim('skipped');
-        console.log(`${mark}  ${style.bold(result.id)}  ${style.dim(result.detail)}`);
-      }
-      if (results.some((result) => result.status === 'failed')) process.exitCode = 1;
+        for (const result of results) {
+          const mark =
+            result.status === 'ok'
+              ? style.green('ok')
+              : result.status === 'failed'
+                ? style.red('failed')
+                : style.dim('skipped');
+          console.log(`${mark}  ${style.bold(result.id)}  ${style.dim(result.detail)}`);
+        }
+      });
+      // A check that failed is the answer "no": the command ran, and one tool does not work.
+      if (results.some((result) => result.status === 'failed')) out().fail(1);
     });
 }
 

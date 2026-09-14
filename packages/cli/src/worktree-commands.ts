@@ -22,24 +22,26 @@ export function registerWorktreeCommands(
       const projectId = flags.project ?? (await defaultProject());
       const found = await container.worktrees.inspect({ projectId, repoId: flags.repo });
 
-      if (found.length === 0) {
-        console.log(style.dim('no live worktrees'));
-        return;
-      }
+      out().report({ worktrees: found }, () => {
+        if (found.length === 0) {
+          console.log(style.dim('no live worktrees'));
+          return;
+        }
 
-      console.log(
-        table(
-          found.map(({ worktree, state }: { worktree: Worktree; state: WorktreeState; detail: string }) => [
-            style.bold(worktree.id),
-            worktree.repoId,
-            worktree.runId,
-            worktree.branch,
-            stateLabel(state),
-            style.dim(worktree.path),
-          ]),
-          ['ID', 'REPO', 'RUN', 'BRANCH', 'STATE', 'PATH'],
-        ),
-      );
+        console.log(
+          table(
+            found.map(({ worktree, state }: { worktree: Worktree; state: WorktreeState; detail: string }) => [
+              style.bold(worktree.id),
+              worktree.repoId,
+              worktree.runId,
+              worktree.branch,
+              stateLabel(state),
+              style.dim(worktree.path),
+            ]),
+            ['ID', 'REPO', 'RUN', 'BRANCH', 'STATE', 'PATH'],
+          ),
+        );
+      });
     });
 
   worktree
@@ -51,22 +53,25 @@ export function registerWorktreeCommands(
       const projectId = flags.project ?? (await defaultProject());
       const result = await container.worktrees.prune({ projectId });
 
-      for (const removed of result.removed) {
-        console.log(`${style.green('removed')} ${removed.id}  ${style.dim(removed.path)}`);
-      }
-      for (const kept of result.kept) {
-        console.log(`${style.yellow('kept')} ${kept.id}  ${style.dim(kept.path)}`);
-        console.log(`   ${style.dim(kept.reason)}`);
-      }
-      for (const failed of result.failed) {
-        console.log(`${style.red('failed')} ${failed.id}  ${style.dim(failed.path)}`);
-        console.log(`   ${style.red(failed.error)}`);
-      }
+      out().report(result, () => {
+        for (const removed of result.removed) {
+          console.log(`${style.green('removed')} ${removed.id}  ${style.dim(removed.path)}`);
+        }
+        for (const kept of result.kept) {
+          console.log(`${style.yellow('kept')} ${kept.id}  ${style.dim(kept.path)}`);
+          console.log(`   ${style.dim(kept.reason)}`);
+        }
+        for (const failed of result.failed) {
+          console.log(`${style.red('failed')} ${failed.id}  ${style.dim(failed.path)}`);
+          console.log(`   ${style.red(failed.error)}`);
+        }
 
-      if (result.removed.length === 0 && result.kept.length === 0 && result.failed.length === 0) {
-        console.log(style.dim('nothing to prune'));
-      }
-      if (result.failed.length > 0) process.exitCode = 1;
+        if (result.removed.length === 0 && result.kept.length === 0 && result.failed.length === 0) {
+          console.log(style.dim('nothing to prune'));
+        }
+      });
+      // A worktree that could not be removed is the answer "no", not an exception.
+      if (result.failed.length > 0) out().fail(1);
     });
 
   worktree
@@ -81,7 +86,7 @@ export function registerWorktreeCommands(
     .action(async (id: string, options: { force?: boolean }) => {
       const container = await open();
       await container.worktrees.removeOne(id, { force: Boolean(options.force) });
-      console.log(`${style.green('removed')} ${id}`);
+      out().report({ removed: id }, () => console.log(`${style.green('removed')} ${id}`));
     });
 }
 

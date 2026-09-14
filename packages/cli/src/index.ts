@@ -139,34 +139,33 @@ export async function main(argv: string[], options: MainOptions = {}): Promise<n
           );
         }
 
-        const next = await container.workspace.setConfig({
+        await container.workspace.setConfig({
           editor: { command: options.clear ? null : (command as string) },
-        });
-        out().report(next, () => {
-          console.log(
-            next.editor.command
-              ? `${style.green('editor')} ${next.editor.command}`
-              : style.dim('editor cleared — Pomni will look for one on PATH'),
-          );
         });
       }
 
       const configured = (await container.workspace.config()).editor.command;
       const found = configured ?? (await firstOnPath(container.desktop));
+      const usable = found ? await container.desktop.canRun(found) : false;
 
-      if (!found) {
-        out().report({ found: null }, () => {
+      // One document, whether or not something was just set: what was changed is part of
+      // what is now in effect, and a script wants the latter.
+      out().report({ changed: Boolean(options.clear || command), found, configured: !!configured, usable }, () => {
+        if (options.clear || command) {
+          console.log(
+            configured
+              ? `${style.green('editor')} ${configured}`
+              : style.dim('editor cleared — Pomni will look for one on PATH'),
+          );
+        }
+        if (!found) {
           console.log(
             style.yellow(
               `no editor: none of ${KNOWN_EDITORS.join(', ')} is on PATH. Set one with 'pomni editor <command>'.`,
             ),
           );
-        });
-        return;
-      }
-
-      const usable = await container.desktop.canRun(found);
-      out().report({ found, configured: !!configured, usable }, () => {
+          return;
+        }
         console.log(
           usable
             ? `${found}${configured ? '' : style.dim('  (found on PATH)')}`
@@ -445,7 +444,7 @@ export async function main(argv: string[], options: MainOptions = {}): Promise<n
         });
 
         if (source.kind === 'git') {
-          console.log(`${style.cyan('cloning')} ${source.url} → ${style.dim(container.workspace.workingDir(created))}`);
+          out().progress(`${style.cyan('cloning')} ${source.url} → ${style.dim(container.workspace.workingDir(created))}`);
           container.events.subscribe((event) => {
             if (event.type === 'repo.progress' && event.repoId === created.id) {
               process.stderr.write(`\r${style.dim(event.line.slice(0, 100).padEnd(100))}`);
@@ -933,9 +932,11 @@ export async function main(argv: string[], options: MainOptions = {}): Promise<n
         logLevel: globals().verbose ? 'info' : 'warn',
       });
 
-      console.log(`${style.green('pomni')} ${server.url}`);
-      console.log(style.dim(`workspace ${container.root}`));
-      console.log(style.dim('press ctrl+c to stop'));
+      out().report({ url: server.url, root: container.root }, () => {
+        console.log(`${style.green('pomni')} ${server.url}`);
+        console.log(style.dim(`workspace ${container.root}`));
+        console.log(style.dim('press ctrl+c to stop'));
+      });
 
       if (options.open) openBrowser(server.url);
 

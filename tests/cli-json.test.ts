@@ -175,6 +175,76 @@ describe('--json output', () => {
   });
 });
 
+describe('exit codes on the commands that answer "no" without throwing', () => {
+  it('tool check exits 1 when a check failed, with the results as the document', async () => {
+    await harness.tools.create({
+      name: 'Figma CLI',
+      id: 'figma-cli',
+      kind: 'cli',
+      bin: 'figma-cli',
+      check: 'figma-cli status',
+    });
+    harness.executor.script = [{ match: /figma-cli status/, exitCode: 1, output: 'daemon is not running' }];
+
+    const result = await runCli(harness, ['--json', 'tool', 'check']);
+
+    expect(result.code).toBe(1);
+    expect(result.lines).toHaveLength(1);
+    expect(result.last).toMatchObject({ results: [{ id: 'figma-cli', status: 'failed' }] });
+  });
+
+  it('tool check exits 0 and still prints one document when every check passed', async () => {
+    await harness.tools.create({
+      name: 'Figma CLI',
+      id: 'figma-cli',
+      kind: 'cli',
+      bin: 'figma-cli',
+      check: 'figma-cli status',
+    });
+
+    const result = await runCli(harness, ['--json', 'tool', 'check']);
+
+    expect(result.code).toBe(0);
+    expect(result.last).toMatchObject({ results: [{ id: 'figma-cli', status: 'ok' }] });
+  });
+
+  it('worktree prune exits 0 with an empty report when there is nothing to prune', async () => {
+    const result = await runCli(harness, ['--json', 'worktree', 'prune']);
+
+    expect(result.code).toBe(0);
+    expect(result.lines).toHaveLength(1);
+    expect(result.last).toEqual({ removed: [], kept: [], failed: [] });
+  });
+
+  it('task show exits 3 for a run id that matches nothing', async () => {
+    const result = await runCli(harness, ['--json', 'task', 'show', 'NOSUCHRUN']);
+
+    expect(result.code).toBe(3);
+    expect(result.lines).toHaveLength(1);
+    expect(result.last).toMatchObject({ error: { code: 'not_found' } });
+  });
+});
+
+describe('one document per non-stream command', () => {
+  it('editor prints one document even when it also set the editor', async () => {
+    const result = await runCli(harness, ['--json', 'editor', 'vim']);
+
+    expect(result.code).toBe(0);
+    expect(result.lines).toHaveLength(1);
+    expect(result.last).toMatchObject({ changed: true, configured: true, found: 'vim' });
+  });
+
+  it('repo add keeps its progress off stdout', async () => {
+    const path = await makeNodeRepo(join(harness.dir, 'mobile'));
+    const result = await runCli(harness, ['--json', 'repo', 'add', path, '-p', 'acme', '-r', 'mobile']);
+
+    expect(result.code).toBe(0);
+    // Every stdout line parsed as JSON already; a "cloning …" line would have thrown.
+    expect(result.lines).toHaveLength(1);
+    expect(result.last).toMatchObject({ id: 'mobile', status: 'linked' });
+  });
+});
+
 describe('human output', () => {
   it('still exits 3 for a missing item, with stdout empty and the message on stderr', async () => {
     const result = await runCli(harness, ['backlog', 'show', 'does-not-exist']);

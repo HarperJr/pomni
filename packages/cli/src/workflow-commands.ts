@@ -2,6 +2,7 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { basename, resolve } from 'node:path';
 import {
   NotFoundError,
+  PomniError,
   ValidationError,
   type PipelineRun,
   AgentRoleSchema,
@@ -780,16 +781,19 @@ ${item.body}`;
           console.log();
         });
 
-        // Live progress, so a terminal run is as watchable as the console.
+        // Live progress, so a terminal run is as watchable as the console. Only this run's
+        // steps: the bus carries every run's output chunks and every project's item moves, and
+        // a script reading the stream wants the steps of the run it started, not the workspace.
         container.events.subscribe((event) => {
+          if (event.type !== 'pipeline.step.started' && event.type !== 'pipeline.step.finished') return;
+          if (event.runId !== run.id) return;
           out().report(event, () => {
             if (event.type === 'pipeline.step.started') {
               const indent = '  '.repeat(event.depth);
               console.log(
                 `${indent}${style.cyan('▸')} ${style.bold(event.agentName)} ${style.dim(`${event.providerId} · ${event.model}`)}`,
               );
-            }
-            if (event.type === 'pipeline.step.finished') {
+            } else {
               console.log(
                 `  ${event.status === 'done' ? style.green('✓') : style.red('✗')} ${style.dim(event.summary)}`,
               );
@@ -1639,7 +1643,9 @@ export async function resolveRun(
   if (matches.length === 1) return matches[0] as PipelineRun;
 
   if (matches.length === 0) {
-    throw new ValidationError(
+    // Not found, not invalid: the id was well-formed and named nothing. Exit code 3, not 2.
+    throw new PomniError(
+      'not_found',
       explicit
         ? `no run matches '${id}' in project '${explicit}'`
         : `no run matches '${id}' in any project (searched: ${projectIds.join(', ')})`,

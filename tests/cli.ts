@@ -54,7 +54,22 @@ export async function runCli(harness: HarnessLike, args: string[]): Promise<CliR
   const stderr = new MemoryWritable();
   const openContainer = typeof harness === 'function' ? harness : async () => harness;
 
-  const code = await main(['node', 'pomni', ...args], { stdout, stderr, openContainer });
+  // The human-formatted paths print through `console.log`, which is bound to the real
+  // process.stdout and would slip past the injected stream. Redirect it for the duration, so a
+  // command that prints prose in --json mode fails here as a SyntaxError rather than passing a
+  // test that never saw the leak.
+  const original = { log: console.log, error: console.error };
+  console.log = (...parts: unknown[]) => void stdout.write(`${parts.map(String).join(' ')}
+`);
+  console.error = (...parts: unknown[]) => void stderr.write(`${parts.map(String).join(' ')}
+`);
+  let code: number;
+  try {
+    code = await main(['node', 'pomni', ...args], { stdout, stderr, openContainer });
+  } finally {
+    console.log = original.log;
+    console.error = original.error;
+  }
 
   const lines = stdout.text
     .split('\n')

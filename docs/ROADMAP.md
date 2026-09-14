@@ -148,7 +148,7 @@ configurable per workflow, not fixed spec-writer/planner/verifier roles)
 
 ## M4 — Headless
 
-**Goal:** exit codes and `--json` everywhere, so CI and cron can call Pomni.
+**Goal:** the same loop without a human in the chair.
 
 **Shipped**
 
