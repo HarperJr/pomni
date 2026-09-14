@@ -5,6 +5,7 @@ import {
   PomniError,
   ValidationError,
   type PipelineRun,
+  type Drain,
   AgentRoleSchema,
   since,
   HANDOVER_PROTOCOL,
@@ -1115,11 +1116,28 @@ ${item.body}`;
 
   task
     .command('show <id>')
-    .description('one run, broken down by agent — which one was expensive')
+    .description('one run, broken down by agent — or a drain, broken down by wave and why it stopped')
     .option('-p, --project <id>', 'project')
     .action(async (id: string, flags: { project?: string }) => {
       const container = await open();
-      const match = await resolveRun(container, id, flags.project);
+
+      let match: PipelineRun;
+      try {
+        match = await resolveRun(container, id, flags.project);
+      } catch (error) {
+        // A run id names nothing — try a drain id before giving up. Both share `task show`
+        // because both are "what happened here", and a person reading a drain id off `task
+        // list` should not have to know it needs a different verb.
+        if (error instanceof PomniError && error.code === 'not_found') {
+          const drain = await resolveDrain(container, id, flags.project);
+          if (drain) {
+            const runs = await container.pipelines.drainRuns(drain);
+            out().report({ ...drain, runs }, () => printDrain(drain, runs));
+            return;
+          }
+        }
+        throw error;
+      }
 
       const detail = await container.pipelines.get(match.id);
       const item = detail.itemId ? await container.pipelines.itemSpend(match.projectId, detail.itemId) : null;
@@ -1186,16 +1204,16 @@ ${item.body}`;
 
   task
     .command('list')
-    .description('recent pipeline runs')
+    .description('recent pipeline runs and drains')
     .option('-p, --project <id>', 'project')
     .action(async (flags: { project?: string }) => {
       const container = await open();
-      const runs = await container.pipelines.list({
-        projectId: flags.project ?? (await defaultProject()),
-      });
+      const projectId = flags.project ?? (await defaultProject());
+      const runs = await container.pipelines.list({ projectId });
+      const drains = await container.pipelines.listDrains({ projectId });
 
-      if (runs.length === 0) {
-        out().report(runs, () => {
+      if (runs.length === 0 && drains.length === 0) {
+        out().report({ runs, drains }, () => {
           console.log(style.dim('nothing has run yet'));
         });
         return;
@@ -1221,21 +1239,40 @@ ${item.body}`;
         ]),
       );
 
-      out().report(runs, () => {
-        console.log(
-          table(
-            runs.map((run) => [
-              style.dim(run.id.slice(-8)),
-              run.status === 'passed' ? style.green(run.status) : style.red(run.status),
-              run.workflowName,
-              run.itemId ?? '',
-              branchLabel(run, branchOf.get(run.id)),
-              spent(run, soFar.get(run.id)),
-              truncate(run.task, 34),
-            ]),
-            ['ID', 'STATUS', 'WORKFLOW', 'ITEM', 'BRANCH', 'SPENT', 'TASK'],
-          ),
-        );
+      out().report({ runs, drains }, () => {
+        if (runs.length > 0) {
+          console.log(
+            table(
+              runs.map((run) => [
+                style.dim(run.id.slice(-8)),
+                run.status === 'passed' ? style.green(run.status) : style.red(run.status),
+                run.workflowName,
+                run.itemId ?? '',
+                branchLabel(run, branchOf.get(run.id)),
+                spent(run, soFar.get(run.id)),
+                truncate(run.task, 34),
+              ]),
+              ['ID', 'STATUS', 'WORKFLOW', 'ITEM', 'BRANCH', 'SPENT', 'TASK'],
+            ),
+          );
+        }
+
+        if (drains.length > 0) {
+          if (runs.length > 0) console.log();
+          console.log(style.bold('drains'));
+          console.log(
+            table(
+              drains.map((drain) => [
+                style.dim(drain.id.slice(-8)),
+                drain.status === 'completed' ? style.green(drain.status) : style.red(drain.status),
+                `${drain.itemsLaunched} item${drain.itemsLaunched === 1 ? '' : 's'}`,
+                `$${drain.costUsd.toFixed(2)}`,
+                drain.stopReason ? drain.stopReason.kind : '',
+              ]),
+              ['ID', 'STATUS', 'LAUNCHED', 'SPENT', 'STOPPED ON'],
+            ),
+          );
+        }
       });
     });
 }
@@ -1624,6 +1661,88 @@ function printBases(run: Pick<PipelineRun, 'bases' | 'noSync'>): void {
     const commit = base.commit ? base.commit.slice(0, 8) : style.dim('(unknown)');
     console.log(style.dim(`  ${base.name} ${commit} (${base.sync}: ${base.detail})`));
   }
+}
+
+/**
+ * `task show <drainId>`'s breakdown: each wave, its items against the runs they launched, what
+ * was skipped, and why the drain stopped — the morning-after answer in one place.
+ */
+function printDrain(drain: Drain, runs: PipelineRun[]): void {
+  const runById = new Map(runs.map((run) => [run.id, run]));
+
+  console.log(`${style.bold(drain.id.slice(-8))}  drain  ${drain.status}`);
+  console.log(style.dim(`  ${drain.itemsLaunched} item(s) launched · $${drain.costUsd.toFixed(2)}`));
+
+  for (const wave of drain.waves) {
+    console.log();
+    console.log(style.bold(`wave ${wave.index}`));
+    for (const [index, itemId] of wave.itemIds.entries()) {
+      const runId = wave.runIds[index];
+      if (!runId) {
+        console.log(`  ${itemId}  ${style.dim('not launched')}`);
+        continue;
+      }
+      const run = runById.get(runId);
+      const status = run ? run.status : 'unknown';
+      const gate = run ? run.gateStatus : 'unknown';
+      const cost = run?.costUsd != null ? `$${run.costUsd.toFixed(2)}` : style.dim('—');
+      console.log(`  ${itemId} → ${runId.slice(-8)}  ${status}  gate ${gate}  ${cost}`);
+    }
+  }
+
+  if (drain.skippedItemIds.length > 0) {
+    console.log();
+    console.log(style.bold('skipped'));
+    for (const itemId of drain.skippedItemIds) console.log(`  ${itemId}`);
+  }
+
+  console.log();
+  console.log(drain.stopReason ? style.red(describeStopReason(drain.stopReason)) : style.green('completed'));
+}
+
+function describeStopReason(reason: NonNullable<Drain['stopReason']>): string {
+  switch (reason.kind) {
+    case 'red_gate':
+      return `stopped: red gate on ${reason.itemId} (run ${reason.runId})`;
+    case 'question':
+      return `stopped: run ${reason.runId} is waiting on a question (${reason.questionId})`;
+    case 'max_items':
+      return `stopped: reached the ${reason.limit} item ceiling`;
+    case 'max_cost':
+      return `stopped: spent $${reason.spentUsd.toFixed(2)} against a $${reason.limitUsd.toFixed(2)} ceiling`;
+    case 'error':
+      return reason.itemId ? `stopped: ${reason.itemId} did not start: ${reason.message}` : `stopped: ${reason.message}`;
+  }
+}
+
+/**
+ * A drain by its full id or by the tail `task list` prints — the same courtesy `resolveRun`
+ * extends to runs, for the same reason: nobody retypes a 26-character ULID off a listing.
+ * Null when nothing matches; the caller has a run-flavoured not-found to throw already.
+ */
+export async function resolveDrain(
+  container: PomniContainer,
+  id: string,
+  explicit: string | undefined,
+): Promise<Drain | null> {
+  const exact = await container.pipelines.getDrain(id);
+  if (exact) return exact;
+
+  const wanted = id.toUpperCase();
+  const projectIds = explicit ? [explicit] : await container.projects.listIds();
+  const matches: Drain[] = [];
+  for (const projectId of projectIds) {
+    const drains = await container.pipelines.listDrains({ projectId, limit: 200 });
+    matches.push(...drains.filter((drain) => drain.id.endsWith(wanted)));
+  }
+  if (matches.length > 1) {
+    throw new ValidationError(
+      `'${id}' matches drains in several projects: ${matches
+        .map((drain) => `${drain.projectId} (${drain.id})`)
+        .join(', ')} — pass -p <id> to choose`,
+    );
+  }
+  return matches[0] ?? null;
 }
 
 export async function resolveRun(

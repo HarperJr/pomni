@@ -135,7 +135,11 @@ the engine enforces; the body is prose you and an agent both edit. `pomni b` is 
 | `pomni backlog reopen <ID>` | ✓ | `done` back to `in_progress`. |
 | `pomni backlog remove <ID>` (`rm`) | ✓ | Delete; refused while something depends on it. |
 | `pomni backlog next [-p]` | ✓ | The highest-priority `ready` item. |
-| `pomni backlog waves [-p] [--explain] [--run]` | ✓ | Group `ready` items into waves that may launch concurrently; deterministic, no model call. `--explain` prints the conflict graph and each item's path scope. `--run` launches wave 1, one item per launch, and exits non-zero if any failed. |
+| `pomni backlog waves [-p] [--explain] [--run] [--all]` | ✓ | Group `ready` items into waves that may launch concurrently; deterministic, no model call. `--explain` prints the conflict graph and each item's path scope. `--run` launches wave 1, one item per launch, and exits non-zero if any failed. `--all` with `--run` drains the ready queue unattended: launches wave 1, waits for all its runs, re-plans from the current backlog, launches the next wave, and continues until no ready item remains or a stop condition is hit. `--all` requires `--run`. |
+| ` ` `[--keep-going]` | ✓ | With `--all`, a red gate skips only that item's dependents instead of stopping the drain. |
+| ` ` `[--max-items <n>]` | ✓ | With `--all`, stop the drain after it has launched this many items. |
+| ` ` `[--max-cost <usd>]` | ✓ | With `--all`, stop the drain once its runs have spent this much. |
+| ` ` | | On the shipped default flow, a passing run lands its item in `in_review`, and dependencies are only satisfied at `done`, so a drain typically completes after one wave (or stops early). The summary reports how many items are still blocked on unfinished dependencies; the drain does not merge. |
 | `pomni backlog open <ID>` | ✓ | Open the item file in `$EDITOR`. |
 
 The project is usually inferred from the item id (`ACME-12` → project with prefix `ACME`),
@@ -190,9 +194,9 @@ committed, pushed and opened as a merge request. Descriptions below are the CLI'
 | `pomni task questions [-p]` | ✓ | What the running pipelines are waiting to be told. |
 | `pomni task answer <questionId> [text...] [-f <path>]` | ✓ | Answer a question a run is waiting on; `-f` attaches a file with the answer. |
 | `pomni task comment <id> [text...]` | ✓ | Write a note on a run — with no text, read the notes already there. |
-| `pomni task show <id>` | ✓ | One run, broken down by agent — which one was expensive. |
+| `pomni task show <id>` | ✓ | One run, broken down by agent — which one was expensive. Or a drain, broken down by wave and why it stopped. |
 | `pomni task cancel <id>` | ✓ | Stop a run, or close out one whose process is gone. |
-| `pomni task list [-p]` | ✓ | Recent pipeline runs. |
+| `pomni task list [-p]` | ✓ | Recent pipeline runs and drains. In `--json` mode, returns `{ runs, drains }` instead of a bare runs array. |
 
 ## Workflows — agent pipelines
 
@@ -309,7 +313,7 @@ does not exist.
 | Code | Meaning | Examples |
 | --- | --- | --- |
 | 0 | Success | command ran, answer is "yes" |
-| 1 | Command ran; answer is "no" | `verify` with a red gate, `task run\|resume\|rerun` ending other than `passed`, `backlog move` refused by guard, `tool check` failed, `worktree prune` with failures, `cred test\|repo doctor` failed |
+| 1 | Command ran; answer is "no" | `verify` with a red gate, `task run\|resume\|rerun` ending other than `passed`, `backlog waves --all` ending other than completed with all runs passed, `backlog move` refused by guard, `tool check` failed, `worktree prune` with failures, `cred test\|repo doctor` failed |
 | 2 | Bad usage | unknown option or argument, invalid flag combination, malformed input |
 | 3 | Not found or not initialized | workspace not initialized (`pomni init` needed), item/run/repo/project/credential/workflow/tool/provider does not exist, referenced asset missing |
 

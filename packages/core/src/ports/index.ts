@@ -7,6 +7,8 @@ import type { Credential } from '../domain/credential.js';
 import type { VcsInfo } from '../domain/repo.js';
 import type {
   Artifact,
+  Drain,
+  DrainFilter,
   PipelineFilter,
   PipelineRun,
   PipelineStep,
@@ -434,6 +436,12 @@ export interface PipelineStore {
   updateQuestion(id: string, question: Question): Promise<void>;
   getQuestion(id: string): Promise<Question | null>;
   questions(runId: string): Promise<Question[]>;
+  /** Drains live beside the runs they launched; `PipelineFilter.drainId` finds those runs. */
+  insertDrain(drain: Drain): Promise<void>;
+  updateDrain(id: string, drain: Drain): Promise<void>;
+  getDrain(id: string): Promise<Drain | null>;
+  /** Newest first. */
+  listDrains(filter: DrainFilter): Promise<Drain[]>;
   close(): void;
 }
 
@@ -648,6 +656,26 @@ export type PomniEvent =
       status: string;
       summary: string;
     }
+  | { type: 'drain.started'; drainId: string; projectId: string }
+  | {
+      type: 'drain.wave.launched';
+      drainId: string;
+      projectId: string;
+      /** 1-based, the drain's own numbering. */
+      index: number;
+      itemIds: string[];
+      runIds: string[];
+    }
+  | {
+      type: 'drain.finished';
+      drainId: string;
+      projectId: string;
+      /** `completed` or `stopped`. */
+      status: string;
+      /** The stop reason's `kind`, or null when the queue simply ran out. */
+      stopReason: string | null;
+      summary: string;
+    }
   | { type: 'item.created'; projectId: string; itemId: string }
   | { type: 'item.changed'; projectId: string; itemId: string }
   | { type: 'item.transitioned'; projectId: string; itemId: string; from: string; to: string }
@@ -765,6 +793,9 @@ export const DURABLE_EVENT_TYPES: ReadonlySet<string> = new Set([
   'pipeline.question.asked',
   'pipeline.question.answered',
   'pipeline.finished',
+  'drain.started',
+  'drain.wave.launched',
+  'drain.finished',
   'item.created',
   'item.changed',
   'item.transitioned',

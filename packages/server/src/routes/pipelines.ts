@@ -1,6 +1,7 @@
 import { z } from 'zod';
-import { PipelineStatusSchema, type PomniContainer } from '@pomni/core';
+import { DrainStatusSchema, PipelineStatusSchema, type PomniContainer } from '@pomni/core';
 import type { FastifyInstance } from 'fastify';
+import { sendNotFound } from '../errors.js';
 
 const ListQuery = z.object({
   status: z.enum(['running', 'passed', 'failed', 'cancelled']).optional(),
@@ -10,6 +11,11 @@ const ListQuery = z.object({
   // Clamped by the service rather than rejected here — asking for more rows than exist
   // is not a malformed request, it is a request for everything.
   limit: z.coerce.number().int().positive().optional(),
+});
+
+const DrainListQuery = z.object({
+  status: DrainStatusSchema.optional(),
+  limit: z.coerce.number().int().positive().max(200).optional(),
 });
 
 const StartBody = z.object({
@@ -167,4 +173,28 @@ export async function pipelineRoutes(
       })(),
     }),
   );
+
+  /** The project's drains, newest first — what launched a run and why it stopped. */
+  app.get<{ Params: { id: string }; Querystring: { status?: string; limit?: string } }>(
+    '/api/projects/:id/drains',
+    async (request) => {
+      const query = DrainListQuery.parse(request.query);
+      return {
+        drains: await container.pipelines.listDrains({
+          projectId: request.params.id,
+          status: query.status,
+          limit: query.limit,
+        }),
+      };
+    },
+  );
+
+  app.get<{ Params: { id: string } }>('/api/drains/:id', async (request, reply) => {
+    const drain = await container.pipelines.getDrain(request.params.id);
+    if (!drain) {
+      sendNotFound(request, reply);
+      return reply;
+    }
+    return { drain };
+  });
 }

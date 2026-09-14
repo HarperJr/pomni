@@ -241,6 +241,12 @@ export const PipelineRunSchema = z.object({
    */
   startedBy: z.string().nullable().default(null),
   /**
+   * The drain that launched this run, when one did. Set at `start()` and never updated; a run
+   * a drain started also has `startedBy: 'drain'`. Null for every run a person or an agent
+   * asked for directly, and for every run recorded before drains existed.
+   */
+  drainId: z.string().nullable().default(null),
+  /**
    * The branch, or branches, this run's work was committed on.
    *
    * On the run rather than derived from its worktree rows. A row exists if and only if its
@@ -294,6 +300,123 @@ export const PipelineRunSchema = z.object({
 });
 
 export type PipelineRun = z.infer<typeof PipelineRunSchema>;
+
+// ---------------------------------------------------------------------------
+// Drains
+// ---------------------------------------------------------------------------
+
+/**
+ * One unattended pass over the ready queue: wave after wave of runs, re-planned between
+ * waves, until nothing is ready or a stop condition is hit.
+ *
+ * A record rather than a loop that leaves only its runs behind, because the morning-after
+ * question is "what happened while I was away" and the answer needs one place to look: which
+ * waves were launched with which runs, and why it stopped. Merging is not part of it — a drain
+ * ends with branches and MRs, the same as a single run does.
+ */
+export const DrainStatusSchema = z.enum(['running', 'completed', 'stopped']);
+export type DrainStatus = z.infer<typeof DrainStatusSchema>;
+
+/**
+ * Why a drain stopped before the queue was empty. There is no `exhausted` variant: a drain
+ * that ran out of ready items is `completed`, and its `stopReason` is null.
+ */
+export const DrainStopReasonSchema = z.discriminatedUnion('kind', [
+  z.object({
+    kind: z.literal('red_gate'),
+    runId: z.string(),
+    itemId: z.string(),
+    runStatus: PipelineStatusSchema,
+    gateStatus: z.enum(['skipped', 'passed', 'failed']),
+  }),
+  z.object({ kind: z.literal('question'), runId: z.string(), questionId: z.string() }),
+  z.object({ kind: z.literal('max_items'), limit: z.number().int().positive() }),
+  z.object({
+    kind: z.literal('max_cost'),
+    limitUsd: z.number().nonnegative(),
+    spentUsd: z.number().nonnegative(),
+  }),
+  z.object({ kind: z.literal('error'), itemId: z.string(), message: z.string() }),
+]);
+export type DrainStopReason = z.infer<typeof DrainStopReasonSchema>;
+
+/** How one launched run ended, copied onto the drain so its record reads without the runs. */
+export const DrainRunResultSchema = z.object({
+  runId: z.string(),
+  itemId: z.string(),
+  status: PipelineStatusSchema,
+  gateStatus: z.enum(['skipped', 'passed', 'failed']),
+  costUsd: z.number().nullable(),
+  endedAt: z.string(),
+});
+export type DrainRunResult = z.infer<typeof DrainRunResultSchema>;
+
+export const DrainWaveSchema = z.object({
+  /** 1-based. The drain numbers its own waves (`waves.length + 1`), not the planner. */
+  index: z.number().int().positive(),
+  /** The wave as `planWaves` returned it. */
+  itemIds: z.array(z.string()),
+  /** A prefix of `itemIds` by position: runs are launched sequentially in item order. */
+  runIds: z.array(z.string()),
+  results: z.array(DrainRunResultSchema).default([]),
+  startedAt: z.string(),
+  endedAt: z.string().nullable().default(null),
+});
+export type DrainWave = z.infer<typeof DrainWaveSchema>;
+
+export const DrainSchema = z.object({
+  id: z.string(),
+  projectId: z.string(),
+  status: DrainStatusSchema,
+  /** OS pid of the process driving the drain while it runs, null once it has ended. */
+  pid: z.number().int().positive().nullable().default(null),
+  /** A red gate skips that item's dependents and carries on, instead of stopping. */
+  keepGoing: z.boolean().default(false),
+  maxItems: z.number().int().positive().nullable().default(null),
+  maxCostUsd: z.number().nonnegative().nullable().default(null),
+  waves: z.array(DrainWaveSchema).default([]),
+  /** Dependents of a red item, left unlaunched under `keepGoing`. */
+  skippedItemIds: z.array(z.string()).default([]),
+  /** Null iff `status !== 'stopped'`. */
+  stopReason: DrainStopReasonSchema.nullable().default(null),
+  /** Always `sum(wave.runIds.length)`. */
+  itemsLaunched: z.number().int().nonnegative().default(0),
+  /** `sum(run.costUsd ?? 0)` over launched runs. Never null: a ceiling needs a number. */
+  costUsd: z.number().nonnegative().default(0),
+  startedAt: z.string(),
+  /** Null iff `status === 'running'`. */
+  endedAt: z.string().nullable(),
+});
+export type Drain = z.infer<typeof DrainSchema>;
+
+export interface DrainFilter {
+  projectId?: string;
+  status?: DrainStatus;
+  limit?: number;
+}
+
+/** Every run the drain launched, in launch order. */
+export function drainRunIds(drain: Pick<Drain, 'waves'>): string[] {
+  return drain.waves.flatMap((wave) => wave.runIds);
+}
+
+/**
+ * Whether the drain is the one thing the CLI exits 0 on: it ran the queue to the end, and
+ * every run it launched is present, passed, and did not fail its gate. Anything else — a stop
+ * condition, a missing run, a red gate under `keepGoing` — is not a green drain.
+ */
+export function drainSucceeded(
+  drain: Pick<Drain, 'status' | 'waves'>,
+  runs: Pick<PipelineRun, 'id' | 'status' | 'gateStatus'>[],
+): boolean {
+  if (drain.status !== 'completed') return false;
+
+  const byId = new Map(runs.map((run) => [run.id, run]));
+  return drainRunIds(drain).every((id) => {
+    const run = byId.get(id);
+    return run !== undefined && run.status === 'passed' && run.gateStatus !== 'failed';
+  });
+}
 
 /**
  * What `WorktreeService` says when it could not cut a worktree and the run used the repo
@@ -412,6 +535,8 @@ export interface PipelineFilter {
   workflowId?: string;
   itemId?: string;
   status?: PipelineStatus;
+  /** Only the runs one drain launched. */
+  drainId?: string;
   limit?: number;
 }
 

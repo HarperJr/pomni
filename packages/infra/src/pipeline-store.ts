@@ -1,14 +1,18 @@
 import { createRequire } from 'node:module';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
+import { z } from 'zod';
 import type {
   Artifact,
+  Drain,
+  DrainFilter,
   PipelineFilter,
   PipelineRun,
   PipelineStep,
   PipelineStore,
   Question,
 } from '@pomni/core';
+import { DrainStopReasonSchema, DrainWaveSchema } from '@pomni/core';
 import { applyPragmas } from './sqlite.js';
 
 type SqlValue = string | number | null;
@@ -52,8 +56,8 @@ export class SqlitePipelineStore implements PipelineStore {
                                   item_id, rerun_of, task, context, status, pid, result, error,
                                   gate_status, gate_summary, item_status, outcome, unmet,
                                   started_at, ended_at, duration_ms, cost_usd, branch, started_by,
-                                  bases, no_sync)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                                  bases, no_sync, drain_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       run.id,
       run.projectId,
@@ -83,6 +87,7 @@ export class SqlitePipelineStore implements PipelineStore {
       run.startedBy ?? null,
       JSON.stringify(run.bases),
       run.noSync ? 1 : 0,
+      run.drainId ?? null,
     );
   }
 
@@ -146,6 +151,10 @@ export class SqlitePipelineStore implements PipelineStore {
     if (filter.status) {
       where.push('status = ?');
       values.push(filter.status);
+    }
+    if (filter.drainId) {
+      where.push('drain_id = ?');
+      values.push(filter.drainId);
     }
 
     const clause = where.length > 0 ? `WHERE ${where.join(' AND ')}` : '';
@@ -351,6 +360,83 @@ export class SqlitePipelineStore implements PipelineStore {
     return rows.map(toQuestion);
   }
 
+  async insertDrain(drain: Drain): Promise<void> {
+    this.statement(
+      `INSERT INTO pipeline_drains (id, project_id, status, pid, keep_going, max_items,
+                                    max_cost_usd, waves, skipped_item_ids, stop_reason,
+                                    items_launched, cost_usd, started_at, ended_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      drain.id,
+      drain.projectId,
+      drain.status,
+      drain.pid,
+      drain.keepGoing ? 1 : 0,
+      drain.maxItems,
+      drain.maxCostUsd,
+      JSON.stringify(drain.waves),
+      JSON.stringify(drain.skippedItemIds),
+      drain.stopReason ? JSON.stringify(drain.stopReason) : null,
+      drain.itemsLaunched,
+      drain.costUsd,
+      drain.startedAt,
+      drain.endedAt,
+    );
+  }
+
+  async updateDrain(id: string, drain: Drain): Promise<void> {
+    this.statement(
+      `UPDATE pipeline_drains
+         SET status = ?, pid = ?, keep_going = ?, max_items = ?, max_cost_usd = ?, waves = ?,
+             skipped_item_ids = ?, stop_reason = ?, items_launched = ?, cost_usd = ?,
+             started_at = ?, ended_at = ?
+       WHERE id = ?`,
+    ).run(
+      drain.status,
+      drain.pid,
+      drain.keepGoing ? 1 : 0,
+      drain.maxItems,
+      drain.maxCostUsd,
+      JSON.stringify(drain.waves),
+      JSON.stringify(drain.skippedItemIds),
+      drain.stopReason ? JSON.stringify(drain.stopReason) : null,
+      drain.itemsLaunched,
+      drain.costUsd,
+      drain.startedAt,
+      drain.endedAt,
+      id,
+    );
+  }
+
+  async getDrain(id: string): Promise<Drain | null> {
+    const row = this.statement('SELECT * FROM pipeline_drains WHERE id = ?').get(
+      id,
+    ) as unknown as DrainRow | undefined;
+    return row ? toDrain(row) : null;
+  }
+
+  async listDrains(filter: DrainFilter): Promise<Drain[]> {
+    const where: string[] = [];
+    const values: SqlValue[] = [];
+
+    if (filter.projectId) {
+      where.push('project_id = ?');
+      values.push(filter.projectId);
+    }
+    if (filter.status) {
+      where.push('status = ?');
+      values.push(filter.status);
+    }
+
+    const clause = where.length > 0 ? `WHERE ${where.join(' AND ')}` : '';
+    values.push(Math.min(filter.limit ?? 30, 200));
+
+    const rows = this.statement(
+      `SELECT * FROM pipeline_drains ${clause} ORDER BY started_at DESC, id DESC LIMIT ?`,
+    ).all(...values) as unknown as DrainRow[];
+    return rows.map(toDrain);
+  }
+
   close(): void {
     try {
       this.db.close();
@@ -398,6 +484,52 @@ interface RunRow {
   cost_usd: number | null;
   bases: string | null;
   no_sync: number | null;
+  drain_id: string | null;
+}
+
+interface DrainRow {
+  id: string;
+  project_id: string;
+  status: string;
+  pid: number | null;
+  keep_going: number;
+  max_items: number | null;
+  max_cost_usd: number | null;
+  waves: string | null;
+  skipped_item_ids: string | null;
+  stop_reason: string | null;
+  items_launched: number;
+  cost_usd: number;
+  started_at: string;
+  ended_at: string | null;
+}
+
+/** An older blob missing `results`/`endedAt` on a wave reads back with the schema's defaults. */
+function toDrain(row: DrainRow): Drain {
+  const waves = DrainWaveSchema.array().parse(row.waves ? JSON.parse(row.waves) : []);
+  const skippedItemIds = z.string().array().parse(
+    row.skipped_item_ids ? JSON.parse(row.skipped_item_ids) : [],
+  );
+  const stopReason = DrainStopReasonSchema.nullable().parse(
+    row.stop_reason ? JSON.parse(row.stop_reason) : null,
+  );
+
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    status: row.status as Drain['status'],
+    pid: row.pid ?? null,
+    keepGoing: !!row.keep_going,
+    maxItems: row.max_items ?? null,
+    maxCostUsd: row.max_cost_usd ?? null,
+    waves,
+    skippedItemIds,
+    stopReason,
+    itemsLaunched: row.items_launched,
+    costUsd: row.cost_usd,
+    startedAt: row.started_at,
+    endedAt: row.ended_at ?? null,
+  };
 }
 
 interface StepRow {
@@ -462,6 +594,7 @@ function toRun(row: RunRow): PipelineRun {
     costUsd: row.cost_usd,
     bases: toBases(row.bases),
     noSync: !!row.no_sync,
+    drainId: row.drain_id ?? null,
   };
 }
 
@@ -686,6 +819,26 @@ const MIGRATIONS: string[] = [
 
   `ALTER TABLE pipeline_runs ADD COLUMN bases TEXT NOT NULL DEFAULT '[]';
    ALTER TABLE pipeline_runs ADD COLUMN no_sync INTEGER NOT NULL DEFAULT 0;`,
+
+  `CREATE TABLE IF NOT EXISTS pipeline_drains (
+     id              TEXT PRIMARY KEY,
+     project_id      TEXT NOT NULL,
+     status          TEXT NOT NULL,
+     pid             INTEGER,
+     keep_going      INTEGER NOT NULL DEFAULT 0,
+     max_items       INTEGER,
+     max_cost_usd    REAL,
+     waves           TEXT NOT NULL DEFAULT '[]',
+     skipped_item_ids TEXT NOT NULL DEFAULT '[]',
+     stop_reason     TEXT,
+     items_launched  INTEGER NOT NULL DEFAULT 0,
+     cost_usd        REAL NOT NULL DEFAULT 0,
+     started_at      TEXT NOT NULL,
+     ended_at        TEXT
+   );
+   CREATE INDEX IF NOT EXISTS idx_pipeline_drains_project ON pipeline_drains(project_id, started_at);
+   ALTER TABLE pipeline_runs ADD COLUMN drain_id TEXT;
+   CREATE INDEX IF NOT EXISTS idx_pipeline_runs_drain ON pipeline_runs(drain_id);`,
 ];
 
 function migrate(db: SqliteDatabase): void {
