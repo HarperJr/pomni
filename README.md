@@ -80,11 +80,11 @@ Inside a Claude session opened in this repo, the same things are `/project`, `/b
 **Shipped:** projects and repos (git clone with token auth, or link a local folder), stack
 detection for Node/Python/Go/Rust/Make, credentials, running a repo's own commands with full
 run history, gates, doctor, **a Markdown-file backlog with guarded transitions**, an MCP
-server with slash commands and a session hook, the HTTP API and the web UI. 97 tests.
+server with slash commands and a session hook, the HTTP API and the web UI, **workflows and
+tasks** (agent pipelines with per-step control and budget enforcement), **Chat** (web interface
+for confirming actions). 861 tests in 46 files.
 
-**In progress:** Chat — a web-only tab where you talk to Pomni and it proposes actions
-(backlog moves, starting a task, attaching a workflow or tool) that run only once you confirm
-them, through the same application services as the CLI.
+**In progress:** per-run worktrees and integration with the web UI for live session streams.
 
-**Next:** the kanban board and live file watching (M2), then the rest of the AI feature loop (M3).
+**Next:** multi-item waves, cross-project tracking, and scheduled work.
 See [docs/ROADMAP.md](docs/ROADMAP.md).
