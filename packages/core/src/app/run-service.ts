@@ -165,12 +165,14 @@ export class RunService {
     let captured = '';
     const startedMs = Date.now();
 
+    const timeoutMs = definition.timeoutMs ?? 10 * 60 * 1000;
+
     try {
       const result = await this.executor.run({
         cmd: definition.cmd,
         cwd,
         env: definition.env,
-        timeoutMs: definition.timeoutMs ?? 10 * 60 * 1000,
+        timeoutMs,
         onStart: (pid) => {
           this.live.set(id, pid);
           void this.store.update(id, { pid });
@@ -189,7 +191,17 @@ export class RunService {
       });
 
       const status = statusFromExit(result.exitCode, result.timedOut, result.cancelled);
-      const summary = this.analyzer.summarize(capability, definition.cmd, captured, result.exitCode);
+      const parsed = this.analyzer.summarize(capability, definition.cmd, captured, result.exitCode);
+      // A killed run's counts are not a verdict. On 2026-09-13 a suite that finished its
+      // tests at 545s was killed at 600s during teardown, and "4 failed, 851 passed" was
+      // recorded as if the tests had been the problem — the four had themselves died on a
+      // 30s test timeout on a machine that was twenty times slower than usual. The kill is
+      // the headline; whatever the parser saw goes after it, marked as what it is.
+      const summary = result.timedOut
+        ? `timed out after ${formatSeconds(timeoutMs)}${parsed ? ` — ${parsed} before the kill` : ''}`
+        : result.cancelled
+          ? `cancelled${parsed ? ` — ${parsed} before the stop` : ''}`
+          : parsed;
 
       run = {
         ...run,
@@ -355,4 +367,10 @@ export function capabilitiesOf(repos: Array<Pick<Repo, 'capabilities'>>): string
 function joinPath(base: string, relative: string): string {
   const separator = base.includes('\\') ? '\\' : '/';
   return `${base.replace(/[\\/]+$/, '')}${separator}${relative.replace(/^[\\/]+/, '')}`;
+}
+
+/** `600000` -> `600s`; a ceiling is read as seconds, the way it was configured. */
+function formatSeconds(ms: number): string {
+  const seconds = ms / 1000;
+  return `${Number.isInteger(seconds) ? seconds : seconds.toFixed(1)}s`;
 }

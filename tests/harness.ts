@@ -638,7 +638,14 @@ export class FakeForge implements ForgePort {
 export class FakeExecutor implements Executor {
   calls: ExecRequest[] = [];
   killed: number[] = [];
-  script: Array<{ match: RegExp; exitCode: number; output?: string; delayMs?: number }> = [];
+  script: Array<{
+    match: RegExp;
+    exitCode: number;
+    output?: string;
+    delayMs?: number;
+    /** Report the process as killed on its ceiling, the way the real executor would. */
+    timedOut?: boolean;
+  }> = [];
   missing = new Set<string>();
   /** Pids a test has declared gone, for `isAlive`. */
   dead = new Set<number>();
@@ -651,7 +658,12 @@ export class FakeExecutor implements Executor {
     if (entry?.delayMs) await new Promise((resolve) => setTimeout(resolve, entry.delayMs));
     if (entry?.output) request.onOutput?.(entry.output);
 
-    return { exitCode: entry?.exitCode ?? 0, timedOut: false, cancelled: false, pid: 4242 };
+    return {
+      exitCode: entry?.exitCode ?? 0,
+      timedOut: entry?.timedOut ?? false,
+      cancelled: false,
+      pid: 4242,
+    };
   }
 
   async kill(pid: number): Promise<boolean> {

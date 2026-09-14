@@ -526,6 +526,11 @@ export async function main(argv: string[]): Promise<void> {
       '--worktrees <policy>',
       'auto | always | never — auto gives a clone its own worktree per run and leaves a linked repo shared; always takes a worktree even for a linked repo; never shares this repo\'s directory across every run',
     )
+    .option(
+      '--timeout <capability=duration>',
+      'ceiling for one capability, e.g. test=15m, build=1h, lint=90s; "off" removes it. The capability becomes manual, so re-detection keeps the ceiling and no longer rewrites its command. Repeatable',
+      (value: string, previous: string[] = []) => [...previous, value],
+    )
     .action(
       async (
         target: string,
@@ -538,10 +543,13 @@ export async function main(argv: string[]): Promise<void> {
           provider?: string;
           reclone?: boolean;
           worktrees?: string;
+          timeout?: string[];
         },
       ) => {
         const container = await open();
         const [projectId, repoId] = splitRef(target);
+
+        const timeouts = options.timeout ? parseTimeouts(options.timeout) : undefined;
 
         if (options.worktrees !== undefined && !WORKTREE_POLICIES.includes(options.worktrees as WorktreePolicy)) {
           throw new PomniError(
@@ -564,12 +572,21 @@ export async function main(argv: string[]): Promise<void> {
           provider: options.provider as 'github' | 'gitlab' | 'bitbucket' | 'generic' | undefined,
           reclone: options.reclone,
           worktrees: options.worktrees as WorktreePolicy | undefined,
+          timeouts,
         });
 
         console.log(`${style.green('updated')} ${projectId}/${updated.id}  ${statusLabel(updated.status)}`);
         console.log(style.dim(`  ${describeSource(updated.source)}`));
         if (updated.source.kind === 'git' && updated.source.credential) {
           console.log(style.dim(`  credential: ${updated.source.credential}`));
+        }
+        for (const name of Object.keys(timeouts ?? {})) {
+          const ceiling = updated.capabilities[name]?.timeoutMs;
+          console.log(
+            style.dim(
+              `  ${name}: ${ceiling === undefined ? 'no timeout — the runner default applies' : `timeout ${formatDuration(ceiling)}`}`,
+            ),
+          );
         }
         if (updated.lastError) console.log(style.red(`  ${updated.lastError}`));
         else if (updated.status !== 'ready' && updated.status !== 'linked') {
@@ -908,6 +925,42 @@ function buildSource(
     };
   }
   return { kind: 'local', path: target };
+}
+
+/**
+ * `test=15m` → `{ test: 900000 }`. A duration is a number with `ms`, `s`, `m` or `h`; a bare
+ * number is seconds, because nobody types a ceiling in milliseconds on purpose. `off` clears.
+ */
+function parseTimeouts(entries: string[]): Record<string, number | null> {
+  const timeouts: Record<string, number | null> = {};
+  for (const entry of entries) {
+    const eq = entry.indexOf('=');
+    const name = eq === -1 ? '' : entry.slice(0, eq).trim();
+    const value = eq === -1 ? '' : entry.slice(eq + 1).trim();
+    if (!name || !value) {
+      throw new PomniError('validation', `--timeout expects <capability>=<duration>, got '${entry}'`);
+    }
+    timeouts[name] = value === 'off' ? null : parseDuration(value, entry);
+  }
+  return timeouts;
+}
+
+function parseDuration(value: string, entry: string): number {
+  const match = /^(\d+(?:\.\d+)?)\s*(ms|s|m|h)?$/.exec(value);
+  if (!match) {
+    throw new PomniError('validation', `--timeout ${entry}: a duration looks like 90s, 15m, 1h or 600000ms`);
+  }
+  const unit = { ms: 1, s: 1000, m: 60_000, h: 3_600_000 }[(match[2] ?? 's') as 'ms' | 's' | 'm' | 'h'];
+  const ms = Math.round(Number(match[1]) * unit);
+  if (ms <= 0) throw new PomniError('validation', `--timeout ${entry}: a ceiling must be above zero`);
+  return ms;
+}
+
+function formatDuration(ms: number): string {
+  if (ms % 3_600_000 === 0) return `${ms / 3_600_000}h`;
+  if (ms % 60_000 === 0) return `${ms / 60_000}m`;
+  if (ms % 1000 === 0) return `${ms / 1000}s`;
+  return `${ms}ms`;
 }
 
 function splitRef(ref: string): [string, string] {

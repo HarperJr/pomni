@@ -53,6 +53,7 @@ folder already on this machine.
 | `pomni repo sync <project/repo>` | ✓ | Fetch (if a clone) and re-detect stack and capabilities. Manual capability overrides survive. |
 | `pomni repo edit <project/repo> [-n] [-r] [--url] [--ref] [-c] [--provider] [--reclone]` | ✓ | Change a repo's name, role, or — for a clone — its url, branch or credential. |
 | ` ` `[--worktrees <auto\|always\|never>]` | ✓ | Whether a pipeline run gets its own checkout of this repo. `auto` (default) isolates a clone but shares a linked repo; `always` isolates a linked repo too; `never` shares this repo's directory across every run. |
+| ` ` `[--timeout <capability=duration>]` | ✓ | Ceiling for one capability: `test=15m`, `build=1h`, `lint=90s`, a bare number is seconds, `off` removes it. Repeatable. The capability becomes `manual`, so re-detection keeps the ceiling and stops rewriting its command. Without one the runner's default of 10 minutes applies. |
 | `pomni repo remove <project/repo> [--purge]` (`rm`) | ✓ | Remove from the project. `--purge` deletes the cloned copy; a linked folder is never touched. |
 | `pomni repo doctor [-p] [-r]` | ✓ | Check each repo and resolve every declared capability's executable on PATH, plus a worktrees section: an `orphaned` entry names `pomni worktree remove <id> --force` as the fix. |
 

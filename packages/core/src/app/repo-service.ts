@@ -73,6 +73,11 @@ export interface UpdateRepoInput {
   reclone?: boolean;
   /** Whether a pipeline run gets its own worktree of this repo. */
   worktrees?: WorktreePolicy;
+  /**
+   * Per-capability ceilings, in milliseconds; `null` removes one. The capability must already
+   * be declared — a timeout is a property of a command, not a command.
+   */
+  timeouts?: Record<string, number | null>;
 }
 
 /**
@@ -276,6 +281,9 @@ export class RepoService {
       ...(patch.name !== undefined ? { name: patch.name.trim() } : {}),
       ...(patch.role !== undefined ? { role: patch.role } : {}),
       ...(patch.worktrees !== undefined ? { worktrees: patch.worktrees } : {}),
+      ...(patch.timeouts !== undefined
+        ? { capabilities: withTimeouts(current, patch.timeouts) }
+        : {}),
       source,
       // A source edit invalidates whatever the last attempt concluded; the next sync decides.
       ...(urlChanged ? { status: 'cloning', stack: null, vcs: null, lastError: null } : {}),
@@ -671,4 +679,38 @@ function sameRemote(a: string, b: string): boolean {
       .replace(/\/+$/, '')
       .toLowerCase();
   return normalize(a) === normalize(b);
+}
+
+/**
+ * The capability map with the given ceilings applied.
+ *
+ * A capability that gets a timeout becomes `manual`: re-detection replaces detected entries
+ * wholesale (`mergeCapabilities`), and a ceiling somebody set on purpose must not vanish the
+ * next time the stack is re-read. The price is that the command itself stops following
+ * detection for that capability, which is the existing meaning of `manual` and is stated in
+ * the CLI's help.
+ */
+function withTimeouts(repo: Repo, timeouts: Record<string, number | null>): Repo['capabilities'] {
+  const capabilities = { ...repo.capabilities };
+  for (const [name, timeoutMs] of Object.entries(timeouts)) {
+    const existing = capabilities[name];
+    if (!existing) {
+      const declared = Object.keys(capabilities);
+      throw new ValidationError(
+        `'${repo.id}' declares no '${name}' capability${
+          declared.length > 0 ? ` — it has ${declared.join(', ')}` : ''
+        }`,
+      );
+    }
+    if (timeoutMs !== null && (!Number.isInteger(timeoutMs) || timeoutMs <= 0)) {
+      throw new ValidationError(`a timeout must be a positive number of milliseconds, got ${timeoutMs}`);
+    }
+    const { timeoutMs: _dropped, ...rest } = existing;
+    capabilities[name] = {
+      ...rest,
+      ...(timeoutMs === null ? {} : { timeoutMs }),
+      origin: 'manual',
+    };
+  }
+  return capabilities;
 }

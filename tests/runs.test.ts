@@ -71,6 +71,26 @@ describe('running capabilities', () => {
     expect(run.summary).toBe('2 failed, 3 passed');
   });
 
+  it('reports a killed run as timed out, with what the parser saw marked as partial', async () => {
+    // What happened on 2026-09-13: the suite printed its own summary, then the executor killed
+    // it during teardown. The counts are real, but the kill is the news.
+    harness.executor.script = [
+      { match: /run test/, exitCode: null as unknown as number, timedOut: true, output: 'Tests  4 failed | 851 passed (856)' },
+    ];
+    const [run] = await harness.runs.run('acme', 'test', { repoId: 'api' });
+
+    expect(run!.status).toBe('timeout');
+    expect(run!.summary).toBe('timed out after 600s — 4 failed, 851 passed before the kill');
+  });
+
+  it('says only that it timed out when the kill left nothing to parse', async () => {
+    harness.executor.script = [{ match: /run test/, exitCode: null as unknown as number, timedOut: true }];
+    const [run] = await harness.runs.run('acme', 'test', { repoId: 'api' });
+
+    expect(run!.status).toBe('timeout');
+    expect(run!.summary).toBe('timed out after 600s');
+  });
+
   it('stops after the first failing repo when bail is set', async () => {
     harness.executor.script = [{ match: /run test/, exitCode: 1 }];
     const runs = await harness.runs.run('acme', 'test', { bail: true });

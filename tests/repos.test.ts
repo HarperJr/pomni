@@ -111,6 +111,63 @@ describe('adding a local repo', () => {
   });
 });
 
+describe('a capability timeout set after the fact', () => {
+  async function linked() {
+    const path = await makeNodeRepo(join(harness.dir, 'web'));
+    const { completion } = await harness.repos.add('acme-saas', {
+      source: { kind: 'local', path },
+      role: 'web',
+    });
+    return completion;
+  }
+
+  it('lands on the capability, and survives re-detection', async () => {
+    const repo = await linked();
+    expect(repo.capabilities.test?.timeoutMs).toBeUndefined();
+
+    const edited = await harness.repos.update('acme-saas', repo.id, {
+      timeouts: { test: 15 * 60 * 1000 },
+    });
+    expect(edited.capabilities.test).toMatchObject({ timeoutMs: 900_000, origin: 'manual' });
+    // The command it had is the command it keeps.
+    expect(edited.capabilities.test?.cmd).toBe(repo.capabilities.test?.cmd);
+    // Nothing else was touched.
+    expect(edited.capabilities.build).toEqual(repo.capabilities.build);
+
+    const synced = await harness.repos.sync('acme-saas', repo.id);
+    expect(synced.capabilities.test?.timeoutMs).toBe(900_000);
+  });
+
+  it('clears with null, leaving the capability manual', async () => {
+    const repo = await linked();
+    await harness.repos.update('acme-saas', repo.id, { timeouts: { test: 60_000 } });
+    const cleared = await harness.repos.update('acme-saas', repo.id, { timeouts: { test: null } });
+
+    expect(cleared.capabilities.test?.timeoutMs).toBeUndefined();
+    expect(cleared.capabilities.test?.origin).toBe('manual');
+  });
+
+  it('refuses a capability the repo does not declare, naming the ones it has', async () => {
+    const repo = await linked();
+    await expect(
+      harness.repos.update('acme-saas', repo.id, { timeouts: { e2e: 1000 } }),
+    ).rejects.toMatchObject({
+      code: 'validation',
+      message: expect.stringContaining("declares no 'e2e' capability"),
+    });
+  });
+
+  it('refuses a ceiling that is not a positive whole number of milliseconds', async () => {
+    const repo = await linked();
+    await expect(
+      harness.repos.update('acme-saas', repo.id, { timeouts: { test: 0 } }),
+    ).rejects.toMatchObject({ code: 'validation' });
+    await expect(
+      harness.repos.update('acme-saas', repo.id, { timeouts: { test: 1.5 } }),
+    ).rejects.toMatchObject({ code: 'validation' });
+  });
+});
+
 describe('adding a git repo', () => {
   it('reports cloning immediately and becomes ready when the clone finishes', async () => {
     const { repo, completion } = await harness.repos.add('acme-saas', {
