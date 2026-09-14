@@ -33,6 +33,11 @@ import {
   withContext,
   type AgentReport,
   type ContextFile,
+  type Drain,
+  type DrainFilter,
+  type DrainRunResult,
+  type DrainStopReason,
+  type DrainWave,
   type PipelineFilter,
   type PipelineRun,
   type PipelineRunDetail,
@@ -42,6 +47,7 @@ import {
   type RunBase,
   type Verdict,
 } from '../domain/pipeline.js';
+import { assertWavesDisjoint, dependencyClosure } from '../domain/schedule.js';
 import { detectProvider } from '../domain/source.js';
 import { findings, signalsFor, type Finding, type Signal } from '../domain/signals.js';
 import { toolBriefing } from '../domain/tool.js';
@@ -116,6 +122,8 @@ export interface StartRunInput {
    * differently.
    */
   sync?: boolean;
+  /** The drain this run belongs to, when a drain launched it rather than a person. */
+  drainId?: string | null;
 }
 
 export interface StartRunResult {
@@ -123,6 +131,23 @@ export interface StartRunResult {
   completion: Promise<PipelineRun>;
   /** Steps a resume answered from the previous attempt instead of running again. */
   reused?: number;
+}
+
+export interface DrainInput {
+  projectId: string;
+  /** A red gate skips that item's dependants and carries on, instead of stopping the drain. */
+  keepGoing?: boolean;
+  /** Stop once this many runs have been launched. Null or absent: no ceiling. */
+  maxItems?: number | null;
+  /** Stop once the launched runs have spent this much between them. Null or absent: no ceiling. */
+  maxCostUsd?: number | null;
+}
+
+/** Mirrors `StartRunResult`: the row exists when this returns, the loop is still going. */
+export interface DrainResult {
+  drain: Drain;
+  /** The final row. Never rejects: whatever went wrong is written on the drain as its stop. */
+  completion: Promise<Drain>;
 }
 
 /** Where an agent works, and everything else it may read. See `workspace`. */
@@ -401,7 +426,8 @@ export class PipelineService {
         providerId: provider.id,
         itemId: input.itemId ?? null,
         rerunOf: input.rerunOf ?? null,
-        startedBy: input.startedBy ?? null,
+        startedBy: input.startedBy ?? (input.drainId ? 'drain' : null),
+        drainId: input.drainId ?? null,
         // Filled in by `deliver()` when there is a commit to point at. Null until then, which
         // is honest: a run that has not committed has no branch worth naming.
         branch: null,
@@ -523,6 +549,366 @@ export class PipelineService {
       );
       return null;
     }
+  }
+
+  /**
+   * Run the ready queue unattended: launch wave 1, wait for it, re-plan, launch the next, and
+   * keep going until nothing is ready or a stop condition is hit.
+   *
+   * Re-planning between waves is the point. `planWaves` already returns every wave, but a plan
+   * made before wave 1 ran describes a backlog that wave 1 then changed: a run may have finished
+   * the item another one was waiting on, or gone red and made its dependants pointless. So the
+   * drain only ever launches the first wave of a fresh plan, and asks again once it has ended.
+   *
+   * What the drain does NOT do, and each is a decision:
+   *
+   * - **It never cancels a run.** A stop launches nothing more; the runs already going finish on
+   *   their own. A run that asked a person a question is the one exception to the waiting — the
+   *   drain must not sit on an unanswered question for hours, so it ends, says which run is
+   *   waiting, and leaves that run exactly as it is.
+   * - **It never moves an item.** Re-planning sees whatever the project's flow did with each
+   *   run's result. Under the built-in flow a passed run lands its item in `in_review`, which
+   *   `planWaves` does not count as a satisfied dependency, so a dependant stays blocked until a
+   *   person marks its dependency done. A flow whose gate arrow lands in `done` drains straight
+   *   through.
+   * - **It does not merge.** A drain ends with branches and MRs, the same as a single run does.
+   *
+   * Resolves once the row is written and `drain.started` has gone out, before wave 1 launches;
+   * `completion` is the loop, and it never rejects.
+   */
+  async drain(input: DrainInput): Promise<DrainResult> {
+    await this.projects.getRef(input.projectId);
+
+    const maxItems = input.maxItems ?? null;
+    if (maxItems !== null && (!Number.isInteger(maxItems) || maxItems <= 0)) {
+      throw new ValidationError('max items must be a whole number above zero');
+    }
+    const maxCostUsd = input.maxCostUsd ?? null;
+    if (maxCostUsd !== null && !(maxCostUsd >= 0)) {
+      throw new ValidationError('max cost must be zero or more');
+    }
+
+    const drain: Drain = {
+      id: ulid(this.clock.now().getTime()),
+      projectId: input.projectId,
+      status: 'running',
+      pid: process.pid,
+      keepGoing: input.keepGoing ?? false,
+      maxItems,
+      maxCostUsd,
+      waves: [],
+      skippedItemIds: [],
+      stopReason: null,
+      itemsLaunched: 0,
+      costUsd: 0,
+      startedAt: this.clock.iso(),
+      endedAt: null,
+    };
+
+    await this.store.insertDrain(drain);
+    this.events.emit({ type: 'drain.started', drainId: drain.id, projectId: drain.projectId });
+
+    return { drain, completion: this.runDrain(drain) };
+  }
+
+  async getDrain(id: string): Promise<Drain | null> {
+    return this.store.getDrain(id);
+  }
+
+  /** Drains, newest first, capped the same way `list` caps runs. */
+  async listDrains(filter: DrainFilter): Promise<Drain[]> {
+    return this.store.listDrains({
+      ...filter,
+      limit: Math.min(filter.limit ?? DEFAULT_LISTED, MAX_LISTED),
+    });
+  }
+
+  /**
+   * The loop behind `drain`. One wave per iteration; every fact the record needs is written
+   * as it is learned, so a process that dies mid-drain leaves a row that says how far it got.
+   */
+  private async runDrain(initial: Drain): Promise<Drain> {
+    let drain = initial;
+    const { projectId } = drain;
+
+    /** Items whose run went red. Under `keepGoing`, what their dependants are skipped for. */
+    const red = new Set<string>();
+    const skipped = new Set<string>();
+    /** Items a run was started for, so a re-plan never launches one twice. */
+    const launched = new Set<string>();
+    /** Runs this drain started; the only ones whose question can stop it. */
+    const runIds = new Set<string>();
+    /** The first red run of the drain. Without `keepGoing`, what stops it after its wave. */
+    let firstRed: Extract<DrainStopReason, { kind: 'red_gate' }> | null = null;
+    /** Set once the row is final; late run endings and stray events must not reopen it. */
+    let closed = false;
+
+    // One promise for the whole drain rather than one per wave: the first question is the
+    // stop, and nothing after it is waited on. Subscribed before anything launches, so a
+    // question asked between `start()` returning and its run id being recorded is still seen —
+    // the handler reads `runIds` when the event arrives, not when it was registered.
+    let questioned: Extract<DrainStopReason, { kind: 'question' }> | null = null;
+    let raiseQuestion: () => void = () => {};
+    const questionRaised = new Promise<void>((resolve) => {
+      raiseQuestion = resolve;
+    });
+    const unsubscribe = this.events.subscribe((event) => {
+      if (closed || questioned || event.type !== 'pipeline.question.asked') return;
+      if (!runIds.has(event.runId)) return;
+      questioned = { kind: 'question', runId: event.runId, questionId: event.questionId };
+      raiseQuestion();
+    });
+
+    const write = async (next: Drain): Promise<void> => {
+      drain = next;
+      await this.store.updateDrain(drain.id, drain);
+    };
+
+    // Called when a launched run ends, however it ended. Copies how it ended onto its wave and
+    // re-totals the spend; a run ending after the drain has closed is left to its own record.
+    const settle = async (runId: string, itemId: string): Promise<void> => {
+      if (closed) return;
+      const row = await this.store.getRun(runId);
+      if (closed) return;
+
+      const result: DrainRunResult = {
+        runId,
+        itemId,
+        status: row?.status ?? 'failed',
+        gateStatus: row?.gateStatus ?? 'skipped',
+        costUsd: row?.costUsd ?? null,
+        endedAt: row?.endedAt ?? this.clock.iso(),
+      };
+
+      // Red is a failed gate or a run that did not pass at all: a cancelled run finished
+      // nothing, and a dependant built on it would be built on nothing.
+      const isRed =
+        result.gateStatus === 'failed' ||
+        result.status === 'failed' ||
+        result.status === 'cancelled';
+      if (isRed) {
+        red.add(itemId);
+        firstRed ??= {
+          kind: 'red_gate',
+          runId,
+          itemId,
+          runStatus: result.status,
+          gateStatus: result.gateStatus,
+        };
+      }
+
+      const waves = drain.waves.map((wave) =>
+        wave.runIds.includes(runId) ? { ...wave, results: [...wave.results, result] } : wave,
+      );
+      const costUsd = waves
+        .flatMap((wave) => wave.results)
+        .reduce((sum, entry) => sum + (entry.costUsd ?? 0), 0);
+      await write({ ...drain, waves, costUsd });
+    };
+
+    const end = async (
+      status: 'completed' | 'stopped',
+      stopReason: DrainStopReason | null,
+    ): Promise<void> => {
+      closed = true;
+      unsubscribe();
+      await write({ ...drain, status, stopReason, endedAt: this.clock.iso(), pid: null });
+      const summary = describeDrainEnd(drain);
+      this.logger.info(`drain ${drain.id} ${summary}`);
+      this.events.emit({
+        type: 'drain.finished',
+        drainId: drain.id,
+        projectId,
+        status,
+        stopReason: stopReason?.kind ?? null,
+        summary,
+      });
+    };
+
+    /** The item being launched, so an error thrown outside `start()` still names one. */
+    let launching: string | null = null;
+
+    try {
+      for (;;) {
+        const items = await this.backlog.list({ projectId });
+
+        // Under `keepGoing` a red item's dependants are pointless to launch and are said so:
+        // recomputed at every re-plan, because an item may only have become ready since.
+        if (drain.keepGoing && red.size > 0) {
+          // Settled items are leaves, as `planWaves` treats them: a cycle in finished history
+          // must not take the drain down, and what a done item depended on is nobody's business.
+          const closure = dependencyClosure(
+            items.map((item) =>
+              item.status === 'done' || item.status === 'cancelled'
+                ? { ...item, dependsOn: [] }
+                : item,
+            ),
+          );
+          for (const item of items) {
+            if (item.status !== 'ready' || launched.has(item.id) || skipped.has(item.id)) continue;
+            if ((closure.get(item.id) ?? []).some((id) => red.has(id))) skipped.add(item.id);
+          }
+          if (skipped.size !== drain.skippedItemIds.length) {
+            await write({ ...drain, skippedItemIds: [...skipped] });
+          }
+        }
+
+        const plan = await this.backlog.waves(projectId);
+        // The same guard `waves --run` applies before it launches anything: by now the cost of
+        // a wrong plan is real work on the wrong branch.
+        assertWavesDisjoint(plan);
+
+        const wanted = (plan.waves[0]?.itemIds ?? []).filter((id) => !skipped.has(id));
+        if (wanted.length === 0) {
+          await end('completed', null);
+          break;
+        }
+
+        if (drain.maxCostUsd !== null && drain.costUsd >= drain.maxCostUsd) {
+          await end('stopped', {
+            kind: 'max_cost',
+            limitUsd: drain.maxCostUsd,
+            spentUsd: drain.costUsd,
+          });
+          break;
+        }
+
+        // Cut the wave in flight rather than launching it whole: `itemsLaunched` must never
+        // exceed the ceiling, and a wave is not an atomic unit of anything but planning.
+        let toLaunch = wanted;
+        let cut = false;
+        if (drain.maxItems !== null) {
+          const room = drain.maxItems - drain.itemsLaunched;
+          if (room < wanted.length) {
+            toLaunch = wanted.slice(0, Math.max(0, room));
+            cut = true;
+          }
+        }
+        if (toLaunch.length === 0) {
+          await end('stopped', { kind: 'max_items', limit: drain.maxItems as number });
+          break;
+        }
+
+        const wave: DrainWave = {
+          index: drain.waves.length + 1,
+          itemIds: wanted,
+          runIds: [],
+          results: [],
+          startedAt: this.clock.iso(),
+          endedAt: null,
+        };
+        await write({ ...drain, waves: [...drain.waves, wave] });
+
+        // Sequential, in item order, so `runIds` is a positional prefix of `itemIds` and a
+        // reader can pair them without a lookup. A wave already stopping — a red gate seen
+        // while the earlier items were still being started, or a question — launches no more.
+        const byId = new Map(items.map((item) => [item.id, item]));
+        const completions: Promise<void>[] = [];
+        let launchError: Extract<DrainStopReason, { kind: 'error' }> | null = null;
+
+        for (const itemId of toLaunch) {
+          if (questioned || (firstRed && !drain.keepGoing)) break;
+          launching = itemId;
+          try {
+            const item = byId.get(itemId) ?? (await this.backlog.get(projectId, itemId));
+            const { run, completion } = await this.start({
+              projectId,
+              itemId,
+              // The same task a person launching from the board gets, composed the same way.
+              task: [item.title, '', item.body].join('\n').trim(),
+              startedBy: 'drain',
+              drainId: drain.id,
+            });
+            runIds.add(run.id);
+            launched.add(itemId);
+            await write({
+              ...drain,
+              itemsLaunched: drain.itemsLaunched + 1,
+              waves: drain.waves.map((entry) =>
+                entry.index === wave.index ? { ...entry, runIds: [...entry.runIds, run.id] } : entry,
+              ),
+            });
+            const settled = () => settle(run.id, itemId);
+            completions.push(completion.then(settled, settled));
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            this.logger.warn(`drain ${drain.id}: ${itemId} did not start: ${message}`);
+            launchError = { kind: 'error', itemId, message };
+            break;
+          } finally {
+            launching = null;
+          }
+        }
+
+        const current = drain.waves.find((entry) => entry.index === wave.index) ?? wave;
+        this.events.emit({
+          type: 'drain.wave.launched',
+          drainId: drain.id,
+          projectId,
+          index: current.index,
+          itemIds: current.itemIds,
+          runIds: current.runIds,
+        });
+
+        // Wait for the wave, or for the first question — whichever comes first. The runs are
+        // not raced against each other: a question in one ends the drain while the others go on.
+        await Promise.race([Promise.all(completions), questionRaised]);
+
+        if (questioned) {
+          // The wave is left open on purpose: it did not end, and one of its runs is still
+          // waiting for a person.
+          await end('stopped', questioned);
+          break;
+        }
+
+        await write({
+          ...drain,
+          waves: drain.waves.map((entry) =>
+            entry.index === wave.index ? { ...entry, endedAt: this.clock.iso() } : entry,
+          ),
+        });
+
+        if (launchError) {
+          await end('stopped', launchError);
+          break;
+        }
+        if (cut) {
+          await end('stopped', { kind: 'max_items', limit: drain.maxItems as number });
+          break;
+        }
+        if (firstRed && !drain.keepGoing) {
+          await end('stopped', firstRed);
+          break;
+        }
+        if (drain.maxCostUsd !== null && drain.costUsd >= drain.maxCostUsd) {
+          await end('stopped', {
+            kind: 'max_cost',
+            limitUsd: drain.maxCostUsd,
+            spentUsd: drain.costUsd,
+          });
+          break;
+        }
+      }
+    } catch (error) {
+      // Planning threw, or a store write did. The drain is over either way, and the record
+      // has to say so rather than sit `running` for ever with nothing behind its pid.
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.warn(`drain ${drain.id} stopped on an error: ${message}`);
+      if (!closed) {
+        await end('stopped', { kind: 'error', itemId: launching ?? '', message }).catch(
+          (failure: unknown) => {
+            closed = true;
+            unsubscribe();
+            this.logger.warn(
+              `drain ${drain.id}: could not record its stop: ` +
+                (failure instanceof Error ? failure.message : String(failure)),
+            );
+          },
+        );
+      }
+    }
+
+    return drain;
   }
 
   async get(id: string): Promise<PipelineRunDetail> {
@@ -3616,6 +4002,34 @@ function describeResume(
   }
 
   return lines.join('\n');
+}
+
+/**
+ * One line saying how a drain ended — what `drain.finished` carries and the log prints.
+ * `stopped: red gate on POMN-3 (run 01H…)`, `completed: 3 runs, $0.42`.
+ */
+function describeDrainEnd(drain: Drain): string {
+  const runs = drain.itemsLaunched;
+  const plural = (count: number, noun: string) => `${count} ${noun}${count === 1 ? '' : 's'}`;
+  const spent = `$${drain.costUsd.toFixed(2)}`;
+  const reason = drain.stopReason;
+
+  if (!reason) return `completed: ${plural(runs, 'run')}, ${spent}`;
+
+  switch (reason.kind) {
+    case 'red_gate':
+      return `stopped: red gate on ${reason.itemId} (run ${reason.runId})`;
+    case 'question':
+      return `stopped: run ${reason.runId} is waiting on a question (${reason.questionId})`;
+    case 'max_items':
+      return `stopped: reached the ${plural(reason.limit, 'item')} ceiling, ${spent}`;
+    case 'max_cost':
+      return `stopped: spent $${reason.spentUsd.toFixed(2)} against a $${reason.limitUsd.toFixed(2)} ceiling`;
+    case 'error':
+      return reason.itemId
+        ? `stopped: ${reason.itemId} did not start: ${reason.message}`
+        : `stopped: ${reason.message}`;
+  }
 }
 
 /** How much of the prompt the reusable-task list may take. */
