@@ -71,10 +71,15 @@ export async function runCli(harness: HarnessLike, args: string[]): Promise<CliR
     console.error = original.error;
   }
 
-  const lines = stdout.text
-    .split('\n')
-    .filter((line) => line.trim().length > 0)
-    .map((line) => JSON.parse(line));
+  // Only a `--json` invocation promises one document per stdout line; a human-formatted
+  // command is free to print prose, and parsing that as JSON here would fail the harness
+  // itself rather than the assertion actually being made.
+  const lines = args.includes('--json')
+    ? stdout.text
+        .split('\n')
+        .filter((line) => line.trim().length > 0)
+        .map((line) => JSON.parse(line))
+    : [];
 
   return {
     code,

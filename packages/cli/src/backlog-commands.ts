@@ -9,6 +9,7 @@ import {
   assertWavesDisjoint,
   describeConflict,
   describeUnmetList,
+  drainSucceeded,
   hasRequirements,
   layout,
   stateLabel,
@@ -502,9 +503,45 @@ export function registerBacklogCommands(
     .option('-p, --project <id>', 'project')
     .option('--explain', 'show the conflict graph and each item\'s path scope')
     .option('--run', 'launch wave 1')
-    .action(async (flags: { project?: string; explain?: boolean; run?: boolean }) => {
+    .option('--all', 'with --run, keep launching wave after wave, re-planning between them, until nothing is ready or a stop condition is hit — an unattended drain')
+    .option('--keep-going', 'with --all, a red gate skips only that item\'s dependents instead of stopping the drain')
+    .option('--max-items <n>', 'with --all, stop the drain after it has launched this many items')
+    .option('--max-cost <usd>', 'with --all, stop the drain once its runs have spent this much')
+    .action(async (flags: WavesFlags) => {
       const container = await open();
       const projectId = flags.project ?? (await defaultProject());
+
+      if (flags.all && !flags.run) {
+        throw new ValidationError('--all requires --run');
+      }
+      if (!flags.all && (flags.keepGoing || flags.maxItems !== undefined || flags.maxCost !== undefined)) {
+        throw new ValidationError('--keep-going, --max-items and --max-cost require --all');
+      }
+
+      let maxItems: number | null = null;
+      if (flags.maxItems !== undefined) {
+        maxItems = Number(flags.maxItems);
+        if (!Number.isInteger(maxItems) || maxItems <= 0) {
+          throw new ValidationError('--max-items must be a whole number above zero');
+        }
+      }
+      let maxCostUsd: number | null = null;
+      if (flags.maxCost !== undefined) {
+        maxCostUsd = Number(flags.maxCost);
+        if (!Number.isFinite(maxCostUsd) || maxCostUsd < 0) {
+          throw new ValidationError('--max-cost must be zero or more');
+        }
+      }
+
+      if (flags.all) {
+        await runDrain(container, projectId, out(), {
+          keepGoing: flags.keepGoing ?? false,
+          maxItems,
+          maxCostUsd,
+        });
+        return;
+      }
+
       const plan: WavePlan = await container.backlog.waves(projectId);
       const items = await container.backlog.list({ projectId });
       const byId = new Map(items.map((item) => [item.id, item]));
@@ -715,6 +752,16 @@ interface EditFlags extends AddFlags {
   touches?: string;
 }
 
+interface WavesFlags {
+  project?: string;
+  explain?: boolean;
+  run?: boolean;
+  all?: boolean;
+  keepGoing?: boolean;
+  maxItems?: string;
+  maxCost?: string;
+}
+
 interface MoveFlags {
   project?: string;
   comment?: string;
@@ -893,4 +940,74 @@ function describeScope(scope: PathScope): string {
 
 export function itemLine(item: BacklogItem): string {
   return `${item.id}  ${item.priority}  ${item.title}`;
+}
+
+/**
+ * `pomni backlog waves --run --all`: launch wave 1, wait for it, re-plan, and keep going —
+ * `PipelineService.drain()` runs the loop, this prints its events as they arrive and reports
+ * the final record once `completion` resolves. Exits 0 only when `drainSucceeded`.
+ */
+async function runDrain(
+  container: PomniContainer,
+  projectId: string,
+  out: Output,
+  options: { keepGoing: boolean; maxItems: number | null; maxCostUsd: number | null },
+): Promise<void> {
+  const printDrainEvent = (event: PomniEvent & EmittedEvent): void => {
+    if (event.type === 'drain.started') {
+      out.report(event, () => {
+        console.log(`${style.cyan('draining')} ${style.bold(event.drainId)}`);
+      });
+    } else if (event.type === 'drain.wave.launched') {
+      out.report(event, () => {
+        console.log(
+          `${style.bold(`wave ${event.index}`)} ${style.dim(`(${event.runIds.length})`)}: ${event.itemIds.join(', ')}`,
+        );
+      });
+    } else if (event.type === 'drain.finished') {
+      out.report(event, () => {
+        console.log(event.summary);
+      });
+    }
+  };
+
+  // Subscribed before `drain()` is even called, the same as a single run's steps: `drain()`
+  // resolves once the row exists and wave 1 is already launching, so its own `drain.started`
+  // can fire before we would otherwise have a handler for it. Buffered until the drain id is
+  // known, then replayed.
+  let drainId: string | null = null;
+  const buffered: (PomniEvent & EmittedEvent)[] = [];
+  const unsubscribe = container.events.subscribe((event) => {
+    if (!('drainId' in event)) return;
+    if (drainId === null) {
+      buffered.push(event);
+      return;
+    }
+    if (event.drainId === drainId) printDrainEvent(event);
+  });
+
+  try {
+    const { drain, completion } = await container.pipelines.drain({
+      projectId,
+      keepGoing: options.keepGoing,
+      maxItems: options.maxItems,
+      maxCostUsd: options.maxCostUsd,
+    });
+    drainId = drain.id;
+    for (const event of buffered) {
+      if ('drainId' in event && event.drainId === drainId) printDrainEvent(event);
+    }
+    buffered.length = 0;
+
+    await completion;
+  } finally {
+    unsubscribe();
+  }
+
+  const final = await container.pipelines.getDrain(drainId);
+  if (!final) throw new Error(`drain '${drainId}' vanished`);
+  const runs = await container.pipelines.list({ drainId: final.id });
+
+  out.report({ ...final, runs }, () => {});
+  if (!drainSucceeded(final, runs)) out.fail(1);
 }

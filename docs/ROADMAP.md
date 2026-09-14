@@ -161,10 +161,11 @@ configurable per workflow, not fixed spec-writer/planner/verifier roles)
 - POMN-25 → `feature next` → `backlog waves --run`
 - POMN-73 → `--json` global flag on every command; exit codes mean something (0 success,
   1 answer is no, 2 bad usage, 3 not found); errors in JSON mode are `{ error }` on stdout
-
-**Still open**
-
-- POMN-74 — drain the queue: run wave after wave unattended, stop at the first red gate
+- POMN-74 → drain the queue: `pomni backlog waves --run --all` launches waves unattended,
+  waits for each to finish, re-plans, and continues until no ready item remains or a stop
+  condition hits (first red gate with `--keep-going` to skip dependents, `--max-items N`,
+  `--max-cost <usd>`); `task list` shows drains alongside runs; `task show <drainId>` breaks
+  down the drain by wave
 
 ---
 
@@ -226,7 +227,6 @@ configurable per workflow, not fixed spec-writer/planner/verifier roles)
 
 **Still open**
 
-- POMN-74 — running more than wave 1 unattended (also filed under M4)
 - an `IssueTracker` port, cross-project items, stack adapters as loadable plugins, policy
   profiles per project — no item filed
 

@@ -176,7 +176,7 @@ GET    /api/projects/:id/items-waves     { plan: { waves, conflicts, blocked, sc
 Transitions are a separate route rather than a `PATCH` of `status`, so a client cannot skate
 past the state machine by writing the field directly.
 
-### Runs
+### Runs and drains
 
 ```
 GET    /api/runs?project=&repo=&capability=&item=&failed=&limit=&before=
@@ -187,6 +187,8 @@ GET    /api/runs/:id                     the run plus its recorded test results
 DELETE /api/runs/:id                     cancel (by pid, so it works across processes)
 GET    /api/runs/:id/log                 SSE: replays the log from the start, then follows
                                          until the run finishes, ending with a `done` event
+GET    /api/projects/:id/drains          query-filtered list of drains in a project
+GET    /api/drains/:id                   one drain: waves with run ids and per-run results, why it stopped, cost and item count
 POST   /api/projects/:id/verify          { gate?: 'default' | 'land' } -> 202
 GET    /api/projects/:id/doctor          per-repo checks, including capability resolution
                                           and a worktrees section (`orphaned` when the owning

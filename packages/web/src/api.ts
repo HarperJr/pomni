@@ -783,6 +783,51 @@ export interface Question {
   answeredAt: string | null;
 }
 
+export type DrainStatus = 'running' | 'completed' | 'stopped';
+
+/** Hand-kept copy of `DrainStopReason` in `packages/core/src/domain/pipeline.ts` — the web package cannot import core. */
+export type DrainStopReason =
+  | { kind: 'red_gate'; runId: string; itemId: string; runStatus: PipelineStatus; gateStatus: 'skipped' | 'passed' | 'failed' }
+  | { kind: 'question'; runId: string; questionId: string }
+  | { kind: 'max_items'; limit: number }
+  | { kind: 'max_cost'; limitUsd: number; spentUsd: number }
+  | { kind: 'error'; itemId: string; message: string };
+
+export interface DrainRunResult {
+  runId: string;
+  itemId: string;
+  status: PipelineStatus;
+  gateStatus: 'skipped' | 'passed' | 'failed';
+  costUsd: number | null;
+  endedAt: string;
+}
+
+export interface DrainWave {
+  index: number;
+  itemIds: string[];
+  runIds: string[];
+  results: DrainRunResult[];
+  startedAt: string;
+  endedAt: string | null;
+}
+
+export interface Drain {
+  id: string;
+  projectId: string;
+  status: DrainStatus;
+  pid: number | null;
+  keepGoing: boolean;
+  maxItems: number | null;
+  maxCostUsd: number | null;
+  waves: DrainWave[];
+  skippedItemIds: string[];
+  stopReason: DrainStopReason | null;
+  itemsLaunched: number;
+  costUsd: number;
+  startedAt: string;
+  endedAt: string | null;
+}
+
 export interface PipelineRunDetail extends PipelineRun {
   steps: PipelineStep[];
   artifacts: Artifact[];
@@ -1509,6 +1554,18 @@ export const api = {
     request<{ run: PipelineRun }>(`/api/pipelines/${encodeURIComponent(runId)}`, {
       method: 'DELETE',
     }),
+
+  listDrains: (projectId: string, params?: { status?: DrainStatus; limit?: number }) => {
+    const query = new URLSearchParams();
+    if (params?.status !== undefined) query.set('status', params.status);
+    if (params?.limit !== undefined) query.set('limit', String(params.limit));
+    const qs = query.toString();
+    return request<{ drains: Drain[] }>(
+      `/api/projects/${encodeURIComponent(projectId)}/drains${qs ? `?${qs}` : ''}`,
+    );
+  },
+
+  getDrain: (id: string) => request<{ drain: Drain }>(`/api/drains/${encodeURIComponent(id)}`),
 
   llmStatus: () =>
     request<{
