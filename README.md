@@ -84,10 +84,13 @@ run history, gates, doctor, a Markdown-file backlog with a guarded state machine
 concurrently, **draining the queue unattended** past wave 1 (stop at a red gate or cost ceiling),
 per-run **budgets** (turns, cost, session turns), **commit/push and merge-request
 landing** through the forge, **signals and prompt amendments** learned from prior runs,
-**Chat** as the way to work — every Pomni verb behind a confirm, and **JSON output and exit
-codes** on every command for CI and cron. 46 test files, 861 tests passed, 1 skipped.
+**Chat** as the way to work — every Pomni verb behind a confirm, **JSON output and exit
+codes** on every command for CI and cron, and **notifications** (desktop toast, signed webhook)
+when a run needs a person. 51 test files, 920 tests passed, 1 skipped.
 
 **In progress:** POMN-47 (context packs: an agent starting from the item's touched files and
 what other agents already found).
 
-**Next:** POMN-75 (notifications for questions, red gates and landed work). See `pomni backlog list` for the rest.
+**Next:** POMN-82 (a run's agents get Pomni's own MCP server from the running installation),
+then M5 — POMN-76 `doctor --repair`, POMN-77 flaky tests, POMN-78 `pomni stats`, POMN-79 failure
+signatures. See `pomni backlog list` for the rest.

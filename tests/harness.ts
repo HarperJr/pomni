@@ -74,14 +74,12 @@ import {
   SilentLogger,
   SqliteRunStore,
 } from '@pomni/infra';
-// POMN-75: neither of these exists yet. `packages/core/src/ports/notify.ts` and
-// `packages/core/src/app/notification-service.ts` are the paths the domain-designer and
-// codebase-scout handovers fixed for `WebhookPort`/`WebhookRequest` and `NotificationService`
-// respectively — imported by their real path, not through the `@pomni/core` barrel, so this
-// file fails to load with a module-not-found error until they are written, rather than an
-// obscure "not a function" once the barrel forwards an undefined export.
-import type { WebhookPort, WebhookRequest } from '../packages/core/src/ports/notify.js';
-import { NotificationService } from '../packages/core/src/app/notification-service.js';
+// Through the barrel like every other service: `tsconfig.tests.json` resolves `@pomni/core` to
+// the built package, and a class imported by its source path is a second declaration of the
+// same class as far as the type checker is concerned — the harness then no longer satisfies
+// `PomniContainer`. (The test author imported by path so an unwritten module failed to load
+// loudly; the module is written.)
+import { NotificationService, type WebhookPort, type WebhookRequest } from '@pomni/core';
 
 const run = promisify(execFile);
 

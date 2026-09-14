@@ -22,6 +22,23 @@ searching upward like git), `--verbose`, `--json` (JSON output on stdout; errors
 | `pomni serve [--port 7777] [--host] [--token] [--open]` | ✓ | Start the management server and UI. Non-loopback `--host` requires `--token` or the server refuses to start. Running by hand in a terminal is unsupervised — `POST /api/restart` is unavailable and the UI shows no restart button. Set `POMNI_SUPERVISED=1` when running under a supervisor (systemd, pm2, container restart policy) to enable restarts. |
 | `pomni mcp` | ✓ | Run the MCP server over stdio (for Claude Code and other MCP clients). |
 | `pomni editor [--clear]` | ✓ | What opens a file when Pomni is asked to open one — with no argument, what it would use now. `--clear` forgets the configured editor and goes back to looking on PATH. |
+| `pomni notify test [-p]` | ✓ | Send a sample notification to every configured channel. Never deduped; exits 1 if any channel failed. |
+
+Notifications are configured in `.pomni/config.yaml`, both channels off by default:
+
+```yaml
+notify:
+  desktop: true                 # a toast on the machine running `serve`
+  webhook:
+    url: https://hooks.example/pomni
+    credential: hooks-secret    # a `pomni cred` id; its secret signs the body (X-Pomni-Signature)
+  baseUrl: https://pomni.example  # the link in each notification, when it is not server.host:port
+```
+
+Three moments notify, each once: a run asks a person a question, a run's gate goes red, and an
+item lands in `in_review` with a merge request. The subscriber lives in `serve` — the one
+long-lived process — so a run started from the CLI is still noticed, through the shared event
+stream. A channel failing is logged and never fails the run. The webhook body is in `SERVER.md` §7.
 
 ## Projects
 

@@ -13,6 +13,7 @@ import type { BacklogService } from './backlog-service.js';
 import type { ChatService } from './chat-service.js';
 import type { CommentService } from './comment-service.js';
 import type { DoctorService } from './doctor-service.js';
+import type { NotificationService } from './notification-service.js';
 import type { RunService } from './run-service.js';
 import type { DiscoveryService } from './discovery-service.js';
 import type { PipelineService } from './pipeline-service.js';
@@ -51,6 +52,8 @@ export interface PomniContainer {
   runs: RunService;
   worktrees: WorktreeService;
   doctor: DoctorService;
+  /** Tells a person when a run needs one: a question, a red gate, a merge request. */
+  notifications: NotificationService;
   /** What this server is running, and replacing it with what was merged. */
   system: SystemService;
   detection: StackDetection;
