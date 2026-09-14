@@ -82,13 +82,12 @@ detection for Node/Python/Go/Rust/Make, credentials, running a repo's own comman
 run history, gates, doctor, a Markdown-file backlog with a guarded state machine and a kanban
 **board**, **task** runs in per-run git worktrees, **waves** of items grouped to run
 concurrently, per-run **budgets** (turns, cost, session turns), **commit/push and merge-request
-landing** through the forge, **signals and prompt amendments** learned from prior runs, and
-**Chat** as the way to work — every Pomni verb behind a confirm. 46 test files, 861 tests
-passed, 1 skipped.
+landing** through the forge, **signals and prompt amendments** learned from prior runs,
+**Chat** as the way to work — every Pomni verb behind a confirm, and **JSON output and exit
+codes** on every command for CI and cron. 46 test files, 861 tests passed, 1 skipped.
 
 **In progress:** POMN-47 (context packs: an agent starting from the item's touched files and
 what other agents already found).
 
-**Next:** POMN-73 (JSON output and exit codes on every command), POMN-74 (draining the queue
-unattended past wave 1), POMN-75 (notifications for questions, red gates and landed work).
-See `pomni backlog list` for the rest.
+**Next:** POMN-74 (draining the queue unattended past wave 1), POMN-75 (notifications for
+questions, red gates and landed work). See `pomni backlog list` for the rest.

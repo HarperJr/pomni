@@ -1,20 +1,21 @@
 import { spawn } from 'node:child_process';
-import { join, relative } from 'node:path';
+import { join } from 'node:path';
 import {
   KNOWN_EDITORS,
   PomniError,
-  RequirementsNotMetError,
   describeSource,
   type AddRepoSourceInput,
   type DesktopPort,
+  type PomniContainer,
   type RepoRole,
   type WorktreePolicy,
 } from '@pomni/core';
 import { FileEventSource } from '@pomni/infra';
 import { startServer } from '@pomni/server';
-import { Command } from 'commander';
-import { createContainer, openContainer, rootForInit } from './container.js';
+import { Command, CommanderError } from 'commander';
+import { createContainer, openContainer, rootForInit, type ContainerOptions } from './container.js';
 import { describeCapabilities, repoRow, statusLabel, style, table } from './format.js';
+import { createOutput, exitCodeFor, reportError as reportErrorTo, type Output } from './output.js';
 import { registerBacklogCommands } from './backlog-commands.js';
 import { registerRunCommands } from './run-commands.js';
 import { registerToolCommands } from './tool-commands.js';
@@ -29,11 +30,27 @@ import {
 interface GlobalOptions {
   root?: string;
   verbose?: boolean;
+  json?: boolean;
 }
 
 const WORKTREE_POLICIES: WorktreePolicy[] = ['auto', 'always', 'never'];
 
-export async function main(argv: string[]): Promise<void> {
+export interface MainOptions {
+  stdout?: NodeJS.WritableStream;
+  stderr?: NodeJS.WritableStream;
+  /**
+   * What `open()` calls instead of the real `openContainer` — the seam a test drives an
+   * in-memory container through, or throws `NotInitializedError` from, without touching disk.
+   * Defaults to the real thing, so every caller outside a test sees today's behaviour.
+   */
+  openContainer?: (options: ContainerOptions) => Promise<PomniContainer>;
+}
+
+/** Returns the process exit code — callers set `process.exitCode` from it, never `process.exit`. */
+export async function main(argv: string[], options: MainOptions = {}): Promise<number> {
+  const stdout = options.stdout ?? process.stdout;
+  const stderr = options.stderr ?? process.stderr;
+  const openWorkspace = options.openContainer ?? openContainer;
   const program = new Command();
 
   program
@@ -42,11 +59,19 @@ export async function main(argv: string[]): Promise<void> {
     .version('0.1.0')
     .option('--root <path>', 'workspace directory (defaults to the nearest .pomni)')
     .option('--verbose', 'verbose logging')
-    .showHelpAfterError();
+    .option('--json', 'print one JSON document on stdout; progress and warnings go to stderr')
+    .showHelpAfterError()
+    .exitOverride()
+    .configureOutput({
+      writeOut: (str) => stdout.write(str),
+      writeErr: (str) => stderr.write(str),
+    });
 
   const globals = (): GlobalOptions => program.opts<GlobalOptions>();
   const open = () =>
-    openContainer({ root: globals().root, logLevel: globals().verbose ? 'debug' : 'warn' });
+    openWorkspace({ root: globals().root, logLevel: globals().verbose ? 'debug' : 'warn' });
+  const outInstance = createOutput({ json: () => !!globals().json, stdout, stderr });
+  const out = (): Output => outInstance;
 
   /**
    * `-p` is optional when there is only one project — the overwhelmingly common case early
@@ -80,15 +105,18 @@ export async function main(argv: string[]): Promise<void> {
       const container = createContainer(root, globals().verbose ? 'debug' : 'warn');
       const existed = await container.workspace.isInitialized();
       await container.workspace.init();
+      const gitAvailable = await container.git.isAvailable();
 
-      console.log(
-        existed
-          ? `${style.dim('workspace already initialized at')} ${root}`
-          : `${style.green('initialized')} ${root}`,
-      );
-      if (!(await container.git.isAvailable())) {
-        console.log(style.yellow('warning: git was not found on PATH — cloning repos will fail'));
-      }
+      out().report({ root, existed, gitAvailable }, () => {
+        console.log(
+          existed
+            ? `${style.dim('workspace already initialized at')} ${root}`
+            : `${style.green('initialized')} ${root}`,
+        );
+        if (!gitAvailable) {
+          console.log(style.yellow('warning: git was not found on PATH — cloning repos will fail'));
+        }
+      });
     });
 
   // -- editor ---------------------------------------------------------------
@@ -105,41 +133,45 @@ export async function main(argv: string[]): Promise<void> {
         // never goes through a shell, so `code --wait` would be looked up as a program of
         // that name and not found — better to say so here than to fail when it is pressed.
         if (command && !/^[\w.+-]+$/.test(command)) {
-          console.error(
-            style.red(`'${command}' is not a program name — arguments cannot be set here`),
+          throw new PomniError(
+            'validation',
+            `'${command}' is not a program name — arguments cannot be set here`,
           );
-          process.exitCode = 1;
-          return;
         }
 
-        const next = await container.workspace.setConfig({
+        await container.workspace.setConfig({
           editor: { command: options.clear ? null : (command as string) },
         });
-        console.log(
-          next.editor.command
-            ? `${style.green('editor')} ${next.editor.command}`
-            : style.dim('editor cleared — Pomni will look for one on PATH'),
-        );
       }
 
       const configured = (await container.workspace.config()).editor.command;
       const found = configured ?? (await firstOnPath(container.desktop));
+      const usable = found ? await container.desktop.canRun(found) : false;
 
-      if (!found) {
+      // One document, whether or not something was just set: what was changed is part of
+      // what is now in effect, and a script wants the latter.
+      out().report({ changed: Boolean(options.clear || command), found, configured: !!configured, usable }, () => {
+        if (options.clear || command) {
+          console.log(
+            configured
+              ? `${style.green('editor')} ${configured}`
+              : style.dim('editor cleared — Pomni will look for one on PATH'),
+          );
+        }
+        if (!found) {
+          console.log(
+            style.yellow(
+              `no editor: none of ${KNOWN_EDITORS.join(', ')} is on PATH. Set one with 'pomni editor <command>'.`,
+            ),
+          );
+          return;
+        }
         console.log(
-          style.yellow(
-            `no editor: none of ${KNOWN_EDITORS.join(', ')} is on PATH. Set one with 'pomni editor <command>'.`,
-          ),
+          usable
+            ? `${found}${configured ? '' : style.dim('  (found on PATH)')}`
+            : style.yellow(`${found} is configured but is not on PATH`),
         );
-        return;
-      }
-
-      const usable = await container.desktop.canRun(found);
-      console.log(
-        usable
-          ? `${found}${configured ? '' : style.dim('  (found on PATH)')}`
-          : style.yellow(`${found} is configured but is not on PATH`),
-      );
+      });
     });
 
   // -- project --------------------------------------------------------------
@@ -158,8 +190,10 @@ export async function main(argv: string[]): Promise<void> {
         id: options.id,
         description: options.description,
       });
-      console.log(`${style.green('created')} project ${style.bold(created.id)}  ${created.name}`);
-      console.log(style.dim(`add a repo:  pomni repo add <path-or-url> -p ${created.id}`));
+      out().report(created, () => {
+        console.log(`${style.green('created')} project ${style.bold(created.id)}  ${created.name}`);
+        console.log(style.dim(`add a repo:  pomni repo add <path-or-url> -p ${created.id}`));
+      });
     });
 
   project
@@ -205,9 +239,7 @@ export async function main(argv: string[]): Promise<void> {
         if (options.maxCost !== undefined && options.maxCost !== false) {
           maxCostUsd = Number(options.maxCost);
           if (!Number.isFinite(maxCostUsd) || maxCostUsd <= 0) {
-            console.error(style.red(`--max-cost must be a positive number, got ${options.maxCost}`));
-            process.exitCode = 1;
-            return;
+            throw new PomniError('validation', `--max-cost must be a positive number, got ${options.maxCost}`);
           }
         }
 
@@ -215,9 +247,7 @@ export async function main(argv: string[]): Promise<void> {
         if (options.maxTurns !== undefined && options.maxTurns !== false) {
           maxTurns = Number(options.maxTurns);
           if (!Number.isInteger(maxTurns) || maxTurns <= 0) {
-            console.error(style.red(`--max-turns must be a positive integer, got ${options.maxTurns}`));
-            process.exitCode = 1;
-            return;
+            throw new PomniError('validation', `--max-turns must be a positive integer, got ${options.maxTurns}`);
           }
         }
 
@@ -225,13 +255,10 @@ export async function main(argv: string[]): Promise<void> {
         if (options.maxSessionTurns !== undefined && options.maxSessionTurns !== false) {
           maxSessionTurns = Number(options.maxSessionTurns);
           if (!Number.isInteger(maxSessionTurns) || maxSessionTurns <= 0) {
-            console.error(
-              style.red(
-                `--max-session-turns must be a positive integer, got ${options.maxSessionTurns}`,
-              ),
+            throw new PomniError(
+              'validation',
+              `--max-session-turns must be a positive integer, got ${options.maxSessionTurns}`,
             );
-            process.exitCode = 1;
-            return;
           }
         }
 
@@ -249,43 +276,45 @@ export async function main(argv: string[]): Promise<void> {
           ...(options.itemPrefix !== undefined ? { itemPrefix: options.itemPrefix } : {}),
           ...(Object.keys(policy).length > 0 ? { policy } : {}),
         });
-        console.log(`${style.green('updated')} project ${style.bold(updated.id)}  ${updated.name}`);
-        if (Object.keys(policy).length > 0) {
-          console.log(
-            style.dim(
-              `  a run now ${updated.policy.autoCommit ? 'commits' : 'does not commit'} its work, ` +
-                `${updated.policy.autoPush ? 'pushes' : 'does not push'} the branch and ` +
-                `${updated.policy.autoMergeRequest ? 'opens' : 'does not open'} a merge request`,
-            ),
-          );
-        }
-        if (
-          options.maxCost !== undefined ||
-          options.maxTurns !== undefined ||
-          options.maxSessionTurns !== undefined
-        ) {
-          console.log(
-            style.dim(
-              `  a run now stops past ${
-                updated.policy.maxCostUsd !== undefined ? `$${updated.policy.maxCostUsd}` : 'no cost limit'
-              } or ${
-                updated.policy.maxTurns !== undefined ? `${updated.policy.maxTurns} steps` : 'no step limit'
-              }, and one session stops past ${
-                updated.policy.maxSessionTurns !== undefined
-                  ? `${updated.policy.maxSessionTurns} turns`
-                  : 'no turn limit'
-              }`,
-            ),
-          );
-        }
-        if (updated.itemPrefix !== before.data.itemPrefix) {
-          console.log(
-            style.dim(
-              `  items are now numbered ${updated.itemPrefix}-${updated.counters.nextItem} onwards; ` +
-                `${before.data.itemPrefix} ids already written keep their names`,
-            ),
-          );
-        }
+        out().report(updated, () => {
+          console.log(`${style.green('updated')} project ${style.bold(updated.id)}  ${updated.name}`);
+          if (Object.keys(policy).length > 0) {
+            console.log(
+              style.dim(
+                `  a run now ${updated.policy.autoCommit ? 'commits' : 'does not commit'} its work, ` +
+                  `${updated.policy.autoPush ? 'pushes' : 'does not push'} the branch and ` +
+                  `${updated.policy.autoMergeRequest ? 'opens' : 'does not open'} a merge request`,
+              ),
+            );
+          }
+          if (
+            options.maxCost !== undefined ||
+            options.maxTurns !== undefined ||
+            options.maxSessionTurns !== undefined
+          ) {
+            console.log(
+              style.dim(
+                `  a run now stops past ${
+                  updated.policy.maxCostUsd !== undefined ? `$${updated.policy.maxCostUsd}` : 'no cost limit'
+                } or ${
+                  updated.policy.maxTurns !== undefined ? `${updated.policy.maxTurns} steps` : 'no step limit'
+                }, and one session stops past ${
+                  updated.policy.maxSessionTurns !== undefined
+                    ? `${updated.policy.maxSessionTurns} turns`
+                    : 'no turn limit'
+                }`,
+              ),
+            );
+          }
+          if (updated.itemPrefix !== before.data.itemPrefix) {
+            console.log(
+              style.dim(
+                `  items are now numbered ${updated.itemPrefix}-${updated.counters.nextItem} onwards; ` +
+                  `${before.data.itemPrefix} ids already written keep their names`,
+              ),
+            );
+          }
+        });
       },
     );
 
@@ -296,21 +325,23 @@ export async function main(argv: string[]): Promise<void> {
     .action(async () => {
       const container = await open();
       const projects = await container.projects.list();
-      if (projects.length === 0) {
-        console.log(style.dim("no projects yet — create one with 'pomni project create <name>'"));
-        return;
-      }
-      console.log(
-        table(
-          projects.map((item) => [
-            style.bold(item.id),
-            item.name,
-            `${item.repoCount} repo${item.repoCount === 1 ? '' : 's'}`,
-            item.repos.map((repo) => repo.id).join(', ') || style.dim('—'),
-          ]),
-          ['ID', 'NAME', 'REPOS', ''],
-        ),
-      );
+      out().report(projects, () => {
+        if (projects.length === 0) {
+          console.log(style.dim("no projects yet — create one with 'pomni project create <name>'"));
+          return;
+        }
+        console.log(
+          table(
+            projects.map((item) => [
+              style.bold(item.id),
+              item.name,
+              `${item.repoCount} repo${item.repoCount === 1 ? '' : 's'}`,
+              item.repos.map((repo) => repo.id).join(', ') || style.dim('—'),
+            ]),
+            ['ID', 'NAME', 'REPOS', ''],
+          ),
+        );
+      });
     });
 
   project
@@ -321,24 +352,29 @@ export async function main(argv: string[]): Promise<void> {
       const detail = await container.projects.get(id);
       const repos = await container.repos.listResolved(id);
 
-      console.log(`${style.bold(detail.name)}  ${style.dim(`(${detail.id})`)}`);
-      if (detail.description) console.log(detail.description);
-      console.log(style.dim(`item prefix ${detail.itemPrefix} · gate ${detail.gates.default.join(' → ')}`));
-      console.log();
-
-      if (repos.length === 0) {
-        console.log(style.dim("no repos yet — add one with 'pomni repo add <path-or-url> -p " + id + "'"));
-        return;
+      const byWorktree = new Map<string, Awaited<ReturnType<typeof container.worktrees.list>>>();
+      if (repos.length > 0) {
+        const worktrees = await container.worktrees.list({ projectId: id });
+        for (const wt of worktrees) byWorktree.set(wt.repoId, [...(byWorktree.get(wt.repoId) ?? []), wt]);
       }
-      const worktrees = await container.worktrees.list({ projectId: id });
-      const byRepo = new Map<string, typeof worktrees>();
-      for (const wt of worktrees) byRepo.set(wt.repoId, [...(byRepo.get(wt.repoId) ?? []), wt]);
-      console.log(
-        table(
-          repos.map((repo) => repoRow(repo, byRepo.get(repo.id) ?? [])),
-          ['REPO', 'ROLE', 'STATUS', 'STACK', 'KIND', 'SOURCE', 'WORKTREES'],
-        ),
-      );
+
+      out().report({ ...detail, repos }, () => {
+        console.log(`${style.bold(detail.name)}  ${style.dim(`(${detail.id})`)}`);
+        if (detail.description) console.log(detail.description);
+        console.log(style.dim(`item prefix ${detail.itemPrefix} · gate ${detail.gates.default.join(' → ')}`));
+        console.log();
+
+        if (repos.length === 0) {
+          console.log(style.dim("no repos yet — add one with 'pomni repo add <path-or-url> -p " + id + "'"));
+          return;
+        }
+        console.log(
+          table(
+            repos.map((repo) => repoRow(repo, byWorktree.get(repo.id) ?? [])),
+            ['REPO', 'ROLE', 'STATUS', 'STACK', 'KIND', 'SOURCE', 'WORKTREES'],
+          ),
+        );
+      });
     });
 
   project
@@ -346,9 +382,11 @@ export async function main(argv: string[]): Promise<void> {
     .description('set the default project for commands that omit -p')
     .action(async (id: string) => {
       const container = await open();
-      await container.projects.getRef(id);
+      const ref = await container.projects.getRef(id);
       await container.workspace.setConfig({ defaultProject: id });
-      console.log(`${style.green('default project')} ${style.bold(id)}`);
+      out().report(ref, () => {
+        console.log(`${style.green('default project')} ${style.bold(id)}`);
+      });
     });
 
   project
@@ -359,7 +397,9 @@ export async function main(argv: string[]): Promise<void> {
     .action(async (id: string, options: { purge?: boolean }) => {
       const container = await open();
       await container.projects.remove(id, { purge: options.purge });
-      console.log(`${style.green('removed')} project ${id}`);
+      out().report({ id, removed: true }, () => {
+        console.log(`${style.green('removed')} project ${id}`);
+      });
     });
 
   // -- repo -----------------------------------------------------------------
@@ -404,7 +444,7 @@ export async function main(argv: string[]): Promise<void> {
         });
 
         if (source.kind === 'git') {
-          console.log(`${style.cyan('cloning')} ${source.url} → ${style.dim(container.workspace.workingDir(created))}`);
+          out().progress(`${style.cyan('cloning')} ${source.url} → ${style.dim(container.workspace.workingDir(created))}`);
           container.events.subscribe((event) => {
             if (event.type === 'repo.progress' && event.repoId === created.id) {
               process.stderr.write(`\r${style.dim(event.line.slice(0, 100).padEnd(100))}`);
@@ -416,22 +456,26 @@ export async function main(argv: string[]): Promise<void> {
         if (source.kind === 'git') process.stderr.write('\r'.padEnd(102) + '\r');
 
         if (settled.status === 'error') {
-          console.error(`${style.red('failed')} ${settled.lastError ?? 'unknown error'}`);
-          process.exitCode = 1;
+          out().fail(1);
+          out().report(settled, () => {
+            console.error(`${style.red('failed')} ${settled.lastError ?? 'unknown error'}`);
+          });
           return;
         }
 
         const resolved = await container.workspace.resolve(settled);
-        console.log(
-          `${style.green('added')} ${style.bold(settled.id)} to ${options.project}  ${statusLabel(settled.status)}`,
-        );
-        console.log(style.dim(`  ${describeSource(settled.source)}`));
-        console.log(style.dim(`  ${resolved.workingDir}`));
-        if (settled.stack) {
-          console.log(`  ${style.blue(settled.stack.adapter)}  ${settled.stack.detected.join(', ')}`);
-        }
-        const names = Object.keys(settled.capabilities);
-        if (names.length > 0) console.log(style.dim(`  capabilities: ${names.sort().join(', ')}`));
+        out().report(settled, () => {
+          console.log(
+            `${style.green('added')} ${style.bold(settled.id)} to ${options.project}  ${statusLabel(settled.status)}`,
+          );
+          console.log(style.dim(`  ${describeSource(settled.source)}`));
+          console.log(style.dim(`  ${resolved.workingDir}`));
+          if (settled.stack) {
+            console.log(`  ${style.blue(settled.stack.adapter)}  ${settled.stack.detected.join(', ')}`);
+          }
+          const names = Object.keys(settled.capabilities);
+          if (names.length > 0) console.log(style.dim(`  capabilities: ${names.sort().join(', ')}`));
+        });
       },
     );
 
@@ -446,26 +490,34 @@ export async function main(argv: string[]): Promise<void> {
         ? [options.project]
         : (await container.projects.list()).map((item) => item.id);
 
-      let printed = false;
+      const byProject = new Map<string, { repos: Awaited<ReturnType<typeof container.repos.listResolved>>; byRepo: Map<string, Awaited<ReturnType<typeof container.worktrees.list>>> }>();
       for (const projectId of projectIds) {
         const repos = await container.repos.listResolved(projectId);
         if (repos.length === 0) continue;
-        if (projectIds.length > 1) console.log(style.bold(projectId));
-
         const worktrees = await container.worktrees.list({ projectId });
         const byRepo = new Map<string, typeof worktrees>();
         for (const wt of worktrees) byRepo.set(wt.repoId, [...(byRepo.get(wt.repoId) ?? []), wt]);
-
-        console.log(
-          table(
-            repos.map((repo) => repoRow(repo, byRepo.get(repo.id) ?? [])),
-            ['REPO', 'ROLE', 'STATUS', 'STACK', 'KIND', 'SOURCE', 'WORKTREES'],
-          ),
-        );
-        if (projectIds.length > 1) console.log();
-        printed = true;
+        byProject.set(projectId, { repos, byRepo });
       }
-      if (!printed) console.log(style.dim('no repos yet'));
+
+      out().report(
+        Object.fromEntries([...byProject].map(([projectId, { repos }]) => [projectId, repos])),
+        () => {
+          let printed = false;
+          for (const [projectId, { repos, byRepo }] of byProject) {
+            if (projectIds.length > 1) console.log(style.bold(projectId));
+            console.log(
+              table(
+                repos.map((repo) => repoRow(repo, byRepo.get(repo.id) ?? [])),
+                ['REPO', 'ROLE', 'STATUS', 'STACK', 'KIND', 'SOURCE', 'WORKTREES'],
+              ),
+            );
+            if (projectIds.length > 1) console.log();
+            printed = true;
+          }
+          if (!printed) console.log(style.dim('no repos yet'));
+        },
+      );
     });
 
   repo
@@ -476,21 +528,23 @@ export async function main(argv: string[]): Promise<void> {
       const [projectId, repoId] = splitRef(ref);
       const found = await container.repos.get(projectId, repoId);
 
-      console.log(`${style.bold(found.name)}  ${style.dim(`(${projectId}/${found.id})`)}`);
-      console.log(`status    ${statusLabel(found.status)}${found.lastError ? `  ${style.red(found.lastError)}` : ''}`);
-      console.log(`role      ${found.role}`);
-      console.log(`source    ${describeSource(found.source)}  ${style.dim(`(${found.source.kind})`)}`);
-      console.log(`path      ${found.workingDir}${found.workingDirExists ? '' : style.red('  (missing)')}`);
-      if (found.stack) console.log(`stack     ${found.stack.adapter}: ${found.stack.detected.join(', ')}`);
-      if (found.vcs) {
-        console.log(
-          `git       ${found.vcs.currentBranch ?? 'detached'}${found.vcs.dirty ? style.yellow(' (dirty)') : ''}${
-            found.vcs.remote ? style.dim(`  ${found.vcs.remote}`) : ''
-          }`,
-        );
-      }
-      console.log();
-      console.log(describeCapabilities(found.capabilities));
+      out().report(found, () => {
+        console.log(`${style.bold(found.name)}  ${style.dim(`(${projectId}/${found.id})`)}`);
+        console.log(`status    ${statusLabel(found.status)}${found.lastError ? `  ${style.red(found.lastError)}` : ''}`);
+        console.log(`role      ${found.role}`);
+        console.log(`source    ${describeSource(found.source)}  ${style.dim(`(${found.source.kind})`)}`);
+        console.log(`path      ${found.workingDir}${found.workingDirExists ? '' : style.red('  (missing)')}`);
+        if (found.stack) console.log(`stack     ${found.stack.adapter}: ${found.stack.detected.join(', ')}`);
+        if (found.vcs) {
+          console.log(
+            `git       ${found.vcs.currentBranch ?? 'detached'}${found.vcs.dirty ? style.yellow(' (dirty)') : ''}${
+              found.vcs.remote ? style.dim(`  ${found.vcs.remote}`) : ''
+            }`,
+          );
+        }
+        console.log();
+        console.log(describeCapabilities(found.capabilities));
+      });
     });
 
   repo
@@ -500,16 +554,18 @@ export async function main(argv: string[]): Promise<void> {
       const container = await open();
       const [projectId, repoId] = splitRef(ref);
       const synced = await container.repos.sync(projectId, repoId);
-      console.log(`${style.green('synced')} ${projectId}/${repoId}  ${statusLabel(synced.status)}`);
-      if (synced.stack) console.log(style.dim(`  ${synced.stack.detected.join(', ')}`));
-      // What the base branch did is the reason to run this at all: a run cuts its worktree
-      // from that branch, so "fetched" and "moved" are different news.
-      if (synced.advanced) {
-        const refused =
-          synced.advanced.status === 'diverged' || synced.advanced.status === 'dirty';
-        const label = refused ? style.yellow('  not advanced') : style.dim('  ');
-        console.log(`${label}${refused ? ' — ' : ''}${synced.advanced.detail}`);
-      }
+      out().report(synced, () => {
+        console.log(`${style.green('synced')} ${projectId}/${repoId}  ${statusLabel(synced.status)}`);
+        if (synced.stack) console.log(style.dim(`  ${synced.stack.detected.join(', ')}`));
+        // What the base branch did is the reason to run this at all: a run cuts its worktree
+        // from that branch, so "fetched" and "moved" are different news.
+        if (synced.advanced) {
+          const refused =
+            synced.advanced.status === 'diverged' || synced.advanced.status === 'dirty';
+          const label = refused ? style.yellow('  not advanced') : style.dim('  ');
+          console.log(`${label}${refused ? ' — ' : ''}${synced.advanced.detail}`);
+        }
+      });
     });
 
   repo
@@ -575,23 +631,25 @@ export async function main(argv: string[]): Promise<void> {
           timeouts,
         });
 
-        console.log(`${style.green('updated')} ${projectId}/${updated.id}  ${statusLabel(updated.status)}`);
-        console.log(style.dim(`  ${describeSource(updated.source)}`));
-        if (updated.source.kind === 'git' && updated.source.credential) {
-          console.log(style.dim(`  credential: ${updated.source.credential}`));
-        }
-        for (const name of Object.keys(timeouts ?? {})) {
-          const ceiling = updated.capabilities[name]?.timeoutMs;
-          console.log(
-            style.dim(
-              `  ${name}: ${ceiling === undefined ? 'no timeout — the runner default applies' : `timeout ${formatDuration(ceiling)}`}`,
-            ),
-          );
-        }
-        if (updated.lastError) console.log(style.red(`  ${updated.lastError}`));
-        else if (updated.status !== 'ready' && updated.status !== 'linked') {
-          console.log(style.dim(`  next: pomni repo sync ${projectId}/${updated.id}`));
-        }
+        out().report(updated, () => {
+          console.log(`${style.green('updated')} ${projectId}/${updated.id}  ${statusLabel(updated.status)}`);
+          console.log(style.dim(`  ${describeSource(updated.source)}`));
+          if (updated.source.kind === 'git' && updated.source.credential) {
+            console.log(style.dim(`  credential: ${updated.source.credential}`));
+          }
+          for (const name of Object.keys(timeouts ?? {})) {
+            const ceiling = updated.capabilities[name]?.timeoutMs;
+            console.log(
+              style.dim(
+                `  ${name}: ${ceiling === undefined ? 'no timeout — the runner default applies' : `timeout ${formatDuration(ceiling)}`}`,
+              ),
+            );
+          }
+          if (updated.lastError) console.log(style.red(`  ${updated.lastError}`));
+          else if (updated.status !== 'ready' && updated.status !== 'linked') {
+            console.log(style.dim(`  next: pomni repo sync ${projectId}/${updated.id}`));
+          }
+        });
       },
     );
 
@@ -605,45 +663,47 @@ export async function main(argv: string[]): Promise<void> {
       const projectId = flags.project ?? (await defaultProject());
       const report = await container.doctor.check(projectId, flags.repo);
 
-      for (const repoReport of report.repos) {
-        console.log(`${mark(repoReport.status)} ${style.bold(repoReport.repoId)} ${style.dim(repoReport.name)}`);
-        for (const check of repoReport.checks) {
-          console.log(`   ${mark(check.status)} ${check.name.padEnd(14)} ${style.dim(check.detail)}`);
+      if (report.status === 'fail') out().fail(1);
+      out().report(report, () => {
+        for (const repoReport of report.repos) {
+          console.log(`${mark(repoReport.status)} ${style.bold(repoReport.repoId)} ${style.dim(repoReport.name)}`);
+          for (const check of repoReport.checks) {
+            console.log(`   ${mark(check.status)} ${check.name.padEnd(14)} ${style.dim(check.detail)}`);
+          }
+          console.log();
         }
-        console.log();
-      }
 
-      if (report.worktrees.length > 0) {
-        console.log(style.bold('worktrees'));
-        for (const wt of report.worktrees) {
-          console.log(
-            `   ${mark(wt.status)} ${wt.repoId.padEnd(14)} run ${wt.runId}  ${wt.state}  ${style.dim(wt.path)}`,
-          );
-          console.log(`      ${style.dim(wt.detail)}`);
+        if (report.worktrees.length > 0) {
+          console.log(style.bold('worktrees'));
+          for (const wt of report.worktrees) {
+            console.log(
+              `   ${mark(wt.status)} ${wt.repoId.padEnd(14)} run ${wt.runId}  ${wt.state}  ${style.dim(wt.path)}`,
+            );
+            console.log(`      ${style.dim(wt.detail)}`);
+          }
+          console.log();
         }
-        console.log();
-      }
 
-      if (report.abandoned.length > 0) {
-        console.log(style.bold('branches a run left behind'));
-        for (const branch of report.abandoned) {
-          console.log(
-            `   ${mark('warn')} ${branch.repoId.padEnd(14)} ${branch.branch}` +
-              `${branch.runId ? `  ${style.dim(`run ${branch.runId}`)}` : ''}`,
-          );
-          console.log(`      ${style.dim(branch.detail)}`);
+        if (report.abandoned.length > 0) {
+          console.log(style.bold('branches a run left behind'));
+          for (const branch of report.abandoned) {
+            console.log(
+              `   ${mark('warn')} ${branch.repoId.padEnd(14)} ${branch.branch}` +
+                `${branch.runId ? `  ${style.dim(`run ${branch.runId}`)}` : ''}`,
+            );
+            console.log(`      ${style.dim(branch.detail)}`);
+          }
+          console.log();
         }
-        console.log();
-      }
 
-      console.log(
-        report.status === 'fail'
-          ? style.red('problems found')
-          : report.status === 'warn'
-            ? style.yellow('usable, with warnings')
-            : style.green('all good'),
-      );
-      if (report.status === 'fail') process.exitCode = 1;
+        console.log(
+          report.status === 'fail'
+            ? style.red('problems found')
+            : report.status === 'warn'
+              ? style.yellow('usable, with warnings')
+              : style.green('all good'),
+        );
+      });
     });
 
   repo
@@ -655,7 +715,9 @@ export async function main(argv: string[]): Promise<void> {
       const container = await open();
       const [projectId, repoId] = splitRef(ref);
       await container.repos.remove(projectId, repoId, { purge: options.purge });
-      console.log(`${style.green('removed')} ${projectId}/${repoId}`);
+      out().report({ projectId, repoId, removed: true }, () => {
+        console.log(`${style.green('removed')} ${projectId}/${repoId}`);
+      });
     });
 
   // -- credentials ----------------------------------------------------------
@@ -690,9 +752,7 @@ export async function main(argv: string[]): Promise<void> {
           Boolean,
         );
         if (chosen.length !== 1) {
-          console.error(style.red('choose exactly one of --env <VAR>, --gh, or --token <token>'));
-          process.exitCode = 1;
-          return;
+          throw new PomniError('validation', 'choose exactly one of --env <VAR>, --gh, or --token <token>');
         }
 
         const secretRef = options.env
@@ -711,10 +771,12 @@ export async function main(argv: string[]): Promise<void> {
           secret: options.token,
         });
 
-        console.log(`${style.green('added')} credential ${style.bold(created.id)} for ${created.host}`);
-        if (!created.hasSecret) {
-          console.log(style.yellow('  the secret does not resolve yet — check the source and run: pomni cred test ' + created.id));
-        }
+        out().report(created, () => {
+          console.log(`${style.green('added')} credential ${style.bold(created.id)} for ${created.host}`);
+          if (!created.hasSecret) {
+            console.log(style.yellow('  the secret does not resolve yet — check the source and run: pomni cred test ' + created.id));
+          }
+        });
       },
     );
 
@@ -725,21 +787,23 @@ export async function main(argv: string[]): Promise<void> {
     .action(async () => {
       const container = await open();
       const credentials = await container.credentials.list();
-      if (credentials.length === 0) {
-        console.log(style.dim("no credentials — add one with 'pomni cred add <name> --gh'"));
-        return;
-      }
-      console.log(
-        table(
-          credentials.map((item) => [
-            style.bold(item.id),
-            item.host,
-            item.secretRef.kind === 'env' ? `env:${item.secretRef.var}` : item.secretRef.kind,
-            item.hasSecret ? style.green('resolves') : style.red('no secret'),
-          ]),
-          ['ID', 'HOST', 'SOURCE', 'SECRET'],
-        ),
-      );
+      out().report(credentials, () => {
+        if (credentials.length === 0) {
+          console.log(style.dim("no credentials — add one with 'pomni cred add <name> --gh'"));
+          return;
+        }
+        console.log(
+          table(
+            credentials.map((item) => [
+              style.bold(item.id),
+              item.host,
+              item.secretRef.kind === 'env' ? `env:${item.secretRef.var}` : item.secretRef.kind,
+              item.hasSecret ? style.green('resolves') : style.red('no secret'),
+            ]),
+            ['ID', 'HOST', 'SOURCE', 'SECRET'],
+          ),
+        );
+      });
     });
 
   cred
@@ -770,9 +834,7 @@ export async function main(argv: string[]): Promise<void> {
           Boolean,
         );
         if (chosen.length > 1) {
-          console.error(style.red('choose at most one of --env <VAR>, --gh, or --token <token>'));
-          process.exitCode = 1;
-          return;
+          throw new PomniError('validation', 'choose at most one of --env <VAR>, --gh, or --token <token>');
         }
 
         const secretRef = options.env
@@ -797,11 +859,13 @@ export async function main(argv: string[]): Promise<void> {
           secret: options.token,
         });
 
-        console.log(`${style.green('updated')} credential ${style.bold(updated.id)}`);
-        console.log(style.dim(`  ${updated.host}  user ${updated.username}  ${updated.secretRef.kind}`));
-        if (!updated.hasSecret) {
-          console.log(style.yellow('  the secret does not resolve — check the source'));
-        }
+        out().report(updated, () => {
+          console.log(`${style.green('updated')} credential ${style.bold(updated.id)}`);
+          console.log(style.dim(`  ${updated.host}  user ${updated.username}  ${updated.secretRef.kind}`));
+          if (!updated.hasSecret) {
+            console.log(style.yellow('  the secret does not resolve — check the source'));
+          }
+        });
       },
     );
 
@@ -812,8 +876,10 @@ export async function main(argv: string[]): Promise<void> {
     .action(async (id: string, options: { url?: string }) => {
       const container = await open();
       const result = await container.credentials.test(id, options.url);
-      console.log(result.ok ? style.green(result.message) : style.red(result.message));
-      if (!result.ok) process.exitCode = 1;
+      if (!result.ok) out().fail(1);
+      out().report(result, () => {
+        console.log(result.ok ? style.green(result.message) : style.red(result.message));
+      });
     });
 
   cred
@@ -823,7 +889,9 @@ export async function main(argv: string[]): Promise<void> {
     .action(async (id: string) => {
       const container = await open();
       await container.credentials.remove(id);
-      console.log(`${style.green('removed')} credential ${id}`);
+      out().report({ id, removed: true }, () => {
+        console.log(`${style.green('removed')} credential ${id}`);
+      });
     });
 
   // -- serve ----------------------------------------------------------------
@@ -864,9 +932,11 @@ export async function main(argv: string[]): Promise<void> {
         logLevel: globals().verbose ? 'info' : 'warn',
       });
 
-      console.log(`${style.green('pomni')} ${server.url}`);
-      console.log(style.dim(`workspace ${container.root}`));
-      console.log(style.dim('press ctrl+c to stop'));
+      out().report({ url: server.url, root: container.root }, () => {
+        console.log(`${style.green('pomni')} ${server.url}`);
+        console.log(style.dim(`workspace ${container.root}`));
+        console.log(style.dim('press ctrl+c to stop'));
+      });
 
       if (options.open) openBrowser(server.url);
 
@@ -879,16 +949,32 @@ export async function main(argv: string[]): Promise<void> {
       process.on('SIGTERM', shutdown);
     });
 
-  registerRunCommands(program, open, defaultProject);
-  registerBacklogCommands(program, open, defaultProject);
-  registerWorkflowCommands(program, open, defaultProject);
-  registerDiscoveryCommands(program, open, defaultProject);
-  registerProviderCommands(program, open);
-  registerTaskCommands(program, open, defaultProject);
-  registerToolCommands(program, open, defaultProject);
-  registerWorktreeCommands(program, open, defaultProject);
+  registerRunCommands(program, open, defaultProject, out);
+  registerBacklogCommands(program, open, defaultProject, out);
+  registerWorkflowCommands(program, open, defaultProject, out);
+  registerDiscoveryCommands(program, open, defaultProject, out);
+  registerProviderCommands(program, open, out);
+  registerTaskCommands(program, open, defaultProject, out);
+  registerToolCommands(program, open, defaultProject, out);
+  registerWorktreeCommands(program, open, defaultProject, out);
 
-  await program.parseAsync(argv);
+  try {
+    await program.parseAsync(argv);
+  } catch (error) {
+    if (error instanceof CommanderError) {
+      // --help and --version are success, not failure; exitOverride() makes them throw too.
+      if (error.code === 'commander.helpDisplayed' || error.code === 'commander.version') {
+        return 0;
+      }
+      // Commander already wrote its own "error: ..." line to stderr via configureOutput.
+      out().fail(2);
+      out().report({ error: { code: 'usage', message: error.message } }, () => {});
+      return out().exitCode;
+    }
+    reportErrorTo(error, out());
+    return exitCodeFor(error);
+  }
+  return out().exitCode;
 }
 
 // ---------------------------------------------------------------------------
@@ -978,28 +1064,7 @@ function openBrowser(url: string): void {
   spawn(command, args, { detached: true, stdio: 'ignore', windowsHide: true }).unref();
 }
 
-export function reportError(error: unknown): void {
-  if (error instanceof RequirementsNotMetError) {
-    console.error(style.red(error.message));
-    const advice = error.unmet.some((unmet) => unmet.kind === 'gate')
-      ? "run 'pomni verify' first, or pass --force to record that you moved it anyway"
-      : 'pass --force to record that you moved it anyway';
-    console.error(style.dim(advice));
-    process.exitCode = 1;
-    return;
-  }
-  if (error instanceof PomniError) {
-    console.error(style.red(error.message));
-    if (error.code === 'not_initialized') {
-      console.error(style.dim(`run 'pomni init' in ${relative(process.cwd(), '.') || '.'}`));
-    }
-    process.exitCode = 1;
-    return;
-  }
-  console.error(style.red(error instanceof Error ? error.message : String(error)));
-  process.exitCode = 1;
-}
-
+export { reportError } from './output.js';
 export { createContainer, openContainer } from './container.js';
 
 /** The first of the known editors this machine actually has. */

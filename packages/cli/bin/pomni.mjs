@@ -8,9 +8,6 @@ process.on('warning', (warning) => {
   for (const listener of defaults) listener(warning);
 });
 
-const { main, reportError } = await import('../dist/index.js');
+const { main } = await import('../dist/index.js');
 
-main(process.argv).catch((error) => {
-  reportError(error);
-  process.exit(process.exitCode ?? 1);
-});
+process.exitCode = await main(process.argv);

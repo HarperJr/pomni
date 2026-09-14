@@ -159,10 +159,11 @@ configurable per workflow, not fixed spec-writer/planner/verifier roles)
   a merge request opened through the forge (`project edit
   --auto-commit/--auto-push/--auto-mr`), `verify --land`
 - POMN-25 → `feature next` → `backlog waves --run`
+- POMN-73 → `--json` global flag on every command; exit codes mean something (0 success,
+  1 answer is no, 2 bad usage, 3 not found); errors in JSON mode are `{ error }` on stdout
 
 **Still open**
 
-- POMN-73 — JSON output and exit codes on every command, so CI and cron can call Pomni
 - POMN-74 — drain the queue: run wave after wave unattended, stop at the first red gate
 
 ---

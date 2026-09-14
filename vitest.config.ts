@@ -11,6 +11,7 @@ export default defineConfig({
       '@pomni/infra': pkg('infra'),
       '@pomni/adapters': pkg('adapters'),
       '@pomni/server': pkg('server'),
+      '@pomni/mcp': pkg('mcp'),
     },
   },
   test: {
