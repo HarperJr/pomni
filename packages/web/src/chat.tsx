@@ -58,48 +58,57 @@ export function ChatPage({
 
   return (
     <>
-      <div className="page-head">
-        {routed && <h1>{t('chat.title')}</h1>}
-        <div className="spacer" />
-        <button className="primary" onClick={() => choose('')}>
-          {t('chat.new')}
-        </button>
-      </div>
+      {routed && (
+        <div className="page-head">
+          <h1>{t('chat.title')}</h1>
+        </div>
+      )}
 
       {chats.isError && <Alert kind="error">{errorMessage(chats.error)}</Alert>}
 
       <div className="chat-layout">
+        {/* The sidebar reads like any chat app's: the way to start a conversation sits on top,
+            the conversations you already have below it, newest first. */}
         <div className="card chat-list">
-          {sorted.length === 0 ? (
-            <div className="empty">{t('chat.empty')}</div>
-          ) : (
-            sorted.map((chat) => (
-              <div
-                className={`row chat-list-row${chat.id === chatId ? ' selected' : ''}`}
-                key={chat.id}
-              >
-                {routed ? (
-                  <Link className="grow truncate" to={`/chat/${chat.id}`}>
-                    {chat.title || t('chat.untitled')}
-                  </Link>
-                ) : (
-                  <button className="grow truncate link" onClick={() => choose(chat.id)}>
-                    {chat.title || t('chat.untitled')}
-                  </button>
-                )}
-                <button
-                  className="ghost danger"
-                  onClick={() => {
-                    if (confirm(t('chat.confirmDelete', { title: chat.title || t('chat.untitled') }))) {
-                      remove.mutate(chat.id);
-                    }
-                  }}
+          <div className="chat-list-head">
+            <button className={`chat-new${chatId ? '' : ' selected'}`} onClick={() => choose('')}>
+              <span aria-hidden="true">+</span> {t('chat.new')}
+            </button>
+          </div>
+          <div className="chat-list-body">
+            {sorted.length === 0 ? (
+              <div className="empty">{t('chat.empty')}</div>
+            ) : (
+              sorted.map((chat) => (
+                <div
+                  className={`chat-list-row${chat.id === chatId ? ' selected' : ''}`}
+                  key={chat.id}
                 >
-                  {t('chat.delete')}
-                </button>
-              </div>
-            ))
-          )}
+                  {routed ? (
+                    <Link className="grow truncate" to={`/chat/${chat.id}`}>
+                      {chat.title || t('chat.untitled')}
+                    </Link>
+                  ) : (
+                    <button className="grow truncate link" onClick={() => choose(chat.id)}>
+                      {chat.title || t('chat.untitled')}
+                    </button>
+                  )}
+                  <button
+                    className="ghost danger chat-list-delete"
+                    title={t('chat.delete')}
+                    aria-label={t('chat.delete')}
+                    onClick={() => {
+                      if (confirm(t('chat.confirmDelete', { title: chat.title || t('chat.untitled') }))) {
+                        remove.mutate(chat.id);
+                      }
+                    }}
+                  >
+                    <span aria-hidden="true">×</span>
+                  </button>
+                </div>
+              ))
+            )}
+          </div>
         </div>
 
         <div className="chat-detail">
@@ -254,6 +263,12 @@ function ChatDraft({
             <span className="chat-hint">{t('chat.nextTurn')}</span>
           </div>
         )}
+      </div>
+
+      {/* Empty on purpose: it is where the replies will go, and it keeps the composer at the
+          bottom of the dialog where a chat's composer is expected to be. */}
+      <div className="card chat-thread">
+        <div className="empty">{t('chat.saySomething')}</div>
       </div>
 
       <div className="card chat-composer">
