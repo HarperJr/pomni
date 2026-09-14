@@ -1254,6 +1254,28 @@ export function findAction(name: string): ChatAction {
   return found;
 }
 
+/** Whether the action takes a `project` argument at all — the ones that do all spell it so. */
+export function takesProject(action: ChatAction): boolean {
+  return action.args instanceof z.ZodObject && 'project' in action.args.shape;
+}
+
+/**
+ * The call's arguments with `project` filled in when the model left it out and the chat
+ * knows which project it is about. What the CLI does with `-p`: a workspace with one project,
+ * or a chat that said `#project`, should not have to name it on every call — and a model
+ * that has just listed the projects and is asked for "the runs" reasonably assumes the
+ * context carries. Only a missing key is filled; a project the model named stands.
+ */
+export function withProject(
+  action: ChatAction,
+  args: Record<string, unknown>,
+  projectId: string | null,
+): Record<string, unknown> {
+  if (!projectId || !takesProject(action)) return args;
+  if (args.project !== undefined && args.project !== null && args.project !== '') return args;
+  return { ...args, project: projectId };
+}
+
 /** Arguments checked against the action's own schema. Never trust what the model wrote. */
 export function parseActionArgs(action: ChatAction, args: unknown): unknown {
   const parsed = action.args.safeParse(args ?? {});

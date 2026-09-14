@@ -1,6 +1,6 @@
 import { createRequire } from 'node:module';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   MAX_EXPANSION_ROUNDS,
   layout,
@@ -570,5 +570,85 @@ describe('opened groups persist', () => {
     }
 
     expect((await harness.chatStore.getChat(chat.id))?.openedGroups).toEqual([]);
+  });
+});
+
+describe('a first message returns before the answer', () => {
+  it('hands back the chat with the message in it while the model is still thinking', async () => {
+    // Held open: the answer cannot land until the test lets it, which is exactly the window
+    // the browser used to spend staring at a disabled button.
+    let release: () => void = () => undefined;
+    harness.llm.gate = () => new Promise<void>((resolve) => (release = resolve));
+    harness.llm.replies = ['Three repos.', 'Repos in acme'];
+
+    const { chat, completion } = await harness.chat.open({ text: 'How many repos are there?' });
+    // The model has been asked and is being held — this is the state the browser now sees.
+    await vi.waitFor(() => expect(harness.llm.calls).toHaveLength(1));
+
+    expect(chat.messages).toHaveLength(1);
+    expect(chat.messages[0]?.role).toBe('user');
+    expect(chat.messages[0]?.text).toBe('How many repos are there?');
+    // Named provisionally from the message, so the list has something to show at once.
+    expect(chat.title).toBe('How many repos are there?');
+
+    release();
+    await completion;
+
+    const answered = await harness.chat.get(chat.id);
+    expect(answered.messages.at(-1)?.role).toBe('assistant');
+    expect(answered.messages.at(-1)?.text).toContain('Three repos');
+  });
+
+  it('keeps the chat and the message when the turn fails, and says why in the chat', async () => {
+    harness.llm.failCompleteWhen = /Pomni/;
+    const finished: string[] = [];
+    harness.events.subscribe((event) => {
+      if (event.type === 'chat.turn.finished') finished.push(event.chatId);
+    });
+
+    const { chat, completion } = await harness.chat.open({ text: 'Anything there?' });
+    await completion;
+
+    const after = await harness.chat.get(chat.id);
+    expect(after.messages.map((message) => message.role)).toEqual(['user', 'system']);
+    expect(after.messages[1]?.text).toContain('No answer');
+    // The spinner is keyed on this event, reply or no reply.
+    expect(finished).toContain(chat.id);
+  });
+});
+
+describe('an action that names no project', () => {
+  it('gets the workspace\'s only project, the way the CLI fills in -p', async () => {
+    const chat = await newChat();
+    harness.llm.replies = [propose('Listing the runs.', { name: 'task.list', args: {} })];
+
+    const answer = await harness.chat.sendMessage(chat.id, 'Show me the recent runs');
+
+    const action = onlyAction(answer);
+    expect(action.name).toBe('task.list');
+    expect(action.args).toMatchObject({ project: 'acme' });
+    expect(action.status).not.toBe('rejected');
+  });
+
+  it('gets the project the chat is about when there are several', async () => {
+    await harness.projects.create({ name: 'Widgets' });
+    const chat = await newChat();
+    harness.llm.replies = ['Noted.', propose('Listing the runs.', { name: 'task.list', args: {} })];
+
+    await harness.chat.sendMessage(chat.id, '#widgets is what we are on');
+    const answer = await harness.chat.sendMessage(chat.id, 'Show me the recent runs');
+
+    expect(onlyAction(answer).args).toMatchObject({ project: 'widgets' });
+  });
+
+  it('is still refused, by name, when nothing says which of several projects', async () => {
+    await harness.projects.create({ name: 'Widgets' });
+    const chat = await newChat();
+    harness.llm.replies = [propose('Listing the runs.', { name: 'task.list', args: {} })];
+
+    const answer = await harness.chat.sendMessage(chat.id, 'Show me the recent runs');
+
+    expect(answer.actions).toHaveLength(0);
+    expect(answer.text).toContain('project required');
   });
 });

@@ -310,12 +310,24 @@ function ChatThread({ chatId, providers }: { chatId: string; providers: Provider
 
   const send = useMutation({
     mutationFn: (value: string) => api.sendChatMessage(chatId, value),
-    onSuccess: async () => {
+    // The composer empties the moment the message is sent, not when the answer lands: the
+    // server stores and announces the message before it asks the model, so the transcript
+    // shows it within a frame and the composer holding a copy for the whole of the model's
+    // thinking time only made the send look like it had not happened.
+    onMutate: (value) => {
       setText('');
+      setError(null);
+      return { value };
+    },
+    onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ['chat', chatId] });
       await queryClient.invalidateQueries({ queryKey: ['chats'] });
     },
-    onError: (caught) => setError(errorMessage(caught)),
+    onError: (caught, _value, context) => {
+      // What was typed comes back, so a failed send is retried by pressing send, not retyping.
+      if (context?.value && !text) setText(context.value);
+      setError(errorMessage(caught));
+    },
   });
 
   const setModel = useMutation({

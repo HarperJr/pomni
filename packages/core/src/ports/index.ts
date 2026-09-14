@@ -749,7 +749,8 @@ export type PomniEvent =
       status: string;
       error: string | null;
     }
-  | { type: 'chat.turn.finished'; chatId: string; messageId: string }
+  /** `messageId` is null when the turn ended without a reply — the failure is a system note. */
+  | { type: 'chat.turn.finished'; chatId: string; messageId: string | null }
   /**
    * This process is about to be replaced. Deliberately not durable: it is a fact about one
    * process, and replaying it out of `.pomni/events.ndjson` into a server that just started

@@ -44,6 +44,7 @@ import {
   describeAction,
   findAction,
   parseActionArgs,
+  withProject,
   parseActionCalls,
   type ChatActionCall,
   type ChatActionServices,
@@ -107,6 +108,13 @@ export interface Addressables {
  * the candidate stays in the prose where the person put it, and the reply says what does
  * exist. Only `accepted` is stripped, and only `accepted` is recorded.
  */
+/** What `record` stored and `answer` needs: the chat as it now is, and what was asked. */
+interface PostedMessage {
+  current: Chat;
+  addressed: ResolvedAddresses;
+  asked: string;
+}
+
 interface ResolvedAddresses {
   /** The project in force for this turn: the addressed one, else the chat's standing one. */
   projectId: string | null;
@@ -224,6 +232,64 @@ export class ChatService {
    * a chat anybody can carry on, so it must not be storable — which is why `providerId` and
    * `model` stayed non-nullable when 'no dialog' arrived.
    */
+  /**
+   * A chat opened from its first message, for a caller that will watch the bus: the chat and
+   * the message exist when this returns, and the answer arrives as `chat.turn.finished`.
+   *
+   * `createFromFirstMessage` waits for the answer, which is right for a caller with nothing
+   * to show meanwhile. The browser has a chat to show — and until this existed it could not,
+   * because it had no id until the model had spoken, so the person's first message sat behind
+   * a disabled button for the whole of the model's thinking time and read as a hang.
+   *
+   * A turn that fails leaves the chat and the message in place, with the failure as a system
+   * note: the person typed that message, and deleting it with the chat (what the waiting
+   * variant does) would lose it behind an error they can no longer act on.
+   */
+  async open(input: FirstMessageInput): Promise<{ chat: ChatDetail; completion: Promise<void> }> {
+    const body = input.text.trim();
+    if (!body) throw new ValidationError('a message needs some words in it');
+
+    const provider = input.providerId
+      ? await this.enabledProvider(input.providerId)
+      : await this.providers.resolve();
+    const model = input.model ?? resolveModel(provider, 'medium');
+
+    const chat = await this.create({ providerId: provider.id, model });
+    const posted = await this.record(chat, body);
+
+    const completion = this.answer(chat, provider, posted).then(
+      () => {
+        void this.nameChat(chat.id, body, provider);
+      },
+      async (error: unknown) => {
+        await this.noteFailure(chat.id, error);
+      },
+    );
+
+    return { chat: await this.get(chat.id), completion };
+  }
+
+  /** A turn that threw, written into the chat so the person sees why nothing came back. */
+  private async noteFailure(chatId: string, error: unknown): Promise<void> {
+    const message = error instanceof Error ? error.message : String(error);
+    try {
+      await this.store.appendMessage(
+        ChatMessageSchema.parse({
+          id: ulid(this.clock.now().getTime()),
+          chatId,
+          role: 'system',
+          text: `No answer: ${message}`,
+          createdAt: this.clock.iso(),
+        }),
+      );
+    } catch (writing) {
+      this.logger.debug('could not record a failed turn on the chat', writing);
+    }
+    this.logger.warn(`chat ${chatId}: the turn failed`, message);
+    // The spinner is keyed on this, whether or not there was a reply.
+    this.announce({ type: 'chat.turn.finished', chatId, messageId: null });
+  }
+
   async createFromFirstMessage(input: FirstMessageInput): Promise<ChatDetail> {
     const body = input.text.trim();
     if (!body) throw new ValidationError('a message needs some words in it');
@@ -368,10 +434,21 @@ export class ChatService {
    */
   async sendMessage(id: string, text: string): Promise<ChatMessage> {
     const chat = await this.require(id);
+    const provider = await this.pinnedProvider(chat);
+    const posted = await this.record(chat, text);
+    return this.answer(chat, provider, posted);
+  }
+
+  /**
+   * The person's half of a turn: parse the addresses, store the message, name the chat if it
+   * has no name, and say so on the bus. Everything a person should see the instant they press
+   * send, and nothing that waits on a model — `answer` is that half.
+   */
+  private async record(chat: Chat, text: string): Promise<PostedMessage> {
+    const id = chat.id;
     const body = text.trim();
     if (!body) throw new ValidationError('a message needs some words in it');
 
-    const provider = await this.pinnedProvider(chat);
     const now = this.clock.iso();
 
     const parsed = parseAddresses(body);
@@ -406,6 +483,15 @@ export class ChatService {
     await this.store.updateChat(current);
     this.announce({ type: 'chat.changed', chatId: id });
 
+    return { current, addressed, asked };
+  }
+
+  /** The model's half of a turn: ask, plan the actions, run the reads, store the reply. */
+  private async answer(chat: Chat, provider: Provider, posted: PostedMessage): Promise<ChatMessage> {
+    const id = chat.id;
+    const { addressed, asked } = posted;
+    let current = posted.current;
+
     let answer = addressed.agent
       ? // One agent, its own prompt, its own tools, no delegation. Deliberately not the chat's
         // pinned model: an agent says what struggle its work deserves, and honouring the
@@ -436,7 +522,11 @@ export class ChatService {
     // Every turn, addressed or not. An agent's answer will rarely contain an action block,
     // but a turn that could skip the confirmation because of how it was addressed would be a
     // way round the one gap this service exists to keep open.
-    const { actions, rejected } = this.plan(calls, await this.declinedKeys(id));
+    const { actions, rejected } = this.plan(
+      calls,
+      await this.declinedKeys(id),
+      current.projectId ?? (await this.onlyProjectId()),
+    );
 
     const message = ChatMessageSchema.parse({
       id: messageId,
@@ -944,16 +1034,28 @@ export class ChatService {
     return keys;
   }
 
+  /**
+   * The project a call means when it names none: the workspace's only one. With several,
+   * null — the model has to say, or the person has to `#project`, and the validation error
+   * that follows says which.
+   */
+  private async onlyProjectId(): Promise<string | null> {
+    const ids = await this.projects.listIds();
+    return ids.length === 1 ? (ids[0] ?? null) : null;
+  }
+
   private plan(
     calls: ChatActionCall[],
     declined: Set<string> = new Set(),
+    projectId: string | null = null,
   ): { actions: ProposedAction[]; rejected: string[] } {
     const actions: ProposedAction[] = [];
     const rejected: string[] = [];
 
-    for (const call of calls) {
+    for (const raw of calls) {
       try {
-        const entry = findAction(call.name);
+        const entry = findAction(raw.name);
+        const call = { ...raw, args: withProject(entry, raw.args, projectId) };
         parseActionArgs(entry, call.args);
 
         // Declined stays declined until the person says otherwise. The model can override

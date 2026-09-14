@@ -49,10 +49,14 @@ export async function chatRoutes(app: FastifyInstance, container: PomniContainer
     return container.chat.addressables(query.projectId ?? null);
   });
 
+  // Returns as soon as the chat and its first message exist; the answer comes over the event
+  // stream like every later one. Waiting for it here is what made the first message look
+  // like a hang: the browser had no chat to show until the model had finished thinking.
   app.post('/api/chats', async (request, reply) => {
     const body = StartChatBody.parse(request.body);
+    const { chat } = await container.chat.open(body);
     reply.code(201);
-    return { chat: await container.chat.createFromFirstMessage(body) };
+    return { chat };
   });
 
   app.get<{ Params: { id: string } }>('/api/chats/:id', async (request) => ({
