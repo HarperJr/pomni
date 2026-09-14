@@ -46,6 +46,14 @@ rewriting anything earlier — the ports/adapters split in `ARCHITECTURE.md` is 
   `GET /api/projects/:id/doctor`; run list, run detail and live log in the UI
 - 26 more tests (69 total)
 
+**Since then**
+
+- POMN-14 → a run orphaned by a dead process can be cancelled
+- POMN-37 → agent runs listed as running first, latest five, the rest behind *Show all*
+- POMN-66 → a run id is enough to find the run; no `-p` needed
+- POMN-71 → a run the executor killed reports `timed out after …`, not the tests it interrupted;
+  `repo edit --timeout <capability=duration>`
+
 ---
 
 ## M1 — Backlog — **shipped**
@@ -66,6 +74,11 @@ rewriting anything earlier — the ports/adapters split in `ARCHITECTURE.md` is 
 - HTTP item routes and a backlog list plus item detail in the web UI (the kanban board and
   drag-drop reordering are M2)
 - 28 more tests (97 total)
+
+**Since then**
+
+- POMN-27 → `backlog list` orders by priority and agrees with `backlog next`
+- POMN-55 → a resumed run that succeeds no longer leaves its item stuck in `blocked`
 
 ---
 
@@ -121,11 +134,15 @@ configurable per workflow, not fixed spec-writer/planner/verifier roles)
 - POMN-12 → agents see every repo in the project, not just the first
 - POMN-10 → a run's status reflects what its agents actually reported
 - POMN-67 → a run no longer ends after the orchestrator's first delegation
+- POMN-30 → artifacts: scrollable, with diffs, and files you can open
+- POMN-35 → an agent can search the web, as an option alongside files and run
 
 **Still open**
 
 - POMN-47 (in_review) — context packs: an agent starts from the item's touched files and what
   the other agents just found
+- POMN-82 — inside a run, Pomni's own MCP server is dead: the worktree's `.mcp.json` points at
+  a `dist/` nobody built, so agents cannot read the workspace they work for
 
 ---
 
@@ -158,7 +175,7 @@ configurable per workflow, not fixed spec-writer/planner/verifier roles)
 
 - POMN-41 → `workflow signals`, `workflow amend`
 - POMN-17 → the commands, skills and MCP calls an agent actually ran, on record
-- POMN-60 → `repo doctor` reports worktrees a run left behind
+- POMN-60 → `repo doctor` reports branches a run left behind
 - POMN-59 → the schema counter reports divergence, not just depth
 
 **Still open**
@@ -237,4 +254,6 @@ them is an adapter behind a port defined in M0-M3.
 - Replacing the project's own CI
 - A general-purpose issue tracker for non-engineering work
 - Multi-user collaboration or hosted/shared instances before M6
-- Supporting model providers other than Claude before M7
+- Supporting model providers other than Claude as the *default* — `pomni provider` (POMN-23) can
+  point an agent at an OpenAI-compatible endpoint, but the harness is developed and tested
+  against Claude Code, and only that provider gets the tool grants and permission model

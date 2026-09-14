@@ -81,13 +81,13 @@ Inside a Claude session opened in this repo, the same things are `/project`, `/b
 detection for Node/Python/Go/Rust/Make, credentials, running a repo's own commands with full
 run history, gates, doctor, a Markdown-file backlog with a guarded state machine and a kanban
 **board**, **task** runs in per-run git worktrees, **waves** of items grouped to run
-concurrently, per-run **budgets** (turns, cost, wall clock), **commit/push and merge-request
+concurrently, per-run **budgets** (turns, cost, session turns), **commit/push and merge-request
 landing** through the forge, **signals and prompt amendments** learned from prior runs, and
 **Chat** as the way to work — every Pomni verb behind a confirm. 46 test files, 861 tests
 passed, 1 skipped.
 
 **In progress:** POMN-47 (context packs: an agent starting from the item's touched files and
-what other agents already found) and POMN-72 (this roadmap rewrite).
+what other agents already found).
 
 **Next:** POMN-73 (JSON output and exit codes on every command), POMN-74 (draining the queue
 unattended past wave 1), POMN-75 (notifications for questions, red gates and landed work).
