@@ -2,6 +2,7 @@ import { WELL_KNOWN_CAPABILITIES, type PomniContainer, type Run } from '@pomni/c
 import { readLogFrom } from '@pomni/infra';
 import type { Command } from 'commander';
 import { style, table } from './format.js';
+import type { Output } from './output.js';
 
 interface RunFlags {
   project?: string;
@@ -14,6 +15,7 @@ export function registerRunCommands(
   program: Command,
   open: () => Promise<PomniContainer>,
   defaultProject: () => Promise<string>,
+  out: () => Output,
 ): void {
   const execute = async (capability: string, flags: RunFlags): Promise<void> => {
     const container = await open();
@@ -23,31 +25,43 @@ export function registerRunCommands(
       repoId: flags.repo,
       bail: flags.bail,
       onRunStart: (run) => {
-        console.log(
-          `${style.cyan('▸')} ${style.bold(run.repoId)} ${style.dim(run.cmd)}`,
-        );
+        out().report({ type: 'run.started', run }, () => {
+          console.log(
+            `${style.cyan('▸')} ${style.bold(run.repoId)} ${style.dim(run.cmd)}`,
+          );
+        });
       },
-      onOutput: flags.quiet ? undefined : (_id, chunk) => process.stdout.write(chunk),
+      onOutput: flags.quiet
+        ? undefined
+        : (runId, chunk) => {
+            out().report({ type: 'run.output', runId, text: chunk }, () => {
+              process.stdout.write(chunk);
+            });
+          },
       onRunFinish: (run) => {
-        console.log(finishLine(run));
+        out().report({ type: 'run.finished', run }, () => {
+          console.log(finishLine(run));
+        });
       },
     });
 
-    if (runs.length > 1) {
-      console.log();
-      console.log(
-        table(
-          runs.map((run) => [
-            statusText(run),
-            style.bold(run.repoId),
-            run.summary ?? style.dim('—'),
-            style.dim(duration(run)),
-          ]),
-        ),
-      );
-    }
+    out().report(runs, () => {
+      if (runs.length > 1) {
+        console.log();
+        console.log(
+          table(
+            runs.map((run) => [
+              statusText(run),
+              style.bold(run.repoId),
+              run.summary ?? style.dim('—'),
+              style.dim(duration(run)),
+            ]),
+          ),
+        );
+      }
+    });
 
-    if (runs.some((run) => run.status !== 'passed')) process.exitCode = 1;
+    if (runs.some((run) => run.status !== 'passed')) out().fail(1);
   };
 
   const runCommand = program
@@ -89,34 +103,50 @@ export function registerRunCommands(
 
       const report = await container.runs.gate(projectId, flags.land ? 'land' : 'default', {
         repoId: flags.repo,
-        onRunStart: (run) =>
-          console.log(`${style.cyan('▸')} ${style.bold(run.repoId)} ${run.capability}`),
-        onOutput: flags.quiet ? undefined : (_id, chunk) => process.stdout.write(chunk),
-        onRunFinish: (run) => console.log(finishLine(run)),
+        onRunStart: (run) => {
+          out().report({ type: 'run.started', run }, () => {
+            console.log(`${style.cyan('▸')} ${style.bold(run.repoId)} ${run.capability}`);
+          });
+        },
+        onOutput: flags.quiet
+          ? undefined
+          : (runId, chunk) => {
+              out().report({ type: 'run.output', runId, text: chunk }, () => {
+                process.stdout.write(chunk);
+              });
+            },
+        onRunFinish: (run) => {
+          out().report({ type: 'run.finished', run }, () => {
+            console.log(finishLine(run));
+          });
+        },
       });
 
-      console.log();
-      for (const result of report.results) {
-        const mark =
-          result.status === 'passed'
-            ? style.green('✓')
-            : result.status === 'skipped'
-              ? style.dim('–')
-              : style.red('✗');
-        const detail =
-          result.status === 'skipped'
-            ? style.dim('no repo declares it')
-            : result.runs.map((run) => `${run.repoId}: ${run.summary ?? run.status}`).join('  ');
-        console.log(`${mark} ${result.capability.padEnd(10)} ${detail}`);
-      }
+      out().report(report, () => {
+        console.log();
+        for (const result of report.results) {
+          const mark =
+            result.status === 'passed'
+              ? style.green('✓')
+              : result.status === 'skipped'
+                ? style.dim('–')
+                : style.red('✗');
+          const detail =
+            result.status === 'skipped'
+              ? style.dim('no repo declares it')
+              : result.runs.map((run) => `${run.repoId}: ${run.summary ?? run.status}`).join('  ');
+          console.log(`${mark} ${result.capability.padEnd(10)} ${detail}`);
+        }
 
-      console.log();
-      console.log(
-        report.passed
-          ? style.green(`gate '${report.gate}' passed`)
-          : style.red(`gate '${report.gate}' failed`),
-      );
-      if (!report.passed) process.exitCode = 1;
+        console.log();
+        console.log(
+          report.passed
+            ? style.green(`gate '${report.gate}' passed`)
+            : style.red(`gate '${report.gate}' failed`),
+        );
+      });
+
+      if (!report.passed) out().fail(1);
     });
 
   // -- runs ----------------------------------------------------------------
@@ -149,24 +179,26 @@ export function registerRunCommands(
           limit: Number(flags.limit),
         });
 
-        if (found.length === 0) {
-          console.log(style.dim('no runs yet'));
-          return;
-        }
+        out().report(found, () => {
+          if (found.length === 0) {
+            console.log(style.dim('no runs yet'));
+            return;
+          }
 
-        console.log(
-          table(
-            found.map((run) => [
-              style.dim(run.id.slice(-8)),
-              statusText(run),
-              `${run.projectId}/${run.repoId}`,
-              run.capability,
-              run.summary ?? style.dim('—'),
-              style.dim(duration(run)),
-            ]),
-            ['ID', 'STATUS', 'REPO', 'CAPABILITY', 'SUMMARY', 'TIME'],
-          ),
-        );
+          console.log(
+            table(
+              found.map((run) => [
+                style.dim(run.id.slice(-8)),
+                statusText(run),
+                `${run.projectId}/${run.repoId}`,
+                run.capability,
+                run.summary ?? style.dim('—'),
+                style.dim(duration(run)),
+              ]),
+              ['ID', 'STATUS', 'REPO', 'CAPABILITY', 'SUMMARY', 'TIME'],
+            ),
+          );
+        });
       },
     );
 
@@ -177,32 +209,34 @@ export function registerRunCommands(
     .action(async (id: string, flags: { full?: boolean }) => {
       const container = await open();
       const run = await container.runs.get(await resolveRunId(container, id));
-
-      console.log(`${statusText(run)}  ${style.bold(`${run.projectId}/${run.repoId}`)} ${run.capability}`);
-      console.log(style.dim(`${run.id}`));
-      console.log(`command   ${run.cmd}`);
-      console.log(`cwd       ${run.cwd}`);
-      console.log(`exit      ${run.exitCode ?? style.dim('—')}   ${duration(run)}`);
-      if (run.summary) console.log(`summary   ${run.summary}`);
-
-      const results = await container.runs.testResults(run.id);
-      if (results.length > 0) {
-        const failed = results.filter((result) => result.status === 'failed');
-        console.log(`tests     ${results.length} recorded, ${failed.length} failed`);
-        for (const failure of failed.slice(0, 10)) {
-          console.log(`  ${style.red('✗')} ${failure.suite} ${failure.name}`);
-          if (failure.message) console.log(`    ${style.dim(failure.message.split('\n')[0] ?? '')}`);
-        }
-      }
-
+      const testResults = await container.runs.testResults(run.id);
       const { text } = await readLogFrom(run.logPath, 0);
-      const lines = text.split(/\r?\n/);
-      const shown = flags.full ? lines : lines.slice(-40);
-      console.log();
-      if (!flags.full && lines.length > 40) {
-        console.log(style.dim(`… ${lines.length - 40} earlier lines (--full for all)`));
-      }
-      console.log(shown.join('\n').trimEnd());
+
+      out().report({ run, testResults }, () => {
+        console.log(`${statusText(run)}  ${style.bold(`${run.projectId}/${run.repoId}`)} ${run.capability}`);
+        console.log(style.dim(`${run.id}`));
+        console.log(`command   ${run.cmd}`);
+        console.log(`cwd       ${run.cwd}`);
+        console.log(`exit      ${run.exitCode ?? style.dim('—')}   ${duration(run)}`);
+        if (run.summary) console.log(`summary   ${run.summary}`);
+
+        if (testResults.length > 0) {
+          const failed = testResults.filter((result) => result.status === 'failed');
+          console.log(`tests     ${testResults.length} recorded, ${failed.length} failed`);
+          for (const failure of failed.slice(0, 10)) {
+            console.log(`  ${style.red('✗')} ${failure.suite} ${failure.name}`);
+            if (failure.message) console.log(`    ${style.dim(failure.message.split('\n')[0] ?? '')}`);
+          }
+        }
+
+        const lines = text.split(/\r?\n/);
+        const shown = flags.full ? lines : lines.slice(-40);
+        console.log();
+        if (!flags.full && lines.length > 40) {
+          console.log(style.dim(`… ${lines.length - 40} earlier lines (--full for all)`));
+        }
+        console.log(shown.join('\n').trimEnd());
+      });
     });
 
   runs
@@ -217,15 +251,21 @@ export function registerRunCommands(
       for (;;) {
         const chunk = await readLogFrom(run.logPath, offset);
         offset = chunk.offset;
-        if (chunk.text) process.stdout.write(chunk.text);
+        if (chunk.text) {
+          out().report({ type: 'run.output', runId, text: chunk.text }, () => {
+            process.stdout.write(chunk.text);
+          });
+        }
 
         run = await container.runs.get(runId);
         if (run.status !== 'running' && run.status !== 'queued') break;
         await new Promise((resolve) => setTimeout(resolve, 300));
       }
 
-      console.log(finishLine(run));
-      if (run.status !== 'passed') process.exitCode = 1;
+      out().report({ type: 'run.finished', run }, () => {
+        console.log(finishLine(run));
+      });
+      if (run.status !== 'passed') out().fail(1);
     });
 
   runs
@@ -234,7 +274,9 @@ export function registerRunCommands(
     .action(async (id: string) => {
       const container = await open();
       const run = await container.runs.cancel(await resolveRunId(container, id));
-      console.log(`${style.yellow('cancelled')} ${run.id}`);
+      out().report(run, () => {
+        console.log(`${style.yellow('cancelled')} ${run.id}`);
+      });
     });
 }
 

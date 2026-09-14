@@ -1,11 +1,13 @@
 import type { PomniContainer, Worktree, WorktreeState } from '@pomni/core';
 import type { Command } from 'commander';
 import { style, table } from './format.js';
+import type { Output } from './output.js';
 
 export function registerWorktreeCommands(
   program: Command,
   open: () => Promise<PomniContainer>,
   defaultProject: () => Promise<string>,
+  out: () => Output,
 ): void {
   const worktree = program.command('worktree').description('inspect and clean up per-run git worktrees');
 

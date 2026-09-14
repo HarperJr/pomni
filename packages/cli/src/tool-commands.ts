@@ -1,6 +1,7 @@
 import type { PomniContainer, Tool, ToolStatus } from '@pomni/core';
 import type { Command } from 'commander';
 import { style, table } from './format.js';
+import type { Output } from './output.js';
 
 /**
  * `pomni tool` — the registry of things an agent can use besides a model.
@@ -13,6 +14,7 @@ export function registerToolCommands(
   program: Command,
   open: () => Promise<PomniContainer>,
   defaultProject: () => Promise<string>,
+  out: () => Output,
 ): void {
   const tool = program.command('tool').description('MCP servers and CLI programs agents can use');
 

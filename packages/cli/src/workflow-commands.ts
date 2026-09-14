@@ -1,6 +1,7 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import { basename, resolve } from 'node:path';
 import {
+  NotFoundError,
   ValidationError,
   type PipelineRun,
   AgentRoleSchema,
@@ -18,11 +19,13 @@ import {
 import type { Command } from 'commander';
 import { style, table, visibleLength } from './format.js';
 import { attachments, person, printComments, printWritten } from './backlog-commands.js';
+import type { Output } from './output.js';
 
 export function registerWorkflowCommands(
   program: Command,
   open: () => Promise<PomniContainer>,
   defaultProject: () => Promise<string>,
+  out: () => Output,
 ): void {
   const workflow = program
     .command('workflow')
@@ -43,8 +46,10 @@ export function registerWorkflowCommands(
         description: flags.description,
         suits: split(flags.suits),
       });
-      console.log(`${style.green('created')} workflow ${style.bold(created.id)}`);
-      console.log(style.dim(`  add an orchestrator:  pomni workflow agent add ${created.id} "Planner" --role orchestrator`));
+      out().report(created, () => {
+        console.log(`${style.green('created')} workflow ${style.bold(created.id)}`);
+        console.log(style.dim(`  add an orchestrator:  pomni workflow agent add ${created.id} "Planner" --role orchestrator`));
+      });
     });
 
   workflow
@@ -54,21 +59,23 @@ export function registerWorkflowCommands(
     .action(async () => {
       const container = await open();
       const workflows = await container.workflows.list();
-      if (workflows.length === 0) {
-        console.log(style.dim("none yet — create one with 'pomni workflow create <name>'"));
-        return;
-      }
-      console.log(
-        table(
-          workflows.map((item) => [
-            style.bold(item.id),
-            item.name,
-            `${item.agents.length} agent${item.agents.length === 1 ? '' : 's'}`,
-            item.runnable ? style.green('ready') : style.yellow(`${item.problems.length} problem(s)`),
-          ]),
-          ['ID', 'NAME', 'AGENTS', 'STATUS'],
-        ),
-      );
+      out().report(workflows, () => {
+        if (workflows.length === 0) {
+          console.log(style.dim("none yet — create one with 'pomni workflow create <name>'"));
+          return;
+        }
+        console.log(
+          table(
+            workflows.map((item) => [
+              style.bold(item.id),
+              item.name,
+              `${item.agents.length} agent${item.agents.length === 1 ? '' : 's'}`,
+              item.runnable ? style.green('ready') : style.yellow(`${item.problems.length} problem(s)`),
+            ]),
+            ['ID', 'NAME', 'AGENTS', 'STATUS'],
+          ),
+        );
+      });
     });
 
   workflow
@@ -78,36 +85,38 @@ export function registerWorkflowCommands(
       const container = await open();
       const found = await container.workflows.get(id);
 
-      console.log(`${style.bold(found.name)}  ${style.dim(`(${found.id})`)}`);
-      if (found.description) console.log(found.description);
-      if (found.suits.length > 0) console.log(style.dim(`suits: ${found.suits.join(', ')}`));
-      console.log();
-
-      if (found.agents.length === 0) {
-        console.log(style.dim('no agents yet'));
-      } else {
-        console.log(
-          table(
-            found.agents.map((agent) => [
-              agent.id === found.entry ? style.cyan('▸') : ' ',
-              style.bold(agent.id),
-              agent.role === 'orchestrator' ? style.cyan('orchestrator') : 'agent',
-              STRUGGLE[agent.struggle].label,
-              agent.provider ?? style.dim('(run)'),
-              agent.prompt ? style.green('prompt ✓') : style.red('no prompt'),
-              agent.name,
-            ]),
-            ['', 'ID', 'ROLE', 'STRUGGLE', 'PROVIDER', 'PROMPT', 'NAME'],
-          ),
-        );
-      }
-
-      if (found.problems.length > 0) {
+      out().report(found, () => {
+        console.log(`${style.bold(found.name)}  ${style.dim(`(${found.id})`)}`);
+        if (found.description) console.log(found.description);
+        if (found.suits.length > 0) console.log(style.dim(`suits: ${found.suits.join(', ')}`));
         console.log();
-        for (const problem of found.problems) {
-          console.log(`${style.yellow('!')} ${problem.message}`);
+
+        if (found.agents.length === 0) {
+          console.log(style.dim('no agents yet'));
+        } else {
+          console.log(
+            table(
+              found.agents.map((agent) => [
+                agent.id === found.entry ? style.cyan('▸') : ' ',
+                style.bold(agent.id),
+                agent.role === 'orchestrator' ? style.cyan('orchestrator') : 'agent',
+                STRUGGLE[agent.struggle].label,
+                agent.provider ?? style.dim('(run)'),
+                agent.prompt ? style.green('prompt ✓') : style.red('no prompt'),
+                agent.name,
+              ]),
+              ['', 'ID', 'ROLE', 'STRUGGLE', 'PROVIDER', 'PROMPT', 'NAME'],
+            ),
+          );
         }
-      }
+
+        if (found.problems.length > 0) {
+          console.log();
+          for (const problem of found.problems) {
+            console.log(`${style.yellow('!')} ${problem.message}`);
+          }
+        }
+      });
     });
 
   workflow
@@ -127,25 +136,27 @@ export function registerWorkflowCommands(
         Buffer.byteLength(HANDOVER_PROTOCOL, 'utf8') + Buffer.byteLength(VERDICT_PROTOCOL, 'utf8');
 
       const rows = lintReport(found.agents, scaffolding, budget);
-      console.log(
-        table(
-          rows.map((row) => [
-            style.bold(row.id),
-            thousands(row.prompt),
-            thousands(row.scaffolding),
-            thousands(row.total),
-            row.flags.length > 0 ? style.yellow(row.flags.join(', ')) : style.dim('—'),
-          ]),
-          ['AGENT', 'PROMPT', 'FRAME', 'PER TURN', 'FLAGS'],
-        ),
-      );
-      console.log(
-        style.dim(
-          `budget ${thousands(budget)} bytes a turn (policy.promptBudget on '${projectId}').` +
-            ' An orchestrator also carries the roster, and an agent that touches files carries' +
-            ' the repo list — neither is counted above, because both depend on the run.',
-        ),
-      );
+      out().report(rows, () => {
+        console.log(
+          table(
+            rows.map((row) => [
+              style.bold(row.id),
+              thousands(row.prompt),
+              thousands(row.scaffolding),
+              thousands(row.total),
+              row.flags.length > 0 ? style.yellow(row.flags.join(', ')) : style.dim('—'),
+            ]),
+            ['AGENT', 'PROMPT', 'FRAME', 'PER TURN', 'FLAGS'],
+          ),
+        );
+        console.log(
+          style.dim(
+            `budget ${thousands(budget)} bytes a turn (policy.promptBudget on '${projectId}').` +
+              ' An orchestrator also carries the roster, and an agent that touches files carries' +
+              ' the repo list — neither is counted above, because both depend on the run.',
+          ),
+        );
+      });
     });
 
   workflow
@@ -156,65 +167,72 @@ export function registerWorkflowCommands(
     .action(async (id: string | undefined, flags: { project?: string; all?: boolean }) => {
       const container = await open();
       const projectId = flags.project ?? (await defaultProject());
-      const { signals, findings } = await container.pipelines.signals(projectId, id);
+      const result = await container.pipelines.signals(projectId, id);
+      const { signals, findings } = result;
 
-      if (signals.length === 0) {
-        console.log(style.dim('nothing to report — no runs, or nothing went wrong in them'));
-        return;
-      }
+      const workflows =
+        findings.length > 0 ? (id ? [await container.workflows.get(id)] : await container.workflows.list()) : [];
+      const changedAt = new Map(
+        workflows.flatMap((found) => found.agents.map((agent) => [agent.id, agent.updatedAt])),
+      );
+      const runs =
+        findings.length > 0
+          ? (await container.pipelines.list({ projectId, limit: 200 })).map((run) => ({
+              id: run.id,
+              startedAt: run.startedAt,
+            }))
+          : [];
 
-      if (findings.length === 0) {
-        console.log(style.dim(`${signals.length} signals, none repeated across three runs yet`));
-      } else {
-        const workflows = id ? [await container.workflows.get(id)] : await container.workflows.list();
-        const changedAt = new Map(
-          workflows.flatMap((found) => found.agents.map((agent) => [agent.id, agent.updatedAt])),
-        );
-        const runs = (await container.pipelines.list({ projectId, limit: 200 })).map((run) => ({
-          id: run.id,
-          startedAt: run.startedAt,
-        }));
-
-        console.log(style.bold('what keeps happening'));
-        for (const finding of findings) {
-          // Measured against when the agent last changed. Not proof either way — the runs
-          // since may simply not have exercised it — so the count of those runs is shown
-          // beside the figure rather than a verdict in place of it.
-          const edited = finding.agentId ? changedAt.get(finding.agentId) : undefined;
-          const split = edited
-            ? since(signals.filter((s) => s.kind === finding.kind && s.agentId === finding.agentId), runs, edited)
-            : null;
-
-          console.log(
-            `   ${style.yellow(finding.kind.padEnd(13))} ${(finding.agentName ?? 'the run').padEnd(18)}` +
-              ` ${finding.runIds.length} runs` +
-              (split && split.runsAfter > 0
-                ? style.dim(
-                    `  · ${split.after} of them since this agent last changed` +
-                      ` (${split.runsAfter} runs ago)`,
-                  )
-                : split
-                  ? style.dim('  · no runs since this agent last changed')
-                  : ''),
-          );
-          // The wording is the evidence, so one example is shown whole rather than summarised.
-          console.log(`      ${style.dim(truncate(finding.details[0] ?? '', 96))}`);
+      out().report(result, () => {
+        if (signals.length === 0) {
+          console.log(style.dim('nothing to report — no runs, or nothing went wrong in them'));
+          return;
         }
-        console.log();
-      }
 
-      if (!flags.all) {
-        console.log(style.dim(`${signals.length} signals in all — 'pomni workflow signals --all' lists them`));
-        return;
-      }
+        if (findings.length === 0) {
+          console.log(style.dim(`${signals.length} signals, none repeated across three runs yet`));
+        } else {
+          console.log(style.bold('what keeps happening'));
+          for (const finding of findings) {
+            // Measured against when the agent last changed. Not proof either way — the runs
+            // since may simply not have exercised it — so the count of those runs is shown
+            // beside the figure rather than a verdict in place of it.
+            const edited = finding.agentId ? changedAt.get(finding.agentId) : undefined;
+            const split = edited
+              ? since(signals.filter((s) => s.kind === finding.kind && s.agentId === finding.agentId), runs, edited)
+              : null;
 
-      console.log(style.bold('every signal'));
-      for (const signal of signals) {
-        console.log(
-          `   ${style.dim(signal.runId.slice(-8))} ${signal.kind.padEnd(13)}` +
-            ` ${(signal.agentName ?? '—').padEnd(18)} ${truncate(signal.detail, 70)}`,
-        );
-      }
+            console.log(
+              `   ${style.yellow(finding.kind.padEnd(13))} ${(finding.agentName ?? 'the run').padEnd(18)}` +
+                ` ${finding.runIds.length} runs` +
+                (split && split.runsAfter > 0
+                  ? style.dim(
+                      `  · ${split.after} of them since this agent last changed` +
+                        ` (${split.runsAfter} runs ago)`,
+                    )
+                  : split
+                    ? style.dim('  · no runs since this agent last changed')
+                    : ''),
+            );
+            // The wording is the evidence, so one example is shown whole rather than summarised.
+            console.log(`      ${style.dim(truncate(finding.details[0] ?? '', 96))}`);
+          }
+          console.log();
+        }
+
+        if (!flags.all) {
+          console.log(style.dim(`${signals.length} signals in all — 'pomni workflow signals --all' lists them`));
+          return;
+        }
+
+        console.log(style.bold('every signal'));
+        for (const signal of signals) {
+          console.log(
+            `   ${style.dim(signal.runId.slice(-8))} ${signal.kind.padEnd(13)}` +
+              ` ${(signal.agentName ?? '—').padEnd(18)} ${truncate(signal.detail, 70)}`,
+          );
+        }
+      });
     });
 
   workflow
@@ -237,25 +255,22 @@ export function registerWorkflowCommands(
           (finding) => finding.agentId === agentId && (!flags.kind || finding.kind === flags.kind),
         );
         if (forAgent.length === 0) {
-          console.log(style.dim(`nothing keeps happening to '${agentId}' — nothing to answer`));
+          out().report({ status: 'nothing-to-answer', findings: forAgent }, () => {
+            console.log(style.dim(`nothing keeps happening to '${agentId}' — nothing to answer`));
+          });
           return;
         }
         if (forAgent.length > 1 && !flags.kind) {
-          console.log(style.yellow(`'${agentId}' has more than one — name it with --kind:`));
-          for (const finding of forAgent) {
-            console.log(`   ${finding.kind.padEnd(13)} ${finding.runIds.length} runs`);
-          }
+          out().report({ status: 'ambiguous', findings: forAgent }, () => {
+            console.log(style.yellow(`'${agentId}' has more than one — name it with --kind:`));
+            for (const finding of forAgent) {
+              console.log(`   ${finding.kind.padEnd(13)} ${finding.runIds.length} runs`);
+            }
+          });
           return;
         }
 
         const finding = forAgent[0] as (typeof forAgent)[number];
-        console.log(style.bold(`${finding.kind} · ${finding.runIds.length} runs`));
-        for (const detail of finding.details.slice(0, 3)) {
-          console.log(`   ${style.dim(truncate(detail, 96))}`);
-        }
-        console.log();
-
-        console.log(style.dim('asking for an amendment…'));
         const { current, proposed } = await container.workflows.proposeAmendment(
           workflowId,
           agentId,
@@ -263,31 +278,57 @@ export function registerWorkflowCommands(
         );
 
         if (proposed.trim() === current.trim()) {
-          // The model was told to say so rather than invent wording for a permissions bug.
-          console.log(style.yellow('the model returned the spec unchanged — this is not a wording problem'));
+          out().report({ status: 'unchanged', finding, current, proposed }, () => {
+            console.log(style.bold(`${finding.kind} · ${finding.runIds.length} runs`));
+            for (const detail of finding.details.slice(0, 3)) {
+              console.log(`   ${style.dim(truncate(detail, 96))}`);
+            }
+            console.log();
+            console.log(style.dim('asking for an amendment…'));
+            // The model was told to say so rather than invent wording for a permissions bug.
+            console.log(style.yellow('the model returned the spec unchanged — this is not a wording problem'));
+          });
           return;
         }
 
-        console.log(style.bold('proposed spec'));
-        console.log(proposed);
-        console.log();
-
         if (!flags.apply) {
-          console.log(
-            style.dim(`nothing was written. Apply it with: pomni workflow amend ${workflowId} ${agentId} --apply`),
-          );
+          out().report({ status: 'proposed', finding, current, proposed }, () => {
+            console.log(style.bold(`${finding.kind} · ${finding.runIds.length} runs`));
+            for (const detail of finding.details.slice(0, 3)) {
+              console.log(`   ${style.dim(truncate(detail, 96))}`);
+            }
+            console.log();
+            console.log(style.dim('asking for an amendment…'));
+            console.log(style.bold('proposed spec'));
+            console.log(proposed);
+            console.log();
+            console.log(
+              style.dim(`nothing was written. Apply it with: pomni workflow amend ${workflowId} ${agentId} --apply`),
+            );
+          });
           return;
         }
 
         await container.workflows.updateAgent(workflowId, agentId, { spec: proposed });
-        console.log(style.dim('regenerating the prompt from it…'));
-        await container.workflows.generatePrompt(workflowId, agentId);
-        console.log(`${style.green('amended')} ${agentId} — the prompt is derived from the new spec`);
-        console.log(
-          style.dim(
-            "the finding stays open: 'pomni workflow signals' will show whether it recurs in the runs after this",
-          ),
-        );
+        const updated = await container.workflows.generatePrompt(workflowId, agentId);
+        out().report({ status: 'applied', finding, current, proposed, agent: updated }, () => {
+          console.log(style.bold(`${finding.kind} · ${finding.runIds.length} runs`));
+          for (const detail of finding.details.slice(0, 3)) {
+            console.log(`   ${style.dim(truncate(detail, 96))}`);
+          }
+          console.log();
+          console.log(style.dim('asking for an amendment…'));
+          console.log(style.bold('proposed spec'));
+          console.log(proposed);
+          console.log();
+          console.log(style.dim('regenerating the prompt from it…'));
+          console.log(`${style.green('amended')} ${agentId} — the prompt is derived from the new spec`);
+          console.log(
+            style.dim(
+              "the finding stays open: 'pomni workflow signals' will show whether it recurs in the runs after this",
+            ),
+          );
+        });
       },
     );
 
@@ -298,7 +339,9 @@ export function registerWorkflowCommands(
     .action(async (id: string) => {
       const container = await open();
       await container.workflows.remove(id);
-      console.log(`${style.green('removed')} workflow ${id}`);
+      out().report({ id, removed: true }, () => {
+        console.log(`${style.green('removed')} workflow ${id}`);
+      });
     });
 
   // -- agents ---------------------------------------------------------------
@@ -338,20 +381,25 @@ export function registerWorkflowCommands(
           outputs: flags.outputs,
         });
 
-        console.log(
-          `${style.green('added')} ${style.bold(created.id)}  ${created.role}  ${STRUGGLE[created.struggle].label}`,
-        );
+        const withPrompt = flags.generate
+          ? await container.workflows.generatePrompt(workflowId, created.id)
+          : null;
 
-        if (flags.generate) {
-          console.log(style.dim('generating the prompt…'));
-          const withPrompt = await container.workflows.generatePrompt(workflowId, created.id);
-          console.log();
-          console.log(withPrompt.prompt);
-        } else if (spec) {
+        out().report(withPrompt ?? created, () => {
           console.log(
-            style.dim(`  generate its prompt:  pomni workflow agent prompt ${workflowId} ${created.id}`),
+            `${style.green('added')} ${style.bold(created.id)}  ${created.role}  ${STRUGGLE[created.struggle].label}`,
           );
-        }
+
+          if (withPrompt) {
+            console.log(style.dim('generating the prompt…'));
+            console.log();
+            console.log(withPrompt.prompt);
+          } else if (spec) {
+            console.log(
+              style.dim(`  generate its prompt:  pomni workflow agent prompt ${workflowId} ${created.id}`),
+            );
+          }
+        });
       },
     );
 
@@ -361,13 +409,14 @@ export function registerWorkflowCommands(
     .action(async (workflowId: string, agentId: string) => {
       const container = await open();
 
-      const check = await assertProvider(container);
-      if (!check) return;
-
-      console.log(style.dim(`generating via ${check}…`));
+      const providerLabel = await assertProvider(container);
       const updated = await container.workflows.generatePrompt(workflowId, agentId);
-      console.log();
-      console.log(updated.prompt);
+
+      out().report(updated, () => {
+        console.log(style.dim(`generating via ${providerLabel}…`));
+        console.log();
+        console.log(updated.prompt);
+      });
     });
 
   agent
@@ -432,9 +481,7 @@ export function registerWorkflowCommands(
           const providerId = flags.provider.trim();
           const provider = await container.providers.get(providerId).catch(() => null);
           if (!provider) {
-            console.error(style.red(`no provider '${providerId}' — see \`pomni provider list\``));
-            process.exitCode = 1;
-            return;
+            throw new ValidationError(`no provider '${providerId}' — see \`pomni provider list\``);
           }
         }
 
@@ -446,9 +493,7 @@ export function registerWorkflowCommands(
           for (const id of ids) {
             const found = registry.find((entry) => entry.id === id);
             if (!found) {
-              console.error(style.red(`no tool '${id}' — see \`pomni tool list\``));
-              process.exitCode = 1;
-              return;
+              throw new ValidationError(`no tool '${id}' — see \`pomni tool list\``);
             }
             granted[found.kind].push(id);
             if (found.kind === 'cli') needsRun = true;
@@ -475,15 +520,17 @@ export function registerWorkflowCommands(
           },
         });
 
-        console.log(`${style.green('updated')} ${updated.id}`);
-        if (updated.tools.mcp.length > 0 || updated.tools.cli.length > 0) {
-          console.log(
-            style.dim(`  tools: ${[...updated.tools.mcp, ...updated.tools.cli].join(', ')}`),
-          );
-        }
-        if (needsRun && flags.run === undefined) {
-          console.log(style.dim('  enabled `run` — a CLI tool is useless without it'));
-        }
+        out().report(updated, () => {
+          console.log(`${style.green('updated')} ${updated.id}`);
+          if (updated.tools.mcp.length > 0 || updated.tools.cli.length > 0) {
+            console.log(
+              style.dim(`  tools: ${[...updated.tools.mcp, ...updated.tools.cli].join(', ')}`),
+            );
+          }
+          if (needsRun && flags.run === undefined) {
+            console.log(style.dim('  enabled `run` — a CLI tool is useless without it'));
+          }
+        });
       },
     );
 
@@ -495,28 +542,28 @@ export function registerWorkflowCommands(
       const found = await container.workflows.get(workflowId);
       const target = found.agents.find((item) => item.id === agentId);
       if (!target) {
-        console.error(style.red(`no agent '${agentId}' in '${workflowId}'`));
-        process.exitCode = 1;
-        return;
+        throw new NotFoundError('agent', agentId);
       }
 
-      console.log(`${style.bold(target.name)}  ${style.dim(`(${target.id})`)}`);
-      console.log(`role     ${target.role}`);
-      console.log(`effort   ${STRUGGLE[target.struggle].label}  ${style.dim(STRUGGLE[target.struggle].note)}`);
-      if (target.outputs) console.log(`outputs  ${target.outputs}`);
-      if (target.role === 'orchestrator') {
-        const roster = rosterFor(found, target);
-        console.log(`roster   ${roster.map((item) => item.id).join(', ') || style.dim('(none)')}`);
-      }
+      out().report(target, () => {
+        console.log(`${style.bold(target.name)}  ${style.dim(`(${target.id})`)}`);
+        console.log(`role     ${target.role}`);
+        console.log(`effort   ${STRUGGLE[target.struggle].label}  ${style.dim(STRUGGLE[target.struggle].note)}`);
+        if (target.outputs) console.log(`outputs  ${target.outputs}`);
+        if (target.role === 'orchestrator') {
+          const roster = rosterFor(found, target);
+          console.log(`roster   ${roster.map((item) => item.id).join(', ') || style.dim('(none)')}`);
+        }
 
-      if (target.spec) {
+        if (target.spec) {
+          console.log();
+          console.log(style.dim('— spec —'));
+          console.log(target.spec.trim());
+        }
         console.log();
-        console.log(style.dim('— spec —'));
-        console.log(target.spec.trim());
-      }
-      console.log();
-      console.log(style.dim('— prompt —'));
-      console.log(target.prompt.trim() || style.dim('(not generated yet)'));
+        console.log(style.dim('— prompt —'));
+        console.log(target.prompt.trim() || style.dim('(not generated yet)'));
+      });
     });
 
   agent
@@ -526,7 +573,9 @@ export function registerWorkflowCommands(
     .action(async (workflowId: string, agentId: string) => {
       const container = await open();
       await container.workflows.removeAgent(workflowId, agentId);
-      console.log(`${style.green('removed')} ${agentId}`);
+      out().report({ id: agentId, removed: true }, () => {
+        console.log(`${style.green('removed')} ${agentId}`);
+      });
     });
 
   workflow
@@ -536,8 +585,7 @@ export function registerWorkflowCommands(
     .action(async (id: string, flags: { all?: boolean }) => {
       const container = await open();
 
-      const check = await assertProvider(container);
-      if (!check) return;
+      await assertProvider(container);
 
       const found = await container.workflows.get(id);
       const targets = found.agents.filter(
@@ -545,34 +593,40 @@ export function registerWorkflowCommands(
       );
 
       if (targets.length === 0) {
-        console.log(style.dim('nothing to generate — every agent with a spec already has a prompt'));
+        out().report({ generated: [], after: found }, () => {
+          console.log(style.dim('nothing to generate — every agent with a spec already has a prompt'));
+        });
         return;
       }
 
-      console.log(style.dim(`generating ${targets.length} prompt(s)…`));
-      let failed = 0;
+      out().warn(style.dim(`generating ${targets.length} prompt(s)…`));
 
       // Sequential on purpose: a burst of parallel calls is the fastest way to get rate
       // limited, and this runs once per workflow.
+      const results: Array<{ agentId: string; ok: boolean; promptLength?: number; error?: string }> = [];
       for (const agent of targets) {
-        process.stdout.write(`  ${agent.id.padEnd(24)} `);
         try {
           const updated = await container.workflows.generatePrompt(id, agent.id);
-          console.log(style.green(`${updated.prompt.length} chars`));
+          results.push({ agentId: agent.id, ok: true, promptLength: updated.prompt.length });
+          out().warn(`  ${agent.id.padEnd(24)} ${style.green(`${updated.prompt.length} chars`)}`);
         } catch (error) {
-          failed += 1;
-          console.log(style.red(error instanceof Error ? error.message : String(error)));
+          const message = error instanceof Error ? error.message : String(error);
+          results.push({ agentId: agent.id, ok: false, error: message });
+          out().warn(`  ${agent.id.padEnd(24)} ${style.red(message)}`);
         }
       }
 
-      console.log();
+      const failed = results.filter((result) => !result.ok).length;
       const after = await container.workflows.get(id);
-      console.log(
-        after.runnable
-          ? style.green(`${found.name} is ready to run`)
-          : style.yellow(`${after.problems.length} thing(s) still to fix — pomni workflow show ${id}`),
-      );
-      if (failed > 0) process.exitCode = 1;
+
+      out().report({ generated: results, after }, () => {
+        console.log(
+          after.runnable
+            ? style.green(`${found.name} is ready to run`)
+            : style.yellow(`${after.problems.length} thing(s) still to fix — pomni workflow show ${id}`),
+        );
+      });
+      if (failed > 0) out().fail(1);
     });
 
   // -- portability ----------------------------------------------------------
@@ -586,7 +640,9 @@ export function registerWorkflowCommands(
       const content = await container.workflows.export(id);
       const path = flags.out ?? `${id}.pomni.json`;
       await writeFile(path, content, 'utf8');
-      console.log(`${style.green('exported')} ${path}`);
+      out().report({ id, path }, () => {
+        console.log(`${style.green('exported')} ${path}`);
+      });
     });
 
   workflow
@@ -598,7 +654,9 @@ export function registerWorkflowCommands(
       const imported = await container.workflows.import(await readFile(path, 'utf8'), {
         id: flags.id,
       });
-      console.log(`${style.green('imported')} ${style.bold(imported.id)}  ${imported.name}`);
+      out().report(imported, () => {
+        console.log(`${style.green('imported')} ${style.bold(imported.id)}  ${imported.name}`);
+      });
     });
 
   workflow
@@ -609,8 +667,10 @@ export function registerWorkflowCommands(
       const container = await open();
       const projectId = flags.project ?? (await defaultProject());
       const attached = await container.workflows.attach(projectId, id);
-      console.log(`${style.green('attached')} ${id} → ${projectId}`);
-      console.log(style.dim(`  ${projectId} now has: ${attached.join(', ')}`));
+      out().report({ projectId, workflowId: id, attached }, () => {
+        console.log(`${style.green('attached')} ${id} → ${projectId}`);
+        console.log(style.dim(`  ${projectId} now has: ${attached.join(', ')}`));
+      });
     });
 
   workflow
@@ -621,37 +681,33 @@ export function registerWorkflowCommands(
       const container = await open();
       const projectId = flags.project ?? (await defaultProject());
       await container.workflows.detach(projectId, id);
-      console.log(`${style.green('detached')} ${id} from ${projectId}`);
+      out().report({ projectId, workflowId: id, detached: true }, () => {
+        console.log(`${style.green('detached')} ${id} from ${projectId}`);
+      });
     });
 }
 
 /**
- * Confirms something can actually run a model, and says which. Returns null (having already
- * printed why) when nothing can, so callers can bail without duplicating the message.
+ * Confirms something can actually run a model, and says which. Throws `ValidationError` when
+ * nothing can; a probe error from the provider itself is rethrown as-is.
  */
-async function assertProvider(container: PomniContainer): Promise<string | null> {
-  try {
-    const provider = await container.providers.resolve();
-    const { port } = await container.providers.portFor('high', { provider: provider.id });
+async function assertProvider(container: PomniContainer): Promise<string> {
+  const provider = await container.providers.resolve();
+  const { port } = await container.providers.portFor('high', { provider: provider.id });
 
-    if (!(await port.isConfigured())) {
-      console.error(style.red(`'${provider.label}' is not usable — ${await port.describeAuth()}`));
-      console.error(style.dim('  see what is available:  pomni provider list'));
-      process.exitCode = 1;
-      return null;
-    }
-    return provider.label;
-  } catch (error) {
-    console.error(style.red(error instanceof Error ? error.message : String(error)));
-    process.exitCode = 1;
-    return null;
+  if (!(await port.isConfigured())) {
+    throw new ValidationError(
+      `'${provider.label}' is not usable — ${await port.describeAuth()} — see what is available: pomni provider list`,
+    );
   }
+  return provider.label;
 }
 
 export function registerTaskCommands(
   program: Command,
   open: () => Promise<PomniContainer>,
   defaultProject: () => Promise<string>,
+  out: () => Output,
 ): void {
   const task = program.command('task').description('run a task through an agent workflow');
 
@@ -712,46 +768,52 @@ ${item.body}`;
           sync: flags.sync,
         });
 
-        console.log(`${style.cyan('run')} ${style.bold(run.id)}  ${run.workflowName}`);
-        if (run.context.length > 0) {
-          console.log(
-            style.dim(`  context:   ${run.context.map((file) => file.name).join(', ')}`),
-          );
-        }
-        printBases(run);
-        console.log(style.dim(`  watch it:  http://localhost:7777/p/${projectId}/console/${run.id}`));
-        console.log();
+        out().report(run, () => {
+          console.log(`${style.cyan('run')} ${style.bold(run.id)}  ${run.workflowName}`);
+          if (run.context.length > 0) {
+            console.log(
+              style.dim(`  context:   ${run.context.map((file) => file.name).join(', ')}`),
+            );
+          }
+          printBases(run);
+          console.log(style.dim(`  watch it:  http://localhost:7777/p/${projectId}/console/${run.id}`));
+          console.log();
+        });
 
         // Live progress, so a terminal run is as watchable as the console.
         container.events.subscribe((event) => {
-          if (event.type === 'pipeline.step.started') {
-            const indent = '  '.repeat(event.depth);
-            console.log(
-              `${indent}${style.cyan('▸')} ${style.bold(event.agentName)} ${style.dim(`${event.providerId} · ${event.model}`)}`,
-            );
-          }
-          if (event.type === 'pipeline.step.finished') {
-            console.log(
-              `  ${event.status === 'done' ? style.green('✓') : style.red('✗')} ${style.dim(event.summary)}`,
-            );
-          }
+          out().report(event, () => {
+            if (event.type === 'pipeline.step.started') {
+              const indent = '  '.repeat(event.depth);
+              console.log(
+                `${indent}${style.cyan('▸')} ${style.bold(event.agentName)} ${style.dim(`${event.providerId} · ${event.model}`)}`,
+              );
+            }
+            if (event.type === 'pipeline.step.finished') {
+              console.log(
+                `  ${event.status === 'done' ? style.green('✓') : style.red('✗')} ${style.dim(event.summary)}`,
+              );
+            }
+          });
         });
 
         const finished = await completion;
-        console.log();
-        console.log(
-          finished.status === 'passed'
-            ? style.green(`finished in ${Math.round((finished.durationMs ?? 0) / 1000)}s`)
-            : style.red(`${finished.status}: ${finished.error ?? ''}`),
-        );
-        if (finished.gateStatus !== 'skipped') {
-          console.log(`gate ${finished.gateStatus}: ${finished.gateSummary ?? ''}`);
-        }
-        if (finished.result) {
+        out().report(finished, () => {
           console.log();
-          console.log(finished.result);
-        }
-        if (finished.status !== 'passed') process.exitCode = 1;
+          console.log(
+            finished.status === 'passed'
+              ? style.green(`finished in ${Math.round((finished.durationMs ?? 0) / 1000)}s`)
+              : style.red(`${finished.status}: ${finished.error ?? ''}`),
+          );
+          if (finished.gateStatus !== 'skipped') {
+            console.log(`gate ${finished.gateStatus}: ${finished.gateSummary ?? ''}`);
+          }
+          if (finished.result) {
+            console.log();
+            console.log(finished.result);
+          }
+        });
+        if (finished.status !== 'passed') out().fail(1);
       },
     );
 
@@ -767,26 +829,30 @@ ${item.body}`;
         note.join(' '),
       );
 
-      console.log(`${style.cyan('resumed')} ${style.bold(run.id)}  ${run.workflowName}`);
-      // Offered, not spent: the ledger answers a delegation only when the orchestrator asks
-      // for it in the same words, so claiming these were reused would be a claim we cannot
-      // make until the run is over.
-      console.log(
-        style.dim(
-          `  ${reused ?? 0} step${reused === 1 ? '' : 's'} can be answered from the last attempt`,
-        ),
-      );
-      console.log(
-        style.dim(`  watch it:  http://localhost:7777/p/${run.projectId}/console/${run.id}`),
-      );
+      out().report(run, () => {
+        console.log(`${style.cyan('resumed')} ${style.bold(run.id)}  ${run.workflowName}`);
+        // Offered, not spent: the ledger answers a delegation only when the orchestrator asks
+        // for it in the same words, so claiming these were reused would be a claim we cannot
+        // make until the run is over.
+        console.log(
+          style.dim(
+            `  ${reused ?? 0} step${reused === 1 ? '' : 's'} can be answered from the last attempt`,
+          ),
+        );
+        console.log(
+          style.dim(`  watch it:  http://localhost:7777/p/${run.projectId}/console/${run.id}`),
+        );
+      });
 
       const finished = await completion;
-      console.log(
-        finished.status === 'passed'
-          ? style.green(`finished ${finished.outcome}`)
-          : style.red(`${finished.status}: ${finished.error ?? ''}`),
-      );
-      if (finished.status !== 'passed') process.exitCode = 1;
+      out().report(finished, () => {
+        console.log(
+          finished.status === 'passed'
+            ? style.green(`finished ${finished.outcome}`)
+            : style.red(`${finished.status}: ${finished.error ?? ''}`),
+        );
+      });
+      if (finished.status !== 'passed') out().fail(1);
     });
 
   task
@@ -798,19 +864,23 @@ ${item.body}`;
       const found = await resolveRun(container, id, flags.project);
       const { run, completion } = await container.pipelines.rerun(found.id);
 
-      console.log(`${style.cyan('rerun')} ${style.bold(run.id)}  ${run.workflowName}`);
-      console.log(style.dim(`  retrying ${run.rerunOf}`));
-      console.log(
-        style.dim(`  watch it:  http://localhost:7777/p/${run.projectId}/console/${run.id}`),
-      );
+      out().report(run, () => {
+        console.log(`${style.cyan('rerun')} ${style.bold(run.id)}  ${run.workflowName}`);
+        console.log(style.dim(`  retrying ${run.rerunOf}`));
+        console.log(
+          style.dim(`  watch it:  http://localhost:7777/p/${run.projectId}/console/${run.id}`),
+        );
+      });
 
       const finished = await completion;
-      console.log(
-        finished.status === 'passed'
-          ? style.green(`finished ${finished.outcome}`)
-          : style.red(`${finished.status}: ${finished.error ?? ''}`),
-      );
-      if (finished.status !== 'passed') process.exitCode = 1;
+      out().report(finished, () => {
+        console.log(
+          finished.status === 'passed'
+            ? style.green(`finished ${finished.outcome}`)
+            : style.red(`${finished.status}: ${finished.error ?? ''}`),
+        );
+      });
+      if (finished.status !== 'passed') out().fail(1);
     });
 
   task
@@ -829,93 +899,97 @@ ${item.body}`;
       ).reverse();
 
       if (runs.length === 0) {
-        console.log(style.dim('nothing has run yet'));
+        out().report([], () => {
+          console.log(style.dim('nothing has run yet'));
+        });
         return;
       }
 
       const detailed = await Promise.all(runs.map((run) => container.pipelines.get(run.id)));
 
-      if (flags.byAgent) {
-        const byAgent = new Map<
-          string,
-          {
-            tokens: number;
-            cost: number;
-            steps: number;
-            turns: number;
-            unmeasuredSteps: number;
-            cacheReadTokens: number;
-            freshInputTokens: number;
-          }
-        >();
+      out().report(detailed, () => {
+        if (flags.byAgent) {
+          const byAgent = new Map<
+            string,
+            {
+              tokens: number;
+              cost: number;
+              steps: number;
+              turns: number;
+              unmeasuredSteps: number;
+              cacheReadTokens: number;
+              freshInputTokens: number;
+            }
+          >();
 
-        for (const run of detailed) {
-          for (const step of run.steps) {
-            const at = byAgent.get(step.agentName) ?? {
-              tokens: 0,
-              cost: 0,
-              steps: 0,
-              turns: 0,
-              unmeasuredSteps: 0,
-              cacheReadTokens: 0,
-              freshInputTokens: 0,
-            };
-            at.tokens += step.inputTokens + step.outputTokens;
-            at.cost += step.costUsd ?? 0;
-            at.steps += 1;
-            at.turns += step.turns;
-            if (step.turns === 0) at.unmeasuredSteps += 1;
-            at.cacheReadTokens += step.cacheReadTokens;
-            at.freshInputTokens += step.freshInputTokens;
-            byAgent.set(step.agentName, at);
+          for (const run of detailed) {
+            for (const step of run.steps) {
+              const at = byAgent.get(step.agentName) ?? {
+                tokens: 0,
+                cost: 0,
+                steps: 0,
+                turns: 0,
+                unmeasuredSteps: 0,
+                cacheReadTokens: 0,
+                freshInputTokens: 0,
+              };
+              at.tokens += step.inputTokens + step.outputTokens;
+              at.cost += step.costUsd ?? 0;
+              at.steps += 1;
+              at.turns += step.turns;
+              if (step.turns === 0) at.unmeasuredSteps += 1;
+              at.cacheReadTokens += step.cacheReadTokens;
+              at.freshInputTokens += step.freshInputTokens;
+              byAgent.set(step.agentName, at);
+            }
           }
+
+          const rows = [...byAgent.entries()].sort((a, b) => b[1].tokens - a[1].tokens);
+          console.log(
+            table(
+              rows.map(([name, at]) => [
+                name,
+                String(at.steps),
+                turnsLabel(at.turns, at.unmeasuredSteps, at.steps),
+                thousands(at.tokens),
+                cacheShareLabel(at.cacheReadTokens, at.freshInputTokens),
+                at.cost ? `$${at.cost.toFixed(2)}` : style.dim('—'),
+              ]),
+              ['AGENT', 'STEPS', 'TURNS', 'TOKENS', 'CACHE', 'COST'],
+            ),
+          );
+          return;
         }
 
-        const rows = [...byAgent.entries()].sort((a, b) => b[1].tokens - a[1].tokens);
+        // A bar per run, scaled to the largest, so the shape of the spend is visible without
+        // reading the numbers. This is the question people actually ask: is it getting worse?
+        const totals = detailed.map((run) => ({
+          run,
+          tokens: run.steps.reduce((sum, step) => sum + step.inputTokens + step.outputTokens, 0),
+          turns: run.steps.reduce((sum, step) => sum + step.turns, 0),
+          unmeasuredSteps: run.steps.filter((step) => step.turns === 0).length,
+        }));
+        const peak = Math.max(...totals.map((entry) => entry.tokens), 1);
+
+        for (const { run, tokens, turns, unmeasuredSteps } of totals) {
+          const bar = '█'.repeat(Math.max(1, Math.round((tokens / peak) * 28)));
+          const cost = run.costUsd ? `$${run.costUsd.toFixed(2)}` : style.dim('—');
+          const runTurnsLabel = turnsLabel(turns, unmeasuredSteps, run.steps.length);
+          console.log(
+            `${style.dim(run.startedAt.slice(5, 16).replace('T', ' '))}  ${style.cyan(bar)} ` +
+              `${padVisible(thousands(tokens), 9)}  ${padVisible(runTurnsLabel, 9)}  ${padVisible(cost, 7)}  ` +
+              `${style.dim(run.steps.length + ' steps')}  ${truncate(run.task, 34)}`,
+          );
+        }
+
+        const tokens = totals.reduce((sum, entry) => sum + entry.tokens, 0);
+        const cost = detailed.reduce((sum, run) => sum + (run.costUsd ?? 0), 0);
+        console.log();
         console.log(
-          table(
-            rows.map(([name, at]) => [
-              name,
-              String(at.steps),
-              turnsLabel(at.turns, at.unmeasuredSteps, at.steps),
-              thousands(at.tokens),
-              cacheShareLabel(at.cacheReadTokens, at.freshInputTokens),
-              at.cost ? `$${at.cost.toFixed(2)}` : style.dim('—'),
-            ]),
-            ['AGENT', 'STEPS', 'TURNS', 'TOKENS', 'CACHE', 'COST'],
-          ),
+          `${style.bold(thousands(tokens))} tokens across ${totals.length} runs` +
+            (cost ? `, ${style.bold('$' + cost.toFixed(2))}` : ''),
         );
-        return;
-      }
-
-      // A bar per run, scaled to the largest, so the shape of the spend is visible without
-      // reading the numbers. This is the question people actually ask: is it getting worse?
-      const totals = detailed.map((run) => ({
-        run,
-        tokens: run.steps.reduce((sum, step) => sum + step.inputTokens + step.outputTokens, 0),
-        turns: run.steps.reduce((sum, step) => sum + step.turns, 0),
-        unmeasuredSteps: run.steps.filter((step) => step.turns === 0).length,
-      }));
-      const peak = Math.max(...totals.map((entry) => entry.tokens), 1);
-
-      for (const { run, tokens, turns, unmeasuredSteps } of totals) {
-        const bar = '█'.repeat(Math.max(1, Math.round((tokens / peak) * 28)));
-        const cost = run.costUsd ? `$${run.costUsd.toFixed(2)}` : style.dim('—');
-        const runTurnsLabel = turnsLabel(turns, unmeasuredSteps, run.steps.length);
-        console.log(
-          `${style.dim(run.startedAt.slice(5, 16).replace('T', ' '))}  ${style.cyan(bar)} ` +
-            `${padVisible(thousands(tokens), 9)}  ${padVisible(runTurnsLabel, 9)}  ${padVisible(cost, 7)}  ` +
-            `${style.dim(run.steps.length + ' steps')}  ${truncate(run.task, 34)}`,
-        );
-      }
-
-      const tokens = totals.reduce((sum, entry) => sum + entry.tokens, 0);
-      const cost = detailed.reduce((sum, run) => sum + (run.costUsd ?? 0), 0);
-      console.log();
-      console.log(
-        `${style.bold(thousands(tokens))} tokens across ${totals.length} runs` +
-          (cost ? `, ${style.bold('$' + cost.toFixed(2))}` : ''),
-      );
+      });
     });
 
   task
@@ -926,17 +1000,19 @@ ${item.body}`;
       const container = await open();
       const questions = await container.pipelines.openQuestions(flags.project);
 
-      if (questions.length === 0) {
-        console.log(style.dim('nothing is waiting on you'));
-        return;
-      }
+      out().report(questions, () => {
+        if (questions.length === 0) {
+          console.log(style.dim('nothing is waiting on you'));
+          return;
+        }
 
-      for (const question of questions) {
-        console.log(`${style.cyan(question.id.slice(-8))}  ${style.bold(question.agentName)}`);
-        console.log(`  ${question.question}`);
-        console.log(style.dim(`  answer it:  pomni task answer ${question.id} "…"`));
-        console.log();
-      }
+        for (const question of questions) {
+          console.log(`${style.cyan(question.id.slice(-8))}  ${style.bold(question.agentName)}`);
+          console.log(`  ${question.question}`);
+          console.log(style.dim(`  answer it:  pomni task answer ${question.id} "…"`));
+          console.log();
+        }
+      });
     });
 
   task
@@ -970,13 +1046,15 @@ ${item.body}`;
         text.join(' '),
         files,
       );
-      console.log(`${style.green('answered')} ${answered.id.slice(-8)}`);
-      if (answered.attachments.length > 0) {
-        console.log(
-          style.dim(`  attached: ${answered.attachments.map((file) => file.name).join(', ')}`),
-        );
-      }
-      console.log(style.dim('  the run picks it up within a second'));
+      out().report(answered, () => {
+        console.log(`${style.green('answered')} ${answered.id.slice(-8)}`);
+        if (answered.attachments.length > 0) {
+          console.log(
+            style.dim(`  attached: ${answered.attachments.map((file) => file.name).join(', ')}`),
+          );
+        }
+        console.log(style.dim('  the run picks it up within a second'));
+      });
     });
 
   task
@@ -1008,7 +1086,10 @@ ${item.body}`;
         const match = await resolveRun(container, id, flags.project);
 
         if (text.length === 0) {
-          printComments(await container.comments.list({ subject: 'run', subjectId: match.id }));
+          const comments = await container.comments.list({ subject: 'run', subjectId: match.id });
+          out().report(comments, () => {
+            printComments(comments);
+          });
           return;
         }
 
@@ -1022,7 +1103,9 @@ ${item.body}`;
           addressedTo: flags.to ?? null,
           resolvesCommentId: flags.resolves ?? null,
         });
-        printWritten(written);
+        out().report(written, () => {
+          printWritten(written);
+        });
       },
     );
 
@@ -1035,38 +1118,39 @@ ${item.body}`;
       const match = await resolveRun(container, id, flags.project);
 
       const detail = await container.pipelines.get(match.id);
-      console.log(`${style.bold(detail.id.slice(-8))}  ${detail.workflowName}  ${detail.status}`);
-      if (detail.itemId) console.log(style.dim(`item ${detail.itemId}`));
-      printBases(detail);
-      console.log();
+      const item = detail.itemId ? await container.pipelines.itemSpend(match.projectId, detail.itemId) : null;
 
-      console.log(
-        table(
-          detail.steps.map((step) => [
-            style.bold(step.agentName),
-            step.role === 'orchestrator' ? style.cyan('lead') : '',
-            thousands(step.inputTokens + step.outputTokens),
-            cacheShareLabel(step.cacheReadTokens, step.freshInputTokens),
-            step.promptBytes > 0 ? thousands(step.promptBytes) : style.dim('—'),
-            perTurn(step),
-            // Null and zero are different facts. A provider that reports no cost did not run
-            // for free, and printing $0.00 would say it did.
-            step.costUsd === null ? style.dim('not reported') : `$${step.costUsd.toFixed(2)}`,
-          ]),
-          ['AGENT', '', 'TOKENS', 'CACHE', 'PROMPT', 'PER TURN', 'COST'],
-        ),
-      );
+      out().report({ ...detail, itemSpend: item }, () => {
+        console.log(`${style.bold(detail.id.slice(-8))}  ${detail.workflowName}  ${detail.status}`);
+        if (detail.itemId) console.log(style.dim(`item ${detail.itemId}`));
+        printBases(detail);
+        console.log();
 
-      console.log();
-      const spent = detail.costUsd === null ? style.dim('not reported') : `$${detail.costUsd.toFixed(2)}`;
-      console.log(
-        `${thousands(detail.inputTokens + detail.outputTokens)} tokens · ${spent} · ${detail.steps.length} steps`,
-      );
-      console.log(carried(detail.steps));
+        console.log(
+          table(
+            detail.steps.map((step) => [
+              style.bold(step.agentName),
+              step.role === 'orchestrator' ? style.cyan('lead') : '',
+              thousands(step.inputTokens + step.outputTokens),
+              cacheShareLabel(step.cacheReadTokens, step.freshInputTokens),
+              step.promptBytes > 0 ? thousands(step.promptBytes) : style.dim('—'),
+              perTurn(step),
+              // Null and zero are different facts. A provider that reports no cost did not run
+              // for free, and printing $0.00 would say it did.
+              step.costUsd === null ? style.dim('not reported') : `$${step.costUsd.toFixed(2)}`,
+            ]),
+            ['AGENT', '', 'TOKENS', 'CACHE', 'PROMPT', 'PER TURN', 'COST'],
+          ),
+        );
 
-      if (detail.itemId) {
-        const item = await container.pipelines.itemSpend(match.projectId, detail.itemId);
-        if (item.runs > 1) {
+        console.log();
+        const spent = detail.costUsd === null ? style.dim('not reported') : `$${detail.costUsd.toFixed(2)}`;
+        console.log(
+          `${thousands(detail.inputTokens + detail.outputTokens)} tokens · ${spent} · ${detail.steps.length} steps`,
+        );
+        console.log(carried(detail.steps));
+
+        if (item && item.runs > 1) {
           const total = item.costUsd === null ? style.dim('not reported') : `$${item.costUsd.toFixed(2)}`;
           // The number that answers whether the agents were worth it. One run's figure
           // flatters every task that needed more than one attempt.
@@ -1076,7 +1160,7 @@ ${item.body}`;
             ),
           );
         }
-      }
+      });
     });
 
   task
@@ -1087,11 +1171,13 @@ ${item.body}`;
       const container = await open();
       const found = await resolveRun(container, id, flags.project);
       const run = await container.pipelines.cancel(found.id);
-      console.log(
-        run.status === 'cancelled'
-          ? `${style.green('cancelled')} ${run.id}  ${style.dim(run.error ?? '')}`
-          : `${style.dim('asked to stop')} ${run.id} — in-flight agents will finish`,
-      );
+      out().report(run, () => {
+        console.log(
+          run.status === 'cancelled'
+            ? `${style.green('cancelled')} ${run.id}  ${style.dim(run.error ?? '')}`
+            : `${style.dim('asked to stop')} ${run.id} — in-flight agents will finish`,
+        );
+      });
     });
 
   task
@@ -1105,7 +1191,9 @@ ${item.body}`;
       });
 
       if (runs.length === 0) {
-        console.log(style.dim('nothing has run yet'));
+        out().report(runs, () => {
+          console.log(style.dim('nothing has run yet'));
+        });
         return;
       }
 
@@ -1129,26 +1217,29 @@ ${item.body}`;
         ]),
       );
 
-      console.log(
-        table(
-          runs.map((run) => [
-            style.dim(run.id.slice(-8)),
-            run.status === 'passed' ? style.green(run.status) : style.red(run.status),
-            run.workflowName,
-            run.itemId ?? '',
-            branchLabel(run, branchOf.get(run.id)),
-            spent(run, soFar.get(run.id)),
-            truncate(run.task, 34),
-          ]),
-          ['ID', 'STATUS', 'WORKFLOW', 'ITEM', 'BRANCH', 'SPENT', 'TASK'],
-        ),
-      );
+      out().report(runs, () => {
+        console.log(
+          table(
+            runs.map((run) => [
+              style.dim(run.id.slice(-8)),
+              run.status === 'passed' ? style.green(run.status) : style.red(run.status),
+              run.workflowName,
+              run.itemId ?? '',
+              branchLabel(run, branchOf.get(run.id)),
+              spent(run, soFar.get(run.id)),
+              truncate(run.task, 34),
+            ]),
+            ['ID', 'STATUS', 'WORKFLOW', 'ITEM', 'BRANCH', 'SPENT', 'TASK'],
+          ),
+        );
+      });
     });
 }
 
 export function registerProviderCommands(
   program: Command,
   open: () => Promise<PomniContainer>,
+  out: () => Output,
 ): void {
   const provider = program
     .command('provider')
@@ -1161,18 +1252,20 @@ export function registerProviderCommands(
       const container = await open();
       const status = await container.providers.status();
 
-      console.log(
-        table(
-          status.providers.map((item) => [
-            item.id === status.default ? style.cyan('*') : ' ',
-            style.bold(item.id),
-            item.kind,
-            item.available ? style.green('ready') : style.red('unavailable'),
-            item.detail,
-          ]),
-          ['', 'ID', 'KIND', 'STATUS', 'DETAIL'],
-        ),
-      );
+      out().report(status, () => {
+        console.log(
+          table(
+            status.providers.map((item) => [
+              item.id === status.default ? style.cyan('*') : ' ',
+              style.bold(item.id),
+              item.kind,
+              item.available ? style.green('ready') : style.red('unavailable'),
+              item.detail,
+            ]),
+            ['', 'ID', 'KIND', 'STATUS', 'DETAIL'],
+          ),
+        );
+      });
     });
 
   provider
@@ -1214,7 +1307,9 @@ export function registerProviderCommands(
             max: flags.max,
           },
         });
-        console.log(`${style.green('added')} provider ${style.bold(created.id)}`);
+        out().report(created, () => {
+          console.log(`${style.green('added')} provider ${style.bold(created.id)}`);
+        });
       },
     );
 
@@ -1224,7 +1319,9 @@ export function registerProviderCommands(
     .action(async (id: string) => {
       const container = await open();
       await container.providers.setDefault(id);
-      console.log(`${style.green('default provider')} ${style.bold(id)}`);
+      out().report({ id }, () => {
+        console.log(`${style.green('default provider')} ${style.bold(id)}`);
+      });
     });
 
   provider
@@ -1234,7 +1331,9 @@ export function registerProviderCommands(
       const container = await open();
       const found = await container.providers.get(id);
       if (found.kind !== 'openai') {
-        console.log(style.dim('only openai-compatible providers can be asked'));
+        out().report({ models: [] }, () => {
+          console.log(style.dim('only openai-compatible providers can be asked'));
+        });
         return;
       }
 
@@ -1246,7 +1345,9 @@ export function registerProviderCommands(
       });
 
       const models = await client.listModels();
-      console.log(models.length > 0 ? models.join(String.fromCharCode(10)) : style.dim('none reported'));
+      out().report({ models }, () => {
+        console.log(models.length > 0 ? models.join(String.fromCharCode(10)) : style.dim('none reported'));
+      });
     });
 
   provider
@@ -1256,7 +1357,9 @@ export function registerProviderCommands(
     .action(async (id: string) => {
       const container = await open();
       await container.providers.remove(id);
-      console.log(`${style.green('removed')} provider ${id}`);
+      out().report({ id, removed: true }, () => {
+        console.log(`${style.green('removed')} provider ${id}`);
+      });
     });
 }
 
@@ -1264,6 +1367,7 @@ export function registerDiscoveryCommands(
   program: Command,
   open: () => Promise<PomniContainer>,
   defaultProject: () => Promise<string>,
+  out: () => Output,
 ): void {
   const discover = program
     .command('discover')
@@ -1280,35 +1384,37 @@ export function registerDiscoveryCommands(
       const projectId = flags.project ?? (await defaultProject());
       const report = await container.discovery.scan(projectId, { repoId: flags.repo });
 
-      for (const entry of report.scanned) {
-        console.log(style.dim(`scanned ${entry.repoId}: ${entry.found} found`));
-      }
-      console.log();
-
       const assets = flags.kind
         ? report.assets.filter((asset) => asset.kind === flags.kind)
         : report.assets;
 
-      if (assets.length === 0) {
-        console.log(style.dim('nothing found'));
-        return;
-      }
+      out().report({ ...report, assets }, () => {
+        for (const entry of report.scanned) {
+          console.log(style.dim(`scanned ${entry.repoId}: ${entry.found} found`));
+        }
+        console.log();
 
-      console.log(
-        table(
-          assets.map((asset) => [
-            style.dim(asset.kind),
-            style.bold(asset.id),
-            asset.repoId,
-            truncate(asset.description, 68),
-          ]),
-          ['KIND', 'ID', 'REPO', 'DESCRIPTION'],
-        ),
-      );
-      console.log();
-      console.log(
-        style.dim(`import one:  pomni discover import <id> --into <workflow> -p ${projectId}`),
-      );
+        if (assets.length === 0) {
+          console.log(style.dim('nothing found'));
+          return;
+        }
+
+        console.log(
+          table(
+            assets.map((asset) => [
+              style.dim(asset.kind),
+              style.bold(asset.id),
+              asset.repoId,
+              truncate(asset.description, 68),
+            ]),
+            ['KIND', 'ID', 'REPO', 'DESCRIPTION'],
+          ),
+        );
+        console.log();
+        console.log(
+          style.dim(`import one:  pomni discover import <id> --into <workflow> -p ${projectId}`),
+        );
+      });
     });
 
   discover
@@ -1322,17 +1428,17 @@ export function registerDiscoveryCommands(
       const asset = report.assets.find((candidate) => candidate.id === assetId);
 
       if (!asset) {
-        console.error(style.red(`nothing called '${assetId}' was found`));
-        process.exitCode = 1;
-        return;
+        throw new NotFoundError('asset', assetId);
       }
 
-      console.log(`${style.bold(asset.name)}  ${style.dim(`(${asset.kind})`)}`);
-      console.log(style.dim(`${asset.repoId}:${asset.path}`));
-      if (asset.description) console.log(asset.description);
-      if (asset.tools.length > 0) console.log(style.dim(`tools: ${asset.tools.join(', ')}`));
-      console.log();
-      console.log(asset.body);
+      out().report(asset, () => {
+        console.log(`${style.bold(asset.name)}  ${style.dim(`(${asset.kind})`)}`);
+        console.log(style.dim(`${asset.repoId}:${asset.path}`));
+        if (asset.description) console.log(asset.description);
+        if (asset.tools.length > 0) console.log(style.dim(`tools: ${asset.tools.join(', ')}`));
+        console.log();
+        console.log(asset.body);
+      });
     });
 
   discover
@@ -1344,8 +1450,10 @@ export function registerDiscoveryCommands(
       const container = await open();
       const projectId = flags.project ?? (await defaultProject());
       const result = await container.discovery.importAgent(projectId, flags.into, assetId);
-      console.log(`${style.green('imported')} ${assetId} → ${flags.into}/${result.agentId}`);
-      console.log(style.dim('  its own text became the prompt; edit the spec to regenerate'));
+      out().report(result, () => {
+        console.log(`${style.green('imported')} ${assetId} → ${flags.into}/${result.agentId}`);
+        console.log(style.dim('  its own text became the prompt; edit the spec to regenerate'));
+      });
     });
 }
 

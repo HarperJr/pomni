@@ -12,7 +12,7 @@ different surface. The CLI is authoritative for naming.
 | MCP tool | `pomni_<noun>_<verb>` over `pomni mcp` | shipped |
 
 Global flags: `--root <path>` (workspace directory; defaults to the nearest `.pomni`,
-searching upward like git), `--verbose`.
+searching upward like git), `--verbose`, `--json` (JSON output on stdout; errors are `{ error: { code, message, … } }` with documented exit codes).
 
 ## Workspace
 
@@ -300,3 +300,40 @@ The M3 feature loop (spec, plan, implement, verify, land) shipped as `pomni task
 `pomni backlog waves --run`, not as the originally planned `/feature spec|plan|implement|
 verify|land`. POMN-47 (context packs: an agent starting from an item's touched files and what
 other agents already found) is still open.
+
+## Exit codes
+
+Every command exits 0 on success, or non-zero when the answer is "no", bad usage, or something
+does not exist.
+
+| Code | Meaning | Examples |
+| --- | --- | --- |
+| 0 | Success | command ran, answer is "yes" |
+| 1 | Command ran; answer is "no" | `verify` with a red gate, `task run\|resume\|rerun` ending other than `passed`, `backlog move` refused by guard, `tool check` failed, `worktree prune` with failures, `cred test\|repo doctor` failed |
+| 2 | Bad usage | unknown option or argument, invalid flag combination, malformed input |
+| 3 | Not found or not initialized | workspace not initialized (`pomni init` needed), item/run/repo/project/credential/workflow/tool/provider does not exist, referenced asset missing |
+
+## `--json`
+
+The global `--json` flag makes every command output structured data instead of formatted text.
+
+**Output:**
+- Commands that report a single result (`backlog show`, `run list`, `project list`, etc.)
+  emit one JSON object on stdout.
+- Streaming commands (`verify`, `runs tail`, `task run|resume|rerun`, `backlog waves --run`)
+  emit one JSON object per line, with the final line being the finished object (a `GateReport`
+  for `verify`, a `Run` for task commands, etc.). Progress and live updates are on stderr.
+- Nothing else touches stdout — no progress bars, no tables, no warnings.
+- Progress, warnings, and other human-oriented text go to stderr.
+
+**Errors:**
+- In JSON mode, errors are `{ error: { code, message, details?, unmet? } }` on stdout.
+- The exit code is the same as it would be in human mode (0-3, per the table above).
+- `unmet` is present only for transition guards and gates — it lists what blocked the move
+  (dependencies not met, scope conflict, gate failure, etc.).
+- `details` may contain structured context for programmatic inspection.
+
+**Compatibility:**
+- The JSON structure is the same object the MCP tool for that verb returns — no second shape
+  to keep in step. See `packages/mcp/` for the TypeScript types.
+- Scripts should rely on exit codes for the answer, not on parsing prose.

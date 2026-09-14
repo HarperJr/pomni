@@ -12,6 +12,7 @@ import {
   hasRequirements,
   layout,
   stateLabel,
+  ValidationError,
   type BacklogItem,
   type Comment,
   type CommentAuthor,
@@ -29,11 +30,13 @@ import {
 } from '@pomni/core';
 import type { Command } from 'commander';
 import { style, table } from './format.js';
+import type { Output } from './output.js';
 
 export function registerBacklogCommands(
   program: Command,
   open: () => Promise<PomniContainer>,
   defaultProject: () => Promise<string>,
+  out: () => Output,
 ): void {
   const backlog = program.command('backlog').alias('b').description('manage the backlog');
 
@@ -61,9 +64,11 @@ export function registerBacklogCommands(
         dependsOn: list(flags.dependsOn),
       });
 
-      console.log(`${style.green('created')} ${style.bold(item.id)}  ${item.title}`);
-      console.log(style.dim(`  ${container.root}/${layout.backlogItem(projectId, item.id)}`));
-      console.log(style.dim(`  next: pomni backlog show ${item.id}`));
+      out().report(item, () => {
+        console.log(`${style.green('created')} ${style.bold(item.id)}  ${item.title}`);
+        console.log(style.dim(`  ${container.root}/${layout.backlogItem(projectId, item.id)}`));
+        console.log(style.dim(`  next: pomni backlog show ${item.id}`));
+      });
     });
 
   backlog
@@ -96,46 +101,50 @@ export function registerBacklogCommands(
           .map((entry) => ({ item: entry.item, moves: entry.moves.filter((move) => move.mode === 'manual') }))
           .filter((entry) => entry.moves.length > 0);
 
-        if (rows.length === 0) {
-          console.log(style.dim('nothing is waiting on you — every manual move still has something outstanding'));
-          return;
-        }
+        out().report(rows, () => {
+          if (rows.length === 0) {
+            console.log(style.dim('nothing is waiting on you — every manual move still has something outstanding'));
+            return;
+          }
 
-        console.log(
-          table(
-            rows.map(({ item, moves }) => [
-              style.bold(item.id),
-              statusText(item.status),
-              item.priority,
-              item.title,
-              moves.map((move) => move.label).join(', '),
-            ]),
-            ['ID', 'STATUS', 'PRI', 'TITLE', 'READY TO MOVE'],
-          ),
-        );
+          console.log(
+            table(
+              rows.map(({ item, moves }) => [
+                style.bold(item.id),
+                statusText(item.status),
+                item.priority,
+                item.title,
+                moves.map((move) => move.label).join(', '),
+              ]),
+              ['ID', 'STATUS', 'PRI', 'TITLE', 'READY TO MOVE'],
+            ),
+          );
+        });
         return;
       }
 
       const items = await container.backlog.list(filter);
 
-      if (items.length === 0) {
-        console.log(style.dim("nothing here — capture something with 'pomni backlog add <title>'"));
-        return;
-      }
+      out().report(items, () => {
+        if (items.length === 0) {
+          console.log(style.dim("nothing here — capture something with 'pomni backlog add <title>'"));
+          return;
+        }
 
-      console.log(
-        table(
-          items.map((item) => [
-            style.bold(item.id),
-            statusText(item.status),
-            item.priority,
-            item.type,
-            item.title,
-            item.repos.join(', ') || style.dim('—'),
-          ]),
-          ['ID', 'STATUS', 'PRI', 'TYPE', 'TITLE', 'REPOS'],
-        ),
-      );
+        console.log(
+          table(
+            items.map((item) => [
+              style.bold(item.id),
+              statusText(item.status),
+              item.priority,
+              item.type,
+              item.title,
+              item.repos.join(', ') || style.dim('—'),
+            ]),
+            ['ID', 'STATUS', 'PRI', 'TYPE', 'TITLE', 'REPOS'],
+          ),
+        );
+      });
     });
 
   backlog
@@ -147,24 +156,26 @@ export function registerBacklogCommands(
       const projectId = flags.project ?? (await defaultProject());
       const items = await container.backlog.list({ projectId });
 
-      for (const column of BOARD_COLUMNS) {
-        const inColumn = items.filter((item) => item.status === column);
-        const blocked = column === 'backlog' ? items.filter((item) => item.status === 'blocked') : [];
-        if (inColumn.length === 0 && blocked.length === 0) continue;
+      out().report(items, () => {
+        for (const column of BOARD_COLUMNS) {
+          const inColumn = items.filter((item) => item.status === column);
+          const blocked = column === 'backlog' ? items.filter((item) => item.status === 'blocked') : [];
+          if (inColumn.length === 0 && blocked.length === 0) continue;
 
-        console.log(`${statusText(column)} ${style.dim(`(${inColumn.length})`)}`);
-        for (const item of inColumn) {
-          console.log(`  ${style.bold(item.id.padEnd(10))} ${item.priority}  ${item.title}`);
+          console.log(`${statusText(column)} ${style.dim(`(${inColumn.length})`)}`);
+          for (const item of inColumn) {
+            console.log(`  ${style.bold(item.id.padEnd(10))} ${item.priority}  ${item.title}`);
+          }
+          for (const item of blocked) {
+            console.log(
+              `  ${style.bold(item.id.padEnd(10))} ${style.red('blocked')}  ${item.title} ${style.dim(
+                `— ${item.blockedReason ?? ''}`,
+              )}`,
+            );
+          }
+          console.log();
         }
-        for (const item of blocked) {
-          console.log(
-            `  ${style.bold(item.id.padEnd(10))} ${style.red('blocked')}  ${item.title} ${style.dim(
-              `— ${item.blockedReason ?? ''}`,
-            )}`,
-          );
-        }
-        console.log();
-      }
+      });
     });
 
   backlog
@@ -176,40 +187,42 @@ export function registerBacklogCommands(
       const [projectId, itemId] = await resolve(container, id, flags.project, defaultProject);
       const item = await container.backlog.get(projectId, itemId);
 
-      console.log(`${style.bold(item.id)}  ${item.title}`);
-      console.log(
-        `${statusText(item.status, item.flowState?.label)}  ${item.priority}  ${item.type}${
-          item.estimate ? `  ${item.estimate}` : ''
-        }`,
-      );
-      if (item.repos.length > 0) console.log(`repos      ${item.repos.join(', ')}`);
-      if (item.labels.length > 0) console.log(`labels     ${item.labels.join(', ')}`);
-      if (item.dependsOn.length > 0) {
+      out().report(item, () => {
+        console.log(`${style.bold(item.id)}  ${item.title}`);
         console.log(
-          `depends on ${item.dependsOn.join(', ')}${
-            item.blockedBy.length > 0 ? style.red(`  (waiting on ${item.blockedBy.join(', ')})`) : ''
+          `${statusText(item.status, item.flowState?.label)}  ${item.priority}  ${item.type}${
+            item.estimate ? `  ${item.estimate}` : ''
           }`,
         );
-      }
-      if (item.blocking.length > 0) console.log(`blocks     ${item.blocking.join(', ')}`);
-      if (item.blockedReason) console.log(style.red(`blocked    ${item.blockedReason}`));
-      if (item.acceptance.total > 0) {
-        console.log(`acceptance ${item.acceptance.checked}/${item.acceptance.total} checked`);
-      }
-      if (item.offFlow) {
-        console.log(style.yellow(`off-flow   '${item.status}' is not a state in this project's flow`));
-      }
-
-      if (item.allowedTransitions.length > 0) {
-        console.log();
-        console.log(style.bold('moves'));
-        for (const offer of item.allowedTransitions) {
-          console.log(offerLine(offer));
+        if (item.repos.length > 0) console.log(`repos      ${item.repos.join(', ')}`);
+        if (item.labels.length > 0) console.log(`labels     ${item.labels.join(', ')}`);
+        if (item.dependsOn.length > 0) {
+          console.log(
+            `depends on ${item.dependsOn.join(', ')}${
+              item.blockedBy.length > 0 ? style.red(`  (waiting on ${item.blockedBy.join(', ')})`) : ''
+            }`,
+          );
         }
-      }
+        if (item.blocking.length > 0) console.log(`blocks     ${item.blocking.join(', ')}`);
+        if (item.blockedReason) console.log(style.red(`blocked    ${item.blockedReason}`));
+        if (item.acceptance.total > 0) {
+          console.log(`acceptance ${item.acceptance.checked}/${item.acceptance.total} checked`);
+        }
+        if (item.offFlow) {
+          console.log(style.yellow(`off-flow   '${item.status}' is not a state in this project's flow`));
+        }
 
-      console.log();
-      console.log(item.body.trimEnd());
+        if (item.allowedTransitions.length > 0) {
+          console.log();
+          console.log(style.bold('moves'));
+          for (const offer of item.allowedTransitions) {
+            console.log(offerLine(offer));
+          }
+        }
+
+        console.log();
+        console.log(item.body.trimEnd());
+      });
     });
 
   backlog
@@ -238,7 +251,9 @@ export function registerBacklogCommands(
         branch: flags.branch,
         touches: flags.touches === undefined ? undefined : list(flags.touches),
       });
-      console.log(`${style.green('updated')} ${updated.id}`);
+      out().report(updated, () => {
+        console.log(`${style.green('updated')} ${updated.id}`);
+      });
     });
 
   backlog
@@ -259,9 +274,7 @@ export function registerBacklogCommands(
 
       const known = flow.states.map((state) => state.name);
       if (!known.includes(status)) {
-        console.error(style.red(`unknown status '${status}' — this project's flow has: ${known.join(', ')}`));
-        process.exitCode = 1;
-        return;
+        throw new ValidationError(`unknown status '${status}' — this project's flow has: ${known.join(', ')}`);
       }
 
       const moved = await container.backlog.transition(projectId, itemId, status, {
@@ -269,7 +282,9 @@ export function registerBacklogCommands(
         reason: flags.reason,
         force: flags.force,
       });
-      console.log(`${style.green('moved')} ${moved.id} → ${statusText(moved.status, stateLabel(flow, moved.status))}`);
+      out().report(moved, () => {
+        console.log(`${style.green('moved')} ${moved.id} → ${statusText(moved.status, stateLabel(flow, moved.status))}`);
+      });
 
       // A state may name a workflow to run on arrival. Awaited rather than left in the
       // background: this process is the only thing keeping the run alive, and exiting on it
@@ -280,26 +295,35 @@ export function registerBacklogCommands(
       const entered = flow.states.find((state) => state.name === moved.status);
       if (!entered?.onEnter) return;
 
-      console.log(
-        style.dim(
-          `${moved.status} names workflow '${entered.onEnter}' — starting it. ` +
-            'Pass --no-run to move without it.',
-        ),
-      );
+      out().report({ type: 'workflow.starting', workflow: entered.onEnter, status: moved.status }, () => {
+        console.log(
+          style.dim(
+            `${moved.status} names workflow '${entered.onEnter}' — starting it. ` +
+              'Pass --no-run to move without it.',
+          ),
+        );
+      });
 
       const started = await container.pipelines.onItemEntered(projectId, itemId, moved.status);
       if (!started) {
-        console.log(style.dim('  nothing started — see the warning above, or a run is already going'));
+        out().report({ type: 'workflow.notStarted' }, () => {
+          console.log(style.dim('  nothing started — see the warning above, or a run is already going'));
+        });
         return;
       }
 
-      console.log(`${style.green('started')} ${started.run.id}  ${started.run.workflowName}`);
+      out().report({ type: 'workflow.started', run: started.run }, () => {
+        console.log(`${style.green('started')} ${started.run.id}  ${started.run.workflowName}`);
+      });
       const finished = await started.completion;
-      console.log(
-        finished.status === 'passed'
-          ? `${style.green(finished.status)} ${finished.id}`
-          : `${style.red(finished.status)} ${finished.id}  ${style.dim(finished.error ?? '')}`,
-      );
+      out().report({ type: 'workflow.finished', run: finished }, () => {
+        console.log(
+          finished.status === 'passed'
+            ? `${style.green(finished.status)} ${finished.id}`
+            : `${style.red(finished.status)} ${finished.id}  ${style.dim(finished.error ?? '')}`,
+        );
+      });
+      if (finished.status !== 'passed') out().fail(1);
     });
 
   backlog
@@ -320,7 +344,8 @@ export function registerBacklogCommands(
       const [projectId, itemId] = await resolve(container, id, flags.project, defaultProject);
 
       if (text.length === 0) {
-        printComments(await container.comments.list({ subject: 'item', subjectId: itemId }));
+        const comments = await container.comments.list({ subject: 'item', subjectId: itemId });
+        out().report(comments, () => printComments(comments));
         return;
       }
 
@@ -334,7 +359,7 @@ export function registerBacklogCommands(
         addressedTo: flags.to ?? null,
         resolvesCommentId: flags.resolves ?? null,
       });
-      printWritten(written);
+      out().report(written, () => printWritten(written));
     });
 
   backlog
@@ -346,35 +371,37 @@ export function registerBacklogCommands(
       const projectId = flags.project ?? (await defaultProject());
       const flow = await container.backlog.flow(projectId);
 
-      console.log(style.bold('states'));
-      console.log(
-        table(
-          flow.states.map((state) => [
-            state.name === flow.initial ? style.green('initial') : '',
-            style.bold(state.name),
-            state.label,
-            state.board ? 'board' : '',
-            state.active ? 'active' : '',
-          ]),
-          ['', 'STATE', 'LABEL', 'COLUMN', 'ACTIVE'],
-        ),
-      );
-
-      console.log();
-      console.log(style.bold('arrows'));
-      if (flow.transitions.length === 0) {
-        console.log(style.dim('none declared'));
-      } else {
+      out().report(flow, () => {
+        console.log(style.bold('states'));
         console.log(
           table(
-            flow.transitions.map((transition) => [
-              `${transition.from} → ${transition.to}`,
-              describeRequirements(transition.requires),
+            flow.states.map((state) => [
+              state.name === flow.initial ? style.green('initial') : '',
+              style.bold(state.name),
+              state.label,
+              state.board ? 'board' : '',
+              state.active ? 'active' : '',
             ]),
-            ['ARROW', 'REQUIRES'],
+            ['', 'STATE', 'LABEL', 'COLUMN', 'ACTIVE'],
           ),
         );
-      }
+
+        console.log();
+        console.log(style.bold('arrows'));
+        if (flow.transitions.length === 0) {
+          console.log(style.dim('none declared'));
+        } else {
+          console.log(
+            table(
+              flow.transitions.map((transition) => [
+                `${transition.from} → ${transition.to}`,
+                describeRequirements(transition.requires),
+              ]),
+              ['ARROW', 'REQUIRES'],
+            ),
+          );
+        }
+      });
     });
 
   backlog
@@ -385,7 +412,9 @@ export function registerBacklogCommands(
       const container = await open();
       const [projectId, itemId] = await resolve(container, id, flags.project, defaultProject);
       const blocked = await container.backlog.block(projectId, itemId, reason.join(' '));
-      console.log(`${style.yellow('blocked')} ${blocked.id} — ${blocked.blockedReason}`);
+      out().report(blocked, () => {
+        console.log(`${style.yellow('blocked')} ${blocked.id} — ${blocked.blockedReason}`);
+      });
     });
 
   backlog
@@ -397,7 +426,9 @@ export function registerBacklogCommands(
       const [projectId, itemId] = await resolve(container, id, flags.project, defaultProject);
       const item = await container.backlog.unblock(projectId, itemId);
       const flow = await container.backlog.flow(projectId);
-      console.log(`${style.green('unblocked')} ${item.id} → ${statusText(item.status, stateLabel(flow, item.status))}`);
+      out().report(item, () => {
+        console.log(`${style.green('unblocked')} ${item.id} → ${statusText(item.status, stateLabel(flow, item.status))}`);
+      });
     });
 
   backlog
@@ -411,8 +442,10 @@ export function registerBacklogCommands(
       const current = await container.backlog.get(projectId, itemId);
 
       const merged = [...new Set([...current.dependsOn, ...(list(flags.dependsOn) ?? [])])];
-      await container.backlog.update(projectId, itemId, { dependsOn: merged });
-      console.log(`${style.green('linked')} ${itemId} depends on ${merged.join(', ')}`);
+      const updated = await container.backlog.update(projectId, itemId, { dependsOn: merged });
+      out().report(updated, () => {
+        console.log(`${style.green('linked')} ${itemId} depends on ${merged.join(', ')}`);
+      });
     });
 
   backlog
@@ -426,7 +459,9 @@ export function registerBacklogCommands(
         reason: 'reopened',
         force: true,
       });
-      console.log(`${style.green('reopened')} ${item.id}`);
+      out().report(item, () => {
+        console.log(`${style.green('reopened')} ${item.id}`);
+      });
     });
 
   backlog
@@ -438,7 +473,9 @@ export function registerBacklogCommands(
       const container = await open();
       const [projectId, itemId] = await resolve(container, id, flags.project, defaultProject);
       await container.backlog.remove(projectId, itemId);
-      console.log(`${style.green('removed')} ${itemId}`);
+      out().report({ id: itemId, removed: true }, () => {
+        console.log(`${style.green('removed')} ${itemId}`);
+      });
     });
 
   backlog
@@ -450,11 +487,13 @@ export function registerBacklogCommands(
       const projectId = flags.project ?? (await defaultProject());
       const item = await container.backlog.next(projectId);
 
-      if (!item) {
-        console.log(style.dim("nothing is ready — move an item to 'ready' first"));
-        return;
-      }
-      console.log(`${style.bold(item.id)}  ${item.priority}  ${item.title}`);
+      out().report(item, () => {
+        if (!item) {
+          console.log(style.dim("nothing is ready — move an item to 'ready' first"));
+          return;
+        }
+        console.log(`${style.bold(item.id)}  ${item.priority}  ${item.title}`);
+      });
     });
 
   backlog
@@ -470,58 +509,62 @@ export function registerBacklogCommands(
       const items = await container.backlog.list({ projectId });
       const byId = new Map(items.map((item) => [item.id, item]));
 
-      if (plan.waves.length === 0 && plan.blocked.length === 0) {
-        console.log(style.dim("nothing is ready — move an item to 'ready' first"));
-        return;
-      }
-
-      for (const wave of plan.waves) {
-        console.log(`${style.bold(`wave ${wave.index}`)} ${style.dim(`(${wave.itemIds.length})`)}`);
-        for (const itemId of wave.itemIds) {
-          const item = byId.get(itemId);
-          console.log(`  ${item ? itemLine(item) : itemId}`);
+      out().report(plan, () => {
+        if (plan.waves.length === 0 && plan.blocked.length === 0) {
+          console.log(style.dim("nothing is ready — move an item to 'ready' first"));
+          return;
         }
-        console.log();
-      }
 
-      if (plan.blocked.length > 0) {
-        console.log(style.bold('blocked'));
-        for (const blocked of plan.blocked) {
-          const item = byId.get(blocked.itemId);
-          console.log(
-            `  ${style.bold(blocked.itemId)}  ${item ? item.title : ''} ${style.red(
-              `— waiting on ${blocked.waitingOn.join(', ')}`,
-            )}`,
-          );
+        for (const wave of plan.waves) {
+          console.log(`${style.bold(`wave ${wave.index}`)} ${style.dim(`(${wave.itemIds.length})`)}`);
+          for (const itemId of wave.itemIds) {
+            const item = byId.get(itemId);
+            console.log(`  ${item ? itemLine(item) : itemId}`);
+          }
+          console.log();
         }
-        console.log();
-      }
 
-      if (flags.explain) {
-        console.log(style.bold('conflicts'));
-        if (plan.conflicts.length === 0) {
-          console.log(style.dim('none — every ready item is independent'));
-        } else {
-          for (const edge of plan.conflicts) {
-            console.log(`${style.bold(edge.a)} <-> ${style.bold(edge.b)}`);
-            for (const reason of edge.reasons) {
-              console.log(`  ${describeConflict(reason)}`);
+        if (plan.blocked.length > 0) {
+          console.log(style.bold('blocked'));
+          for (const blocked of plan.blocked) {
+            const item = byId.get(blocked.itemId);
+            console.log(
+              `  ${style.bold(blocked.itemId)}  ${item ? item.title : ''} ${style.red(
+                `— waiting on ${blocked.waitingOn.join(', ')}`,
+              )}`,
+            );
+          }
+          console.log();
+        }
+
+        if (flags.explain) {
+          console.log(style.bold('conflicts'));
+          if (plan.conflicts.length === 0) {
+            console.log(style.dim('none — every ready item is independent'));
+          } else {
+            for (const edge of plan.conflicts) {
+              console.log(`${style.bold(edge.a)} <-> ${style.bold(edge.b)}`);
+              for (const reason of edge.reasons) {
+                console.log(`  ${describeConflict(reason)}`);
+              }
             }
           }
-        }
 
-        console.log();
-        console.log(style.bold('scopes'));
-        for (const [itemId, scope] of Object.entries(plan.scopes)) {
-          console.log(`${style.bold(itemId)}  ${describeScope(scope)}`);
+          console.log();
+          console.log(style.bold('scopes'));
+          for (const [itemId, scope] of Object.entries(plan.scopes)) {
+            console.log(`${style.bold(itemId)}  ${describeScope(scope)}`);
+          }
+          console.log();
         }
-        console.log();
-      }
+      });
 
       if (flags.run) {
         const first = plan.waves[0];
         if (!first || first.itemIds.length === 0) {
-          console.log(style.dim('nothing to run — wave 1 is empty'));
+          out().report({ ran: false, reason: 'wave 1 is empty' }, () => {
+            console.log(style.dim('nothing to run — wave 1 is empty'));
+          });
           return;
         }
 
@@ -530,8 +573,10 @@ export function registerBacklogCommands(
         // `planWaves` — not a guard against anything a user did.
         assertWavesDisjoint(plan);
 
-        console.log(`${style.cyan('running')} wave 1: ${first.itemIds.join(', ')}`);
-        console.log();
+        out().report({ type: 'wave.running', wave: 1, itemIds: first.itemIds }, () => {
+          console.log(`${style.cyan('running')} wave 1: ${first.itemIds.join(', ')}`);
+          console.log();
+        });
 
         const results = await Promise.allSettled(
           first.itemIds.map(async (itemId) => {
@@ -540,19 +585,23 @@ export function registerBacklogCommands(
 
             const printEvent = (event: PomniEvent & EmittedEvent) => {
               if (event.type === 'pipeline.step.started') {
-                const indent = '  '.repeat(event.depth);
-                console.log(
-                  `${indent}${style.cyan('▸')} ${style.dim(itemId)} ${style.bold(event.agentName)} ${style.dim(
-                    `${event.providerId} · ${event.model}`,
-                  )}`,
-                );
+                out().report({ type: 'pipeline.step.started', itemId, event }, () => {
+                  const indent = '  '.repeat(event.depth);
+                  console.log(
+                    `${indent}${style.cyan('▸')} ${style.dim(itemId)} ${style.bold(event.agentName)} ${style.dim(
+                      `${event.providerId} · ${event.model}`,
+                    )}`,
+                  );
+                });
               }
               if (event.type === 'pipeline.step.finished') {
-                console.log(
-                  `  ${style.dim(itemId)} ${event.status === 'done' ? style.green('✓') : style.red('✗')} ${style.dim(
-                    event.summary,
-                  )}`,
-                );
+                out().report({ type: 'pipeline.step.finished', itemId, event }, () => {
+                  console.log(
+                    `  ${style.dim(itemId)} ${event.status === 'done' ? style.green('✓') : style.red('✗')} ${style.dim(
+                      event.summary,
+                    )}`,
+                  );
+                });
               }
             };
 
@@ -586,9 +635,13 @@ export function registerBacklogCommands(
 
               const finished = await completion;
               if (finished.status === 'passed') {
-                console.log(`${style.green('✓')} ${itemId} finished in ${Math.round((finished.durationMs ?? 0) / 1000)}s`);
+                out().report({ type: 'item.finished', itemId, status: finished.status }, () => {
+                  console.log(`${style.green('✓')} ${itemId} finished in ${Math.round((finished.durationMs ?? 0) / 1000)}s`);
+                });
               } else {
-                console.log(`${style.red('✗')} ${itemId} ${finished.status}: ${finished.error ?? ''}`);
+                out().report({ type: 'item.finished', itemId, status: finished.status, error: finished.error }, () => {
+                  console.log(`${style.red('✗')} ${itemId} ${finished.status}: ${finished.error ?? ''}`);
+                });
                 throw new Error(`${itemId} ${finished.status}`);
               }
             } finally {
@@ -599,13 +652,15 @@ export function registerBacklogCommands(
 
         const failed = results.filter((result) => result.status === 'rejected').length;
         const passed = results.length - failed;
-        console.log();
-        console.log(
-          `${style.bold('wave 1 done')}  ${style.green(`${passed} passed`)}${
-            failed > 0 ? `  ${style.red(`${failed} failed`)}` : ''
-          }`,
-        );
-        if (failed > 0) process.exitCode = 1;
+        if (failed > 0) out().fail(1);
+        out().report({ wave: 1, itemIds: first.itemIds, passed, failed }, () => {
+          console.log();
+          console.log(
+            `${style.bold('wave 1 done')}  ${style.green(`${passed} passed`)}${
+              failed > 0 ? `  ${style.red(`${failed} failed`)}` : ''
+            }`,
+          );
+        });
       }
     });
 
@@ -621,12 +676,13 @@ export function registerBacklogCommands(
         : layout.backlogItem(projectId, itemId);
 
       const editor = process.env.EDITOR ?? process.env.VISUAL;
-      if (!editor) {
-        console.log(path);
-        console.log(style.dim('set $EDITOR to open it directly'));
-        return;
-      }
-      spawn(editor, [path], { stdio: 'inherit', shell: true });
+      out().report({ path }, () => {
+        if (!editor) {
+          console.log(path);
+          console.log(style.dim('set $EDITOR to open it directly'));
+        }
+      });
+      if (editor) spawn(editor, [path], { stdio: 'inherit', shell: true });
     });
 }
 
