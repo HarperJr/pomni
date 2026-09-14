@@ -316,3 +316,38 @@ Local-first and deliberately boring:
   shell command.
 - Run logs may contain secrets printed by the project's own tooling. Logs are served only over
   loopback (or behind the token) and never leave the machine.
+
+## 7. Webhook notifications
+
+When `notify.webhook.url` is set in `.pomni/config.yaml`, `serve` POSTs one JSON document per
+notification — a question a run is waiting on, a red gate, an item landed as a merge request,
+and the sample `pomni notify test` sends. No retries: a failed post is logged and the run is
+unaffected.
+
+```
+POST <notify.webhook.url>
+Content-Type: application/json
+User-Agent: pomni
+X-Pomni-Event: question | gate_failed | in_review | test
+X-Pomni-Signature: sha256=<hex HMAC-SHA256 of the exact body, keyed by the credential's secret>   (only when notify.webhook.credential is set)
+
+{
+  "version": 1,
+  "kind": "gate_failed",
+  "projectId": "acme",
+  "runId": "01M2…",             // null for test
+  "itemId": "ACME-12",          // null when the run had no item
+  "reason": "one line, at most 160 characters",
+  "url": "http://127.0.0.1:7777/p/acme/items/ACME-12",   // the item, else the run, else the project; base from notify.baseUrl or server.host:port
+  "ts": "2026-09-14T12:00:00.000Z",
+  "questionId": "01M2…",        // question only, else null
+  "mergeRequestUrl": "https://…" // in_review only, else null
+}
+```
+
+The signature is over the bytes as sent — verify it against the raw body, not a re-serialised
+copy. `version` is bumped only when a receiver would have to branch on the shape. A workspace
+with a url and no credential gets unsigned posts, which is fine for an endpoint that trusts its
+network rather than a header. Each event is delivered once per run and kind (once per question
+for questions); the dedupe row is claimed before any channel is tried, so a channel outage is
+a missed notification, never a repeated one.

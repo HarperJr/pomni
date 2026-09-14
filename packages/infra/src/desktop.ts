@@ -72,6 +72,72 @@ export class Desktop implements DesktopPort {
     // directory. The directory is the part that is actually useful anyway.
     detach('xdg-open', [dirOf(path)]);
   }
+
+  /**
+   * Unlike `open` and `reveal`, this waits for the process that shows the toast to exit — not
+   * for the toast to be dismissed, which nothing here can observe, but for the one-shot command
+   * that posted it to finish and say whether posting worked. A silent failure here would look
+   * exactly like "the person saw it and ignored it", which is the one outcome a caller must be
+   * able to tell apart from every other.
+   */
+  async notify(title: string, body: string): Promise<void> {
+    if (process.platform === 'win32') return this.notifyWindows(title, body);
+    if (process.platform === 'darwin') return this.notifyMac(title, body);
+    return this.notifyLinux(title, body);
+  }
+
+  private async notifyWindows(title: string, body: string): Promise<void> {
+    if (!(await this.canRun('powershell'))) {
+      throw new Error("'powershell' is not on PATH, so there is nothing to show a toast with");
+    }
+
+    // Built as XML and loaded rather than assembled through the toast API's object model
+    // directly, because ToastGeneric's binding is what Explorer actually renders — the older
+    // ToastText templates still work but are visually inconsistent across Windows builds.
+    const xmlEscape = (value: string) =>
+      value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const xml =
+      `<toast><visual><binding template="ToastGeneric">` +
+      `<text>${xmlEscape(title)}</text><text>${xmlEscape(body)}</text>` +
+      `</binding></visual></toast>`;
+
+    // A PowerShell single-quoted string literal: doubling the only character that ends one.
+    const psLiteral = (value: string) => `'${value.replace(/'/g, "''")}'`;
+
+    const script = [
+      '[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null',
+      '[Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] | Out-Null',
+      '$xml = New-Object Windows.Data.Xml.Dom.XmlDocument',
+      `$xml.LoadXml(${psLiteral(xml)})`,
+      '$toast = New-Object Windows.UI.Notifications.ToastNotification $xml',
+      "[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('Pomni').Show($toast)",
+    ].join('; ');
+
+    // `-EncodedCommand` carries the whole script as base64, so nothing in the title or body
+    // is ever parsed as PowerShell syntax even after the single-quote doubling above — it is
+    // belt and suspenders against the one character that escaping alone gets wrong.
+    const encoded = Buffer.from(script, 'utf16le').toString('base64');
+    await runAwaited('powershell', ['-NoProfile', '-NonInteractive', '-EncodedCommand', encoded]);
+  }
+
+  private async notifyMac(title: string, body: string): Promise<void> {
+    if (!(await this.canRun('osascript'))) {
+      throw new Error("'osascript' is not on PATH, so there is nothing to show a notification with");
+    }
+
+    // JSON's string escaping and AppleScript's agree on the characters that matter here:
+    // backslash and the double quote that ends the literal.
+    const script = `display notification ${JSON.stringify(body)} with title ${JSON.stringify(title)}`;
+    await runAwaited('osascript', ['-e', script]);
+  }
+
+  private async notifyLinux(title: string, body: string): Promise<void> {
+    if (!(await this.canRun('notify-send'))) {
+      throw new Error("'notify-send' is not on PATH, so there is nothing to show a notification with");
+    }
+
+    await runAwaited('notify-send', [title, body]);
+  }
 }
 
 /**
@@ -86,6 +152,23 @@ function detach(command: string, args: string[]): void {
   const child = spawn(command, args, { detached: true, stdio: 'ignore', windowsHide: true });
   child.on('error', () => undefined);
   child.unref();
+}
+
+/**
+ * Start a program and wait for it to finish, the opposite tradeoff from `detach`.
+ *
+ * Used only for the one-shot commands that post a toast: there is nothing to keep running
+ * after they exit, and the caller needs to know whether posting it actually worked.
+ */
+function runAwaited(command: string, args: string[]): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, { stdio: 'ignore', windowsHide: true });
+    child.on('error', reject);
+    child.on('close', (code) => {
+      if (code === 0) resolve();
+      else reject(new Error(`'${command}' exited with code ${code}`));
+    });
+  });
 }
 
 function dirOf(path: string): string {

@@ -129,7 +129,11 @@ export async function startServer(
 
   const app = await createApp(container, options);
   const unwatch = watchFlow(container);
-  app.addHook('onClose', async () => unwatch());
+  const unnotify = container.notifications.start();
+  app.addHook('onClose', async () => {
+    unwatch();
+    unnotify();
+  });
 
   await listenWithHandover(app, host, port);
 

@@ -10,6 +10,7 @@ export * from './domain/errors.js';
 export * from './domain/ids.js';
 export * from './domain/item.js';
 export * from './domain/layout.js';
+export * from './domain/notification.js';
 export * from './domain/pipeline.js';
 export * from './domain/project.js';
 export * from './domain/provider.js';
@@ -43,6 +44,13 @@ export * from './app/chat-actions.js';
 export * from './app/chat-service.js';
 export * from './app/comment-service.js';
 export * from './app/discovery-service.js';
+// Explicit rather than `*`: `TestResult` already names a credential test in `domain/run.js`.
+export {
+  NotificationService,
+  type NotificationChannel,
+  type NotificationServiceDeps,
+  type TestResult as NotificationTestResult,
+} from './app/notification-service.js';
 export * from './app/pipeline-service.js';
 export * from './app/provider-service.js';
 export * from './app/system-service.js';

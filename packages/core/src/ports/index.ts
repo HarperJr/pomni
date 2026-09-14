@@ -95,8 +95,9 @@ export interface FsProbe {
  *
  * The narrowest port here, deliberately. Everything else Pomni does happens inside `.pomni`
  * or inside a repo; this launches a program, which is the one thing that cannot be undone by
- * deleting a file. Two verbs, no arguments the caller composes, and no shell anywhere in the
- * implementation — a caller cannot express "run this command line" through it even by mistake.
+ * deleting a file. Every verb takes no arguments the caller composes, and no shell anywhere in
+ * the implementation — a caller cannot express "run this command line" through it even by
+ * mistake.
  */
 export interface DesktopPort {
   /**
@@ -108,6 +109,12 @@ export interface DesktopPort {
   open(command: string, path: string): Promise<void>;
   /** Show one file in the machine's own file manager, with it selected where that is possible. */
   reveal(path: string): Promise<void>;
+  /**
+   * A toast on the machine running `serve`. Throws when nothing could show it — no display,
+   * no notifier on PATH on Linux — so the caller can log the failure rather than assume a
+   * person saw something that never appeared.
+   */
+  notify(title: string, body: string): Promise<void>;
 }
 
 // ---------------------------------------------------------------------------
@@ -403,6 +410,7 @@ export interface RunStore {
 }
 
 export * from './llm.js';
+export * from './notify.js';
 export * from './restart.js';
 
 // ---------------------------------------------------------------------------
@@ -442,6 +450,15 @@ export interface PipelineStore {
   getDrain(id: string): Promise<Drain | null>;
   /** Newest first. */
   listDrains(filter: DrainFilter): Promise<Drain[]>;
+  /**
+   * Records that `key` was sent for `runId`, unless it already was. True means this call is
+   * the one that gets to send; false means somebody already did, most often a duplicate
+   * subscriber invocation on the same event.
+   *
+   * Called before any channel is tried, not after — the ordering that makes a duplicate a
+   * false negative (never sent, safe) rather than a false positive (sent twice).
+   */
+  markNotified(runId: string, key: string, at: string): Promise<boolean>;
   close(): void;
 }
 

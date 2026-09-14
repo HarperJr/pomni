@@ -199,10 +199,12 @@ configurable per workflow, not fixed spec-writer/planner/verifier roles)
 - POMN-21, POMN-38, POMN-68 → Chat: every Pomni verb, behind a confirm
   (`POST /api/chats`, a typed action catalogue, confirm/reject per action; see `SERVER.md`
   §4 Chats)
+- POMN-75 → notifications: a desktop toast on the machine running `serve` and a signed
+  webhook (`notify:` in `config.yaml`, `pomni notify test`), on a question, a red gate, and an
+  item landed as a merge request; see `SERVER.md` §7
 
 **Still open**
 
-- POMN-75 — notifications for questions, red gates and landed work
 - POMN-81 — scheduled work: a nightly drain of the ready queue, dependency-update items that
   file themselves
 - a remote `Executor` adapter, and optional auth for a server reachable from another machine —

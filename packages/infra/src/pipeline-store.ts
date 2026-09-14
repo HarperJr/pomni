@@ -18,7 +18,7 @@ import { applyPragmas } from './sqlite.js';
 type SqlValue = string | number | null;
 
 interface SqliteStatement {
-  run(...params: SqlValue[]): unknown;
+  run(...params: SqlValue[]): { changes: number | bigint };
   get(...params: SqlValue[]): unknown;
   all(...params: SqlValue[]): unknown[];
 }
@@ -437,6 +437,13 @@ export class SqlitePipelineStore implements PipelineStore {
     return rows.map(toDrain);
   }
 
+  async markNotified(runId: string, key: string, at: string): Promise<boolean> {
+    const result = this.statement(
+      `INSERT OR IGNORE INTO pipeline_notifications (run_id, key, sent_at) VALUES (?, ?, ?)`,
+    ).run(runId, key, at);
+    return Number(result.changes) > 0;
+  }
+
   close(): void {
     try {
       this.db.close();
@@ -839,6 +846,13 @@ const MIGRATIONS: string[] = [
    CREATE INDEX IF NOT EXISTS idx_pipeline_drains_project ON pipeline_drains(project_id, started_at);
    ALTER TABLE pipeline_runs ADD COLUMN drain_id TEXT;
    CREATE INDEX IF NOT EXISTS idx_pipeline_runs_drain ON pipeline_runs(drain_id);`,
+
+  `CREATE TABLE IF NOT EXISTS pipeline_notifications (
+     run_id  TEXT NOT NULL,
+     key     TEXT NOT NULL,
+     sent_at TEXT NOT NULL,
+     PRIMARY KEY (run_id, key)
+   );`,
 ];
 
 function migrate(db: SqliteDatabase): void {
